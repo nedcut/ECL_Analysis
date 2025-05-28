@@ -3,8 +3,15 @@ import pandas as pd
 import numpy as np
 import cv2
 import os
+import json
+import time
+from typing import Optional, Tuple, List, Union
 import matplotlib.pyplot as plt
 from PyQt5 import QtWidgets, QtGui, QtCore
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Constants ---
 DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif" # More standard font
@@ -34,6 +41,11 @@ AUTO_DETECT_THRESHOLD_L_UNITS = 5.0
 BRIGHTNESS_NOISE_FLOOR_PERCENTILE = 2
 
 MOUSE_RESIZE_HANDLE_SENSITIVITY = 10 # Pixels
+
+# New constants for improvements
+DEFAULT_SETTINGS_FILE = "brightness_analyzer_settings.json"
+MAX_RECENT_FILES = 10
+FRAME_CACHE_SIZE = 100
 
 class VideoAnalyzer(QtWidgets.QWidget):
     """Main application window for video brightness analysis."""
@@ -321,17 +333,13 @@ class VideoAnalyzer(QtWidgets.QWidget):
         # Action Buttons Layout
         action_layout = QtWidgets.QHBoxLayout()
         self.analyze_btn = QtWidgets.QPushButton('Analyze Brightness')
-        self.analyze_btn.setToolTip("Run brightness analysis on the selected frame range and ROIs")
+        self.analyze_btn.setToolTip("Run brightness analysis on the selected frame range and ROIs, and automatically generate plots")
         action_layout.addWidget(self.analyze_btn)
-
-        self.plot_btn = QtWidgets.QPushButton('Plot Results')
-        self.plot_btn.setToolTip("Generate and show plots for the last analysis run")
-        action_layout.addWidget(self.plot_btn)
         self.left_layout.addLayout(action_layout)
 
         # --- Right Layout Widgets ---
         # Brightness Display
-        self.brightness_groupbox = QtWidgets.QGroupBox("Avg. ROI Brightness (Current Frame)")
+        self.brightness_groupbox = QtWidgets.QGroupBox("ROI Brightness: Mean±Median (Current Frame)")
         brightness_groupbox_layout = QtWidgets.QVBoxLayout()
         self.brightness_display_label = QtWidgets.QLabel("N/A")
         self.brightness_display_label.setObjectName("brightnessDisplayLabel")
@@ -385,7 +393,6 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.auto_detect_btn.clicked.connect(self.auto_detect_range)
 
         self.analyze_btn.clicked.connect(self.analyze_video)
-        self.plot_btn.clicked.connect(self.plot_results)
 
         self.rect_list.currentRowChanged.connect(self.select_rectangle_from_list)
         self.add_rect_btn.clicked.connect(self.toggle_add_rectangle_mode)
@@ -397,7 +404,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.image_label.mouseMoveEvent = self.image_mouse_move
         self.image_label.mouseReleaseEvent = self.image_mouse_release
 
-    def _update_widget_states(self, video_loaded=False, analysis_done=False, rois_exist=False):
+    def _update_widget_states(self, video_loaded=False, rois_exist=False):
         """Enable/disable widgets based on application state."""
         self.frame_slider.setEnabled(video_loaded)
         self.frame_spinbox.setEnabled(video_loaded)
@@ -407,7 +414,6 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.set_end_btn.setEnabled(video_loaded)
         self.auto_detect_btn.setEnabled(video_loaded and rois_exist)
         self.analyze_btn.setEnabled(video_loaded and rois_exist)
-        self.plot_btn.setEnabled(analysis_done)
         self.add_rect_btn.setEnabled(video_loaded)
         self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None)
         self.clear_rect_btn.setEnabled(video_loaded and rois_exist)
@@ -555,7 +561,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.results_label.setText("Load a video to begin analysis.")
         self.frame_slider.setRange(0, 0)
         self.frame_spinbox.setRange(0, 0)
-        self._update_widget_states(video_loaded=False, analysis_done=False, rois_exist=False)
+        self._update_widget_states(video_loaded=False, rois_exist=False)
 
 
     def slider_frame_changed(self, value: int):
@@ -662,12 +668,13 @@ class VideoAnalyzer(QtWidgets.QWidget):
                 cv2.rectangle(frame_to_draw_on, pt1_frame, pt2_frame, (0, 255, 255), ROI_THICKNESS_DEFAULT) # Use a distinct color (cyan)
 
     def _update_current_brightness_display(self):
-        """Calculates and displays the average brightness for the current frame's ROIs."""
+        """Calculates and displays the mean and median brightness for the current frame's ROIs."""
         if self.frame is None or not self.rects:
             self.brightness_display_label.setText("N/A")
             return
 
-        brightness_values = []
+        brightness_mean_values = []
+        brightness_median_values = []
         fh, fw = self.frame.shape[:2]
         for pt1, pt2 in self.rects:
             # Ensure ROI coordinates are valid within the frame
@@ -678,14 +685,19 @@ class VideoAnalyzer(QtWidgets.QWidget):
 
             if x2 > x1 and y2 > y1: # Check for valid ROI area
                 roi = self.frame[y1:y2, x1:x2]
-                brightness_values.append(self._compute_brightness(roi))
+                mean_val, median_val = self._compute_brightness_stats(roi)
+                brightness_mean_values.append(mean_val)
+                brightness_median_values.append(median_val)
             else:
-                brightness_values.append(0.0) # Append 0 if ROI is invalid/empty
+                brightness_mean_values.append(0.0) # Append 0 if ROI is invalid/empty
+                brightness_median_values.append(0.0)
 
-        if brightness_values:
-            # Display brightness for each ROI individually
-            display_text = ", ".join([f"R{i+1}: {val:.1f}" for i, val in enumerate(brightness_values)])
-            self.brightness_display_label.setText(display_text)
+        if brightness_mean_values:
+            # Display both mean and median brightness for each ROI
+            display_parts = []
+            for i, (mean_val, median_val) in enumerate(zip(brightness_mean_values, brightness_median_values)):
+                display_parts.append(f"R{i+1}: {mean_val:.1f}±{median_val:.1f}")
+            self.brightness_display_label.setText(", ".join(display_parts))
         else:
             self.brightness_display_label.setText("N/A")
 
@@ -875,7 +887,8 @@ class VideoAnalyzer(QtWidgets.QWidget):
         elif self.moving and self.selected_rect_idx is not None and self.start_point:
             # Move the selected rectangle
             frame_x, frame_y = self._map_label_to_frame_point(pos_in_label)
-            if frame_x is None: return # Mapping failed
+            if frame_x is None or frame_y is None: 
+                return # Mapping failed
 
             pt1, pt2 = self.rects[self.selected_rect_idx]
             orig_w = abs(pt2[0] - pt1[0])
@@ -898,14 +911,16 @@ class VideoAnalyzer(QtWidgets.QWidget):
         elif self.resizing and self.selected_rect_idx is not None and self.start_point:
             # Resize the selected rectangle
             frame_x, frame_y = self._map_label_to_frame_point(pos_in_label)
-            if frame_x is None: return # Mapping failed
+            if frame_x is None or frame_y is None: 
+                return # Mapping failed
 
             # Clamp mouse position to frame boundaries before calculating new rect
             frame_x = max(0, min(frame_x, frame_w - 1))
             frame_y = max(0, min(frame_y, frame_h - 1))
 
             fixed_corner_frame = self._map_label_to_frame_point(self.start_point)
-            if fixed_corner_frame[0] is None: return # Mapping failed
+            if fixed_corner_frame[0] is None or fixed_corner_frame[1] is None: 
+                return # Mapping failed
 
             # New rectangle is defined by the fixed corner and the current mouse pos
             new_x1 = min(fixed_corner_frame[0], frame_x)
@@ -972,7 +987,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
             self._update_current_brightness_display()
             self.show_frame() # Redraw in final state
 
-    def _get_pixmap_rect_in_label(self) -> QtCore.QRect | None:
+    def _get_pixmap_rect_in_label(self) -> Optional[QtCore.QRect]:
         """Calculates the QRect occupied by the scaled pixmap within the image label."""
         if not hasattr(self, 'image_label') or self.frame is None:
             return None
@@ -991,12 +1006,14 @@ class VideoAnalyzer(QtWidgets.QWidget):
 
         return QtCore.QRect(int(offset_x), int(offset_y), pixmap_size.width(), pixmap_size.height())
 
-    def _map_label_to_frame_point(self, label_pos: QtCore.QPoint) -> tuple[int | None, int | None]:
+    def _map_label_to_frame_point(self, label_pos: QtCore.QPoint) -> Tuple[Optional[int], Optional[int]]:
         """Maps a point from image label coordinates to original frame coordinates."""
-        if self.frame is None: return None, None
+        if self.frame is None: 
+            return None, None
 
         pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect: return None, None
+        if not pixmap_rect: 
+            return None, None
 
         # Check if the point is actually within the pixmap area
         if not pixmap_rect.contains(label_pos):
@@ -1011,7 +1028,8 @@ class VideoAnalyzer(QtWidgets.QWidget):
         pixmap_w = pixmap_rect.width()
         pixmap_h = pixmap_rect.height()
 
-        if pixmap_w == 0 or pixmap_h == 0: return None, None # Avoid division by zero
+        if pixmap_w == 0 or pixmap_h == 0: 
+            return None, None  # Avoid division by zero
 
         scale_w = frame_w / pixmap_w
         scale_h = frame_h / pixmap_h
@@ -1026,27 +1044,34 @@ class VideoAnalyzer(QtWidgets.QWidget):
 
         return frame_x, frame_y
 
-    def _map_label_to_frame_rect(self, label_pt1: QtCore.QPoint, label_pt2: QtCore.QPoint) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+    def _map_label_to_frame_rect(self, label_pt1: QtCore.QPoint, label_pt2: QtCore.QPoint) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
          """Maps a rectangle defined by two points in label coordinates to frame coordinates."""
          frame_pt1 = self._map_label_to_frame_point(label_pt1)
          frame_pt2 = self._map_label_to_frame_point(label_pt2)
 
          if frame_pt1[0] is None or frame_pt2[0] is None:
               return None, None
-         return frame_pt1, frame_pt2
+         
+         # Convert the tuples to the expected format
+         pt1 = (frame_pt1[0], frame_pt1[1])
+         pt2 = (frame_pt2[0], frame_pt2[1]) 
+         return pt1, pt2
 
-    def _map_frame_to_label_point(self, frame_pos: tuple[int, int]) -> QtCore.QPoint | None:
+    def _map_frame_to_label_point(self, frame_pos: Tuple[int, int]) -> Optional[QtCore.QPoint]:
         """Maps a point from original frame coordinates back to image label coordinates."""
-        if self.frame is None: return None
+        if self.frame is None: 
+            return None
 
         pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect: return None
+        if not pixmap_rect: 
+            return None
 
         frame_h, frame_w = self.frame.shape[:2]
         pixmap_w = pixmap_rect.width()
         pixmap_h = pixmap_rect.height()
 
-        if frame_w == 0 or frame_h == 0: return None # Avoid division by zero
+        if frame_w == 0 or frame_h == 0: 
+            return None  # Avoid division by zero
 
         # Scale factors from frame size to pixmap size
         scale_w = pixmap_w / frame_w
@@ -1271,8 +1296,8 @@ class VideoAnalyzer(QtWidgets.QWidget):
 
     def analyze_video(self):
         """
-        Performs brightness analysis over the selected frame range for each ROI
-        and saves the results to CSV files.
+        Performs brightness analysis over the selected frame range for each ROI,
+        saves the results to CSV files, and automatically generates and displays plots.
         """
         # --- Preconditions ---
         if not self.video_path:
@@ -1288,7 +1313,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
         # --- Get Save Directory ---
         # Suggest the directory of the video file as a starting point
         initial_dir = os.path.dirname(self.video_path) if self.video_path else ""
-        save_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose Directory to Save Analysis Results", initial_dir)
+        save_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose Directory to Save Analysis Results and Plots", initial_dir)
         if not save_dir:
             self.results_label.setText("Analysis cancelled (no save directory chosen).")
             return
@@ -1310,8 +1335,9 @@ class VideoAnalyzer(QtWidgets.QWidget):
         end = self.end_frame
         num_frames_to_analyze = end - start + 1
 
-        # Data structure: list of lists, one inner list per ROI
-        brightness_data = [[] for _ in self.rects]
+        # Data structure: list of lists for mean and median, one inner list per ROI
+        brightness_mean_data = [[] for _ in self.rects]
+        brightness_median_data = [[] for _ in self.rects]
 
         # --- Progress Dialog ---
         progress = QtWidgets.QProgressDialog("Analyzing video frames...", "Cancel", 0, num_frames_to_analyze, self)
@@ -1337,7 +1363,8 @@ class VideoAnalyzer(QtWidgets.QWidget):
                 # Adjust the number of frames if we stopped early
                 num_frames_to_analyze = frames_processed
                 # Trim data lists to match processed frames
-                brightness_data = [lst[:frames_processed] for lst in brightness_data]
+                brightness_mean_data = [lst[:frames_processed] for lst in brightness_mean_data]
+                brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
                 break
 
             fh, fw = frame.shape[:2]
@@ -1348,9 +1375,12 @@ class VideoAnalyzer(QtWidgets.QWidget):
 
                 if x2 > x1 and y2 > y1:
                     roi = frame[y1:y2, x1:x2]
-                    brightness_data[r_idx].append(self._compute_brightness(roi))
+                    mean_val, median_val = self._compute_brightness_stats(roi)
+                    brightness_mean_data[r_idx].append(mean_val)
+                    brightness_median_data[r_idx].append(median_val)
                 else:
-                    brightness_data[r_idx].append(0.0) # Append 0 for invalid ROI size
+                    brightness_mean_data[r_idx].append(0.0) # Append 0 for invalid ROI size
+                    brightness_median_data[r_idx].append(0.0)
 
             frames_processed += 1
             progress.setValue(frames_processed)
@@ -1371,8 +1401,9 @@ class VideoAnalyzer(QtWidgets.QWidget):
              self._update_current_brightness_display()
              return
 
-        # --- Save Results ---
+        # --- Save Results and Generate Plots ---
         self.out_paths = [] # Clear previous paths
+        plot_paths = []
         base_video_name = os.path.splitext(os.path.basename(self.video_path))[0]
         analysis_name = self.analysis_name_input.text().strip() or "DefaultAnalysis"
         analysis_name = "".join(c for c in analysis_name if c.isalnum() or c in ('_', '-')).rstrip() # Sanitize name
@@ -1380,144 +1411,155 @@ class VideoAnalyzer(QtWidgets.QWidget):
         summary_lines = [f"Analysis Complete ({frames_processed} frames analyzed):"]
         avg_brightness_summary = []
 
-        for r_idx, data in enumerate(brightness_data):
-            if not data: continue # Skip if no data for this ROI
+        # Update progress dialog for plot generation
+        progress = QtWidgets.QProgressDialog("Saving results and generating plots...", "Cancel", 0, len(brightness_mean_data), self)
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setWindowTitle("Saving Results")
+        progress.setValue(0)
+        progress.show()
+        QtWidgets.QApplication.processEvents()
 
-            # Create DataFrame
-            frame_numbers = range(start, start + len(data)) # Use actual frame numbers
-            df = pd.DataFrame({"frame": frame_numbers, "brightness": data})
+        plot_failed = False
+        for r_idx in range(len(brightness_mean_data)):
+            if progress.wasCanceled():
+                break
+                
+            mean_data = brightness_mean_data[r_idx]
+            median_data = brightness_median_data[r_idx]
+            
+            if not mean_data: 
+                progress.setValue(r_idx + 1)
+                continue # Skip if no data for this ROI
 
-            # Calculate average for summary
-            avg_val = np.mean(data)
-            avg_brightness_summary.append(f"ROI {r_idx+1} Avg: {avg_val:.2f}")
+            # Create DataFrame with both mean and median
+            frame_numbers = range(start, start + len(mean_data)) # Use actual frame numbers
+            df = pd.DataFrame({
+                "frame": frame_numbers, 
+                "brightness_mean": mean_data,
+                "brightness_median": median_data
+            })
+
+            # Calculate averages for summary
+            avg_mean = np.mean(mean_data)
+            avg_median = np.mean(median_data)
+            avg_brightness_summary.append(f"ROI {r_idx+1} Mean: {avg_mean:.2f}, Median: {avg_median:.2f}")
 
             # Construct filename and save CSV
-            out_file = f"{analysis_name}_{base_video_name}_ROI{r_idx+1}_frames{start+1}-{start+len(data)}_brightness.csv"
-            out_path = os.path.join(save_dir, out_file)
+            base_filename = f"{analysis_name}_{base_video_name}_ROI{r_idx+1}_frames{start+1}-{start+len(mean_data)}"
+            csv_file = f"{base_filename}_brightness.csv"
+            csv_path = os.path.join(save_dir, csv_file)
+            
             try:
-                df.to_csv(out_path, index=False)
-                self.out_paths.append(out_path)
-                summary_lines.append(f" - Saved: {out_file}")
+                df.to_csv(csv_path, index=False)
+                self.out_paths.append(csv_path)
+                summary_lines.append(f" - Saved CSV: {csv_file}")
+                
+                # Generate plot for this ROI
+                try:
+                    frames = df['frame']
+                    brightness_mean = df['brightness_mean']
+                    brightness_median = df['brightness_median']
+
+                    if not brightness_mean.empty:
+                        # Find peaks and means for both series
+                        idx_peak_mean = brightness_mean.idxmax()
+                        frame_peak_mean, val_peak_mean = frames.iloc[idx_peak_mean], brightness_mean.iloc[idx_peak_mean]
+                        mean_of_means = brightness_mean.mean()
+                        
+                        idx_peak_median = brightness_median.idxmax()
+                        frame_peak_median, val_peak_median = frames.iloc[idx_peak_median], brightness_median.iloc[idx_peak_median]
+                        mean_of_medians = brightness_median.mean()
+
+                        plt.style.use('seaborn-v0_8-darkgrid') # Use a nice plotting style
+                        fig, ax = plt.subplots(figsize=(10, 6)) # Create figure and axes
+
+                        # Plot both mean and median lines
+                        ax.plot(frames, brightness_mean, label='Mean Brightness', color=COLOR_ACCENT, linewidth=1.5)
+                        ax.plot(frames, brightness_median, label='Median Brightness', color=COLOR_SUCCESS, linewidth=1.5)
+                        
+                        # Add horizontal lines for averages
+                        ax.axhline(mean_of_means, color=COLOR_ACCENT, linestyle='--', alpha=0.7, label=f'Avg Mean ({mean_of_means:.1f})')
+                        ax.axhline(mean_of_medians, color=COLOR_SUCCESS, linestyle='--', alpha=0.7, label=f'Avg Median ({mean_of_medians:.1f})')
+                        
+                        # Mark peak points
+                        ax.scatter([frame_peak_mean], [val_peak_mean], color=COLOR_ERROR, zorder=5, s=50, label=f'Peak Mean ({val_peak_mean:.1f})')
+                        ax.scatter([frame_peak_median], [val_peak_median], color=COLOR_WARNING, zorder=5, s=50, label=f'Peak Median ({val_peak_median:.1f})')
+
+                        # Annotate peak points
+                        ax.annotate(f'Peak Mean\nFrame {frame_peak_mean}\n({val_peak_mean:.1f})',
+                                    xy=(frame_peak_mean, val_peak_mean),
+                                    xytext=(10, 15), textcoords='offset points',
+                                    ha='left', va='bottom', color=COLOR_ERROR,
+                                    arrowprops=dict(arrowstyle="->", color=COLOR_ERROR))
+                                    
+                        ax.annotate(f'Peak Median\nFrame {frame_peak_median}\n({val_peak_median:.1f})',
+                                    xy=(frame_peak_median, val_peak_median),
+                                    xytext=(-10, 15), textcoords='offset points',
+                                    ha='right', va='bottom', color=COLOR_WARNING,
+                                    arrowprops=dict(arrowstyle="->", color=COLOR_WARNING))
+
+                        # Customize plot
+                        plot_title = f"{analysis_name} - {base_video_name} - ROI {r_idx+1}"
+                        ax.set_title(plot_title, fontsize=14, fontweight='bold')
+                        ax.set_xlabel('Frame Number', fontsize=12)
+                        ax.set_ylabel('L* Brightness', fontsize=12)
+                        ax.legend(fontsize=10, loc='best')
+                        ax.tick_params(axis='both', which='major', labelsize=10)
+                        ax.grid(True, alpha=0.3)
+                        fig.tight_layout() # Adjust layout
+
+                        # Save plot
+                        plot_filename = f"{base_filename}_plot.png"
+                        plot_save_path = os.path.join(save_dir, plot_filename)
+                        plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
+                        plt.show() # Display the plot
+                        plt.close(fig) # Close the figure to free memory
+                        plot_paths.append(plot_save_path)
+                        summary_lines.append(f" - Saved Plot: {plot_filename}")
+
+                except Exception as e:
+                    plot_failed = True
+                    error_msg = f"Failed to generate plot for ROI {r_idx+1}: {e}"
+                    print(error_msg) # Also print to console
+                    summary_lines.append(f" - FAILED to generate plot for ROI {r_idx+1}")
+
             except Exception as e:
                 error_msg = f"Failed to save CSV for ROI {r_idx+1}:\n{e}"
                 QtWidgets.QMessageBox.critical(self, "Error Saving File", error_msg)
                 summary_lines.append(f" - FAILED to save ROI {r_idx+1} data.")
 
+            progress.setValue(r_idx + 1)
+            QtWidgets.QApplication.processEvents()
+
+        progress.close()
+
         # --- Update UI ---
+        if plot_failed:
+            summary_lines.append("Note: Some plots failed to generate - check console for details")
+            
         self.results_label.setText("\n".join(summary_lines))
         self.brightness_display_label.setText(", ".join(avg_brightness_summary) if avg_brightness_summary else "N/A")
-        self._update_widget_states(video_loaded=True, analysis_done=bool(self.out_paths), rois_exist=bool(self.rects))
-
-
-    def plot_results(self):
-        """
-        Generates and displays plots for the saved analysis results (CSV files).
-        Prompts the user for a directory to save the plot images.
-        """
-        if not hasattr(self, 'out_paths') or not self.out_paths:
-            QtWidgets.QMessageBox.information(self, "Plotting", "No analysis results found to plot. Run analysis first.")
-            return
-
-        # --- Get Save Directory for Plots ---
-        initial_dir = os.path.dirname(self.out_paths[0]) if self.out_paths else ""
-        plot_save_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose Directory to Save Plots", initial_dir)
-        if not plot_save_dir:
-            self.results_label.setText("Plotting cancelled (no save directory chosen).")
-            return
-
-        self.results_label.setText("Generating plots...")
-        QtWidgets.QApplication.processEvents()
-
-        plot_paths = []
-        plot_failed = False
-        for csv_path in self.out_paths:
-            try:
-                df = pd.read_csv(csv_path)
-                if 'frame' not in df.columns or 'brightness' not in df.columns:
-                     print(f"Warning: Skipping plot for {os.path.basename(csv_path)} - missing required columns.")
-                     continue
-
-                frames = df['frame']
-                brightness = df['brightness']
-
-                if brightness.empty:
-                     print(f"Warning: Skipping plot for {os.path.basename(csv_path)} - no brightness data.")
-                     continue
-
-                # Find peak and mean
-                idx_peak = brightness.idxmax()
-                frame_peak, val_peak = frames.iloc[idx_peak], brightness.iloc[idx_peak]
-                mean_brightness = brightness.mean()
-
-                plt.style.use('seaborn-v0_8-darkgrid') # Use a nice plotting style
-                fig, ax = plt.subplots(figsize=(10, 5)) # Create figure and axes
-
-                ax.plot(frames, brightness, label='Avg. Brightness', color=COLOR_ACCENT, linewidth=1.5)
-                ax.axhline(mean_brightness, color=COLOR_WARNING, linestyle='--', label=f'Mean ({mean_brightness:.1f})')
-                ax.scatter([frame_peak], [val_peak], color=COLOR_ERROR, zorder=5, label=f'Peak ({val_peak:.1f})')
-
-                # Annotate peak point
-                ax.annotate(f'Peak\nFrame {frame_peak}\n({val_peak:.1f})',
-                            xy=(frame_peak, val_peak),
-                            xytext=(0, 15), textcoords='offset points',
-                            ha='center', va='bottom', color=COLOR_ERROR,
-                            arrowprops=dict(arrowstyle="->", color=COLOR_ERROR))
-
-                # Customize plot
-                plot_title = os.path.basename(csv_path).replace('_brightness.csv', '')
-                ax.set_title(plot_title, fontsize=14, fontweight='bold')
-                ax.set_xlabel('Frame Number', fontsize=12)
-                ax.set_ylabel('Average L* Brightness', fontsize=12)
-                ax.legend(fontsize=10)
-                ax.tick_params(axis='both', which='major', labelsize=10)
-                fig.tight_layout() # Adjust layout
-
-                # Save plot
-                plot_filename = os.path.basename(csv_path).replace('.csv', '_plot.png')
-                plot_save_path = os.path.join(plot_save_dir, plot_filename)
-                plt.savefig(plot_save_path)
-                plt.close(fig) # Close the figure to free memory
-                plot_paths.append(plot_save_path)
-
-            except Exception as e:
-                plot_failed = True
-                error_msg = f"Failed to generate plot for {os.path.basename(csv_path)}:\n{e}"
-                print(error_msg) # Also print to console
-                QtWidgets.QMessageBox.warning(self, "Plotting Error", error_msg)
-
-        # --- Update UI ---
-        if plot_paths:
-             summary = f"Plots generated and saved to:\n{plot_save_dir}"
-             if plot_failed:
-                  summary += "\n(Some plots failed to generate - check console/messages for details)"
-             self.results_label.setText(summary)
-             # Optionally open the plot directory?
-             # os.startfile(plot_save_dir) # Windows
-             # subprocess.call(['open', plot_save_dir]) # macOS
-        elif plot_failed:
-             self.results_label.setText("Plotting failed. Check console or messages for errors.")
-        else:
-             self.results_label.setText("Plotting finished, but no valid data found to plot.")
+        self._update_widget_states(video_loaded=True, rois_exist=bool(self.rects))
 
 
     # --- Utility Methods ---
 
-    def _compute_brightness(self, roi_bgr: np.ndarray) -> float:
+    def _compute_brightness_stats(self, roi_bgr: np.ndarray) -> Tuple[float, float]:
         """
-        Calculates a perceptually meaningful brightness (L*) for an ROI.
+        Calculates both mean and median brightness (L*) for an ROI.
 
         Converts BGR to CIE LAB color space and uses the L* channel.
-        Discards the darkest pixels (noise floor) before averaging.
+        Discards the darkest pixels (noise floor) before computing statistics.
 
         Args:
             roi_bgr: The region of interest as a NumPy array (BGR format).
 
         Returns:
-            The mean L* value (0-100 range, scaled from 0-255 OpenCV output)
-            or 0.0 if the ROI is invalid or calculation fails.
+            Tuple of (mean_brightness, median_brightness) as L* values (0-100 range)
+            or (0.0, 0.0) if the ROI is invalid or calculation fails.
         """
         if roi_bgr is None or roi_bgr.size == 0:
-            return 0.0
+            return 0.0, 0.0
 
         try:
             lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
@@ -1529,17 +1571,29 @@ class VideoAnalyzer(QtWidgets.QWidget):
             # Keep only pixels with brightness > 10
             mask = l_star > 10
             if not np.any(mask):
-                return 0.0
+                return 0.0, 0.0
 
-            # Return the mean of the remaining pixels
-            return float(np.mean(l_star[mask]))
+            # Calculate both mean and median of the remaining pixels
+            filtered_pixels = l_star[mask]
+            mean_brightness = float(np.mean(filtered_pixels))
+            median_brightness = float(np.median(filtered_pixels))
+            
+            return mean_brightness, median_brightness
 
         except cv2.error as e:
             print(f"OpenCV error during brightness computation: {e}")
-            return 0.0
+            return 0.0, 0.0
         except Exception as e:
             print(f"Error during brightness computation: {e}")
-            return 0.0
+            return 0.0, 0.0
+
+    def _compute_brightness(self, roi_bgr: np.ndarray) -> float:
+        """
+        Legacy method for backward compatibility.
+        Returns only the mean brightness for existing code that expects a single value.
+        """
+        mean_brightness, _ = self._compute_brightness_stats(roi_bgr)
+        return mean_brightness
 
 
 # --- Main Execution ---
