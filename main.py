@@ -5,19 +5,20 @@ import cv2
 import os
 import json
 import time
-from typing import Optional, Tuple, List, Union
+from typing import Optional, Tuple, List, Union, Dict
 import matplotlib.pyplot as plt
 from PyQt5 import QtWidgets, QtGui, QtCore
 import logging
+from collections import deque, OrderedDict
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Constants ---
-DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif" # More standard font
+DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif"
 COLOR_BACKGROUND = "#2d2d2d"
 COLOR_FOREGROUND = "#cccccc"
-COLOR_ACCENT = "#5a9bd5" # A professional blue accent
+COLOR_ACCENT = "#5a9bd5"
 COLOR_ACCENT_HOVER = "#7ab3e0"
 COLOR_SECONDARY = "#404040"
 COLOR_SECONDARY_LIGHT = "#555555"
@@ -25,7 +26,7 @@ COLOR_SUCCESS = "#70ad47"
 COLOR_WARNING = "#ed7d31"
 COLOR_ERROR = "#ff0000"
 COLOR_INFO = "#ffc000"
-COLOR_BRIGHTNESS_LABEL = "#ffeb3b" # Keep the yellow for brightness
+COLOR_BRIGHTNESS_LABEL = "#ffeb3b"
 
 ROI_COLORS = [
     (255, 50, 50), (50, 200, 50), (50, 150, 255), (255, 150, 50),
@@ -40,20 +41,59 @@ AUTO_DETECT_BASELINE_PERCENTILE = 5
 AUTO_DETECT_THRESHOLD_L_UNITS = 5.0
 BRIGHTNESS_NOISE_FLOOR_PERCENTILE = 2
 
-MOUSE_RESIZE_HANDLE_SENSITIVITY = 10 # Pixels
+MOUSE_RESIZE_HANDLE_SENSITIVITY = 10
 
 # New constants for improvements
 DEFAULT_SETTINGS_FILE = "brightness_analyzer_settings.json"
 MAX_RECENT_FILES = 10
 FRAME_CACHE_SIZE = 100
+JUMP_FRAMES = 10  # Number of frames to jump with Page Up/Down
 
-class VideoAnalyzer(QtWidgets.QWidget):
+class FrameCache:
+    """Efficient frame caching system for better performance."""
+    
+    def __init__(self, max_size: int = FRAME_CACHE_SIZE):
+        self.max_size = max_size
+        self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
+    
+    def get(self, frame_index: int) -> Optional[np.ndarray]:
+        """Get frame from cache, moving it to end (most recently used)."""
+        if frame_index in self._cache:
+            # Move to end (most recently used)
+            frame = self._cache.pop(frame_index)
+            self._cache[frame_index] = frame
+            return frame.copy()  # Return copy to prevent modifications
+        return None
+    
+    def put(self, frame_index: int, frame: np.ndarray):
+        """Add frame to cache, removing oldest if necessary."""
+        if frame_index in self._cache:
+            self._cache.pop(frame_index)
+        
+        self._cache[frame_index] = frame.copy()
+        
+        # Remove oldest items if cache is full
+        while len(self._cache) > self.max_size:
+            self._cache.popitem(last=False)
+    
+    def clear(self):
+        """Clear all cached frames."""
+        self._cache.clear()
+    
+    def get_size(self) -> int:
+        """Get current cache size."""
+        return len(self._cache)
+
+class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better menu support
     """Main application window for video brightness analysis."""
+    
     def __init__(self):
         """Initializes the application window and UI elements."""
         super().__init__()
         self._init_vars()
+        self._load_settings()
         self._init_ui()
+        self._create_menus()
 
     def _init_vars(self):
         """Initialize instance variables."""
@@ -62,8 +102,14 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.current_frame_index = 0
         self.total_frames = 0
         self.cap = None
-        self.out_paths = [] # Store paths of saved CSV files
-
+        self.out_paths = []
+        
+        # Frame caching
+        self.frame_cache = FrameCache(FRAME_CACHE_SIZE)
+        
+        # Recent files
+        self.recent_files = []
+        
         # ROI management
         self.rects = []
         self.selected_rect_idx = None
@@ -74,28 +120,278 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.end_point = None
         self.move_offset = None
         self.resize_corner = None
-        self._current_image_size = None # Store the size of the image label for scaling
-
+        self._current_image_size = None
+        
         # Frame range
         self.start_frame = 0
         self.end_frame = None
+        
+        # Analysis state
+        self._analysis_in_progress = False
+        
+        # Settings
+        self.settings = {}
+
+    def _load_settings(self):
+        """Load application settings from file."""
+        try:
+            if os.path.exists(DEFAULT_SETTINGS_FILE):
+                with open(DEFAULT_SETTINGS_FILE, 'r') as f:
+                    self.settings = json.load(f)
+                    self.recent_files = self.settings.get('recent_files', [])
+        except Exception as e:
+            logging.warning(f"Could not load settings: {e}")
+            self.settings = {}
+            self.recent_files = []
+
+    def _save_settings(self):
+        """Save application settings to file."""
+        try:
+            self.settings['recent_files'] = self.recent_files
+            with open(DEFAULT_SETTINGS_FILE, 'w') as f:
+                json.dump(self.settings, f, indent=2)
+        except Exception as e:
+            logging.warning(f"Could not save settings: {e}")
+
+    def _add_recent_file(self, file_path: str):
+        """Add file to recent files list."""
+        if file_path in self.recent_files:
+            self.recent_files.remove(file_path)
+        self.recent_files.insert(0, file_path)
+        self.recent_files = self.recent_files[:MAX_RECENT_FILES]
+        self._update_recent_files_menu()
 
     def _init_ui(self):
         """Set up the main UI layout and widgets."""
-        self.setWindowTitle('Brightness Sorcerer')
-        self.setGeometry(100, 100, 1200, 800) # Initial size and position
+        self.setWindowTitle('Brightness Sorcerer v2.0')
+        self.setGeometry(100, 100, 1400, 900)  # Larger default size
         self.setAcceptDrops(True)
         self._apply_stylesheet()
 
-        self.main_layout = QtWidgets.QHBoxLayout(self)
+        # Create central widget and main layout
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+        self.main_layout = QtWidgets.QHBoxLayout(central_widget)
+        
         self._create_layouts()
         self._create_widgets()
         self._connect_signals()
-        self._update_widget_states() # Set initial enabled/disabled states
+        self._setup_shortcuts()
+        self._update_widget_states()
+
+    def _create_menus(self):
+        """Create application menus."""
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu('&File')
+        
+        open_action = QtWidgets.QAction('&Open Video...', self)
+        open_action.setShortcut('Ctrl+O')
+        open_action.setStatusTip('Open a video file')
+        open_action.triggered.connect(self.open_video_dialog)
+        file_menu.addAction(open_action)
+        
+        file_menu.addSeparator()
+        
+        # Recent files submenu
+        self.recent_files_menu = file_menu.addMenu('Recent Files')
+        self._update_recent_files_menu()
+        
+        file_menu.addSeparator()
+        
+        exit_action = QtWidgets.QAction('E&xit', self)
+        exit_action.setShortcut('Ctrl+Q')
+        exit_action.setStatusTip('Exit the application')
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # Analysis menu
+        analysis_menu = menubar.addMenu('&Analysis')
+        
+        analyze_action = QtWidgets.QAction('&Run Analysis', self)
+        analyze_action.setShortcut('F5')
+        analyze_action.setStatusTip('Run brightness analysis')
+        analyze_action.triggered.connect(self.analyze_video)
+        analysis_menu.addAction(analyze_action)
+        
+        auto_detect_action = QtWidgets.QAction('&Auto-Detect Range', self)
+        auto_detect_action.setShortcut('Ctrl+D')
+        auto_detect_action.setStatusTip('Automatically detect frame range')
+        auto_detect_action.triggered.connect(self.auto_detect_range)
+        analysis_menu.addAction(auto_detect_action)
+        
+        # Help menu
+        help_menu = menubar.addMenu('&Help')
+        
+        shortcuts_action = QtWidgets.QAction('&Keyboard Shortcuts', self)
+        shortcuts_action.triggered.connect(self._show_shortcuts_dialog)
+        help_menu.addAction(shortcuts_action)
+        
+        about_action = QtWidgets.QAction('&About', self)
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
+        
+        # Status bar
+        self.statusBar().showMessage('Ready - Load a video to begin')
+
+    def _update_recent_files_menu(self):
+        """Update the recent files menu."""
+        self.recent_files_menu.clear()
+        
+        if not self.recent_files:
+            no_recent_action = QtWidgets.QAction('No recent files', self)
+            no_recent_action.setEnabled(False)
+            self.recent_files_menu.addAction(no_recent_action)
+            return
+        
+        for file_path in self.recent_files:
+            if os.path.exists(file_path):
+                action = QtWidgets.QAction(os.path.basename(file_path), self)
+                action.setStatusTip(file_path)
+                action.triggered.connect(lambda checked, path=file_path: self._open_recent_file(path))
+                self.recent_files_menu.addAction(action)
+
+    def _open_recent_file(self, file_path: str):
+        """Open a file from the recent files list."""
+        if os.path.exists(file_path):
+            self.video_path = file_path
+            self.load_video()
+        else:
+            QtWidgets.QMessageBox.warning(self, 'File Not Found', 
+                                        f'The file {file_path} no longer exists.')
+            self.recent_files.remove(file_path)
+            self._update_recent_files_menu()
+
+    def _setup_shortcuts(self):
+        """Setup keyboard shortcuts."""
+        # Frame navigation shortcuts
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Space), self, 
+                          lambda: self.step_frames(1))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Backspace), self, 
+                          lambda: self.step_frames(-1))
+        
+        # Jump navigation
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_PageDown), self, 
+                          lambda: self.step_frames(JUMP_FRAMES))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_PageUp), self, 
+                          lambda: self.step_frames(-JUMP_FRAMES))
+        
+        # Go to start/end
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), self, 
+                          lambda: self.frame_slider.setValue(0))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_End), self, 
+                          lambda: self.frame_slider.setValue(self.total_frames - 1))
+        
+        # ROI shortcuts
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Delete), self, 
+                          self.delete_selected_rectangle)
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self, 
+                          self._cancel_current_action)
+
+    def _cancel_current_action(self):
+        """Cancel current drawing/moving/resizing action."""
+        if self.drawing:
+            self.add_rect_btn.setChecked(False)
+            self.toggle_add_rectangle_mode(False)
+        elif self.moving or self.resizing:
+            self.moving = False
+            self.resizing = False
+            self.start_point = None
+            self.end_point = None
+            self.move_offset = None
+            self.resize_corner = None
+            self.image_label.unsetCursor()
+            self.show_frame()
+
+    def _show_shortcuts_dialog(self):
+        """Show keyboard shortcuts dialog."""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('Keyboard Shortcuts')
+        dialog.setModal(True)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        
+        shortcuts_text = """
+<h3>Navigation Shortcuts:</h3>
+<b>Left/Right Arrow:</b> Previous/Next frame<br>
+<b>Space:</b> Next frame<br>
+<b>Backspace:</b> Previous frame<br>
+<b>Page Down/Up:</b> Jump 10 frames<br>
+<b>Home/End:</b> Go to first/last frame<br>
+
+<h3>Analysis Shortcuts:</h3>
+<b>F5:</b> Run analysis<br>
+<b>Ctrl+D:</b> Auto-detect range<br>
+
+<h3>ROI Shortcuts:</h3>
+<b>Delete:</b> Delete selected ROI<br>
+<b>Escape:</b> Cancel current action<br>
+
+<h3>File Shortcuts:</h3>
+<b>Ctrl+O:</b> Open video<br>
+<b>Ctrl+Q:</b> Exit application<br>
+        """
+        
+        label = QtWidgets.QLabel(shortcuts_text)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        
+        close_btn = QtWidgets.QPushButton('Close')
+        close_btn.clicked.connect(dialog.close)
+        layout.addWidget(close_btn)
+        
+        dialog.exec_()
+
+    def _show_about_dialog(self):
+        """Show about dialog."""
+        QtWidgets.QMessageBox.about(self, 'About Brightness Sorcerer',
+            """<h2>Brightness Sorcerer v2.0</h2>
+            <p>Advanced video brightness analysis tool</p>
+            <p>Analyze brightness changes in video regions of interest (ROIs) 
+            with automatic detection and comprehensive plotting.</p>
+            <p><b>Features:</b></p>
+            <ul>
+            <li>Interactive ROI selection and editing</li>
+            <li>Automatic frame range detection</li>
+            <li>Statistical analysis with mean and median</li>
+            <li>High-quality plot generation</li>
+            <li>Frame caching for smooth navigation</li>
+            </ul>""")
 
     def _apply_stylesheet(self):
         """Apply a modern, clean stylesheet to the application."""
         self.setStyleSheet(f"""
+            QMainWindow {{
+                background-color: {COLOR_BACKGROUND};
+                color: {COLOR_FOREGROUND};
+                font-family: {DEFAULT_FONT_FAMILY};
+                font-size: 14px;
+            }}
+            QMenuBar {{
+                background-color: {COLOR_SECONDARY};
+                color: {COLOR_FOREGROUND};
+                border-bottom: 1px solid {COLOR_SECONDARY_LIGHT};
+            }}
+            QMenuBar::item {{
+                background: transparent;
+                padding: 4px 8px;
+            }}
+            QMenuBar::item:selected {{
+                background-color: {COLOR_ACCENT};
+            }}
+            QMenu {{
+                background-color: {COLOR_SECONDARY};
+                color: {COLOR_FOREGROUND};
+                border: 1px solid {COLOR_SECONDARY_LIGHT};
+            }}
+            QMenu::item:selected {{
+                background-color: {COLOR_ACCENT};
+            }}
+            QStatusBar {{
+                background-color: {COLOR_SECONDARY};
+                color: {COLOR_FOREGROUND};
+                border-top: 1px solid {COLOR_SECONDARY_LIGHT};
+            }}
             QWidget {{
                 background-color: {COLOR_BACKGROUND};
                 color: {COLOR_FOREGROUND};
@@ -111,7 +407,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
             }}
             QLabel#imageLabel {{
                 border: 1px solid {COLOR_SECONDARY_LIGHT};
-                background: #1e1e1e; /* Slightly darker for contrast */
+                background: #1e1e1e;
                 border-radius: 6px;
             }}
             QLabel#resultsLabel {{
@@ -132,6 +428,11 @@ class VideoAnalyzer(QtWidgets.QWidget):
                 border-radius: 6px;
                 qproperty-alignment: AlignCenter;
             }}
+            QLabel#statusLabel {{
+                font-size: 12px;
+                color: {COLOR_INFO};
+                padding: 4px;
+            }}
             QGroupBox {{
                 border: 1px solid {COLOR_SECONDARY_LIGHT};
                 border-radius: 6px;
@@ -139,15 +440,15 @@ class VideoAnalyzer(QtWidgets.QWidget):
                 background: {COLOR_SECONDARY};
                 font-weight: bold;
                 font-size: 15px;
-                padding-top: 10px; /* Add padding inside the box */
+                padding-top: 10px;
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
-                subcontrol-position: top left; /* Position title at top left */
+                subcontrol-position: top left;
                 left: 10px;
-                padding: 2px 5px; /* Adjust padding */
+                padding: 2px 5px;
                 color: {COLOR_ACCENT};
-                background-color: {COLOR_BACKGROUND}; /* Match window background */
+                background-color: {COLOR_BACKGROUND};
                 border-radius: 3px;
             }}
             QPushButton {{
@@ -157,7 +458,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
                 border-radius: 4px;
                 padding: 8px 15px;
                 font-size: 14px;
-                min-height: 20px; /* Ensure buttons have a minimum height */
+                min-height: 20px;
             }}
             QPushButton:hover {{
                 background-color: {COLOR_ACCENT};
@@ -172,13 +473,13 @@ class VideoAnalyzer(QtWidgets.QWidget):
                 color: #888888;
                 border: 1px solid {COLOR_SECONDARY};
             }}
-            QPushButton:checked {{ /* Style for checkable buttons like 'Add Rect' */
+            QPushButton:checked {{
                 background-color: {COLOR_ACCENT};
                 color: {COLOR_BACKGROUND};
                 border: 1px solid {COLOR_ACCENT_HOVER};
             }}
             QListWidget {{
-                background: {COLOR_BACKGROUND}; /* Match main background */
+                background: {COLOR_BACKGROUND};
                 border: 1px solid {COLOR_SECONDARY_LIGHT};
                 color: {COLOR_FOREGROUND};
                 font-size: 13px;
@@ -190,7 +491,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
             }}
             QSlider::groove:horizontal {{
                 border: 1px solid {COLOR_SECONDARY};
-                height: 6px; /* Thinner slider */
+                height: 6px;
                 background: {COLOR_SECONDARY};
                 border-radius: 3px;
             }}
@@ -202,7 +503,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
                 border-radius: 8px;
             }}
             QSlider::sub-page:horizontal {{
-                background: {COLOR_SUCCESS}; /* Use success color for progress */
+                background: {COLOR_SUCCESS};
                 border-radius: 3px;
             }}
             QSlider::add-page:horizontal {{
@@ -242,7 +543,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
             QProgressDialog {{
                  font-size: 14px;
             }}
-            QProgressDialog QLabel {{ /* Style label inside progress dialog */
+            QProgressDialog QLabel {{
                  color: {COLOR_FOREGROUND};
             }}
             QProgressBar {{
@@ -261,7 +562,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
         """Create the main horizontal and vertical layouts."""
         self.left_layout = QtWidgets.QVBoxLayout()
         self.right_layout = QtWidgets.QVBoxLayout()
-        self.main_layout.addLayout(self.left_layout, stretch=3) # Give more space to video
+        self.main_layout.addLayout(self.left_layout, stretch=3)
         self.main_layout.addLayout(self.right_layout, stretch=1)
 
     def _create_widgets(self):
@@ -271,8 +572,13 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.title_label.setObjectName("titleLabel")
         self.left_layout.addWidget(self.title_label)
 
+        # File info label
+        self.file_info_label = QtWidgets.QLabel("No video loaded")
+        self.file_info_label.setObjectName("statusLabel")
+        self.left_layout.addWidget(self.file_info_label)
+
         # Open-file button
-        self.open_btn = QtWidgets.QPushButton("Open Video…")    
+        self.open_btn = QtWidgets.QPushButton("Open Video… (Ctrl+O)")    
         self.open_btn.setToolTip("Choose a video file from disk")
         self.left_layout.addWidget(self.open_btn)
 
@@ -280,34 +586,42 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.image_label.setObjectName("imageLabel")
         self.image_label.setAlignment(QtCore.Qt.AlignCenter)
         self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
-        self.image_label.setText("Drag & Drop Video File Here") # Initial text
-        self.left_layout.addWidget(self.image_label, stretch=1) # Give it stretch factor
+        self.image_label.setText("Drag & Drop Video File Here")
+        self.left_layout.addWidget(self.image_label, stretch=1)
 
         # Slider and Frame Label Layout
         slider_frame_layout = QtWidgets.QHBoxLayout()
         self.frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.frame_slider.setToolTip("Drag to navigate frames")
         slider_frame_layout.addWidget(self.frame_slider)
 
         self.frame_label = QtWidgets.QLabel("Frame: 0 / 0")
-        self.frame_label.setMinimumWidth(100) # Adjust width as needed
+        self.frame_label.setMinimumWidth(120)
         slider_frame_layout.addWidget(self.frame_label)
 
         self.frame_spinbox = QtWidgets.QSpinBox()
-        self.frame_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus) # Use +/- symbols
+        self.frame_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
+        self.frame_spinbox.setToolTip("Enter frame number directly")
         slider_frame_layout.addWidget(self.frame_spinbox)
         self.left_layout.addLayout(slider_frame_layout)
 
         # Frame Control Buttons Layout
         frame_control_layout = QtWidgets.QHBoxLayout()
-        self.prev_frame_btn = QtWidgets.QPushButton("<")
-        self.prev_frame_btn.setToolTip("Previous Frame (Left Arrow)")
-        self.prev_frame_btn.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left))
+        self.prev_frame_btn = QtWidgets.QPushButton("◀")
+        self.prev_frame_btn.setToolTip("Previous Frame (Left Arrow, Backspace)")
         frame_control_layout.addWidget(self.prev_frame_btn)
 
-        self.next_frame_btn = QtWidgets.QPushButton(">")
-        self.next_frame_btn.setToolTip("Next Frame (Right Arrow)")
-        self.next_frame_btn.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right))
+        self.next_frame_btn = QtWidgets.QPushButton("▶")
+        self.next_frame_btn.setToolTip("Next Frame (Right Arrow, Space)")
         frame_control_layout.addWidget(self.next_frame_btn)
+
+        self.jump_back_btn = QtWidgets.QPushButton(f"◀◀ {JUMP_FRAMES}")
+        self.jump_back_btn.setToolTip(f"Jump back {JUMP_FRAMES} frames (Page Up)")
+        frame_control_layout.addWidget(self.jump_back_btn)
+
+        self.jump_forward_btn = QtWidgets.QPushButton(f"{JUMP_FRAMES} ▶▶")
+        self.jump_forward_btn.setToolTip(f"Jump forward {JUMP_FRAMES} frames (Page Down)")
+        frame_control_layout.addWidget(self.jump_forward_btn)
 
         self.set_start_btn = QtWidgets.QPushButton("Set Start")
         self.set_start_btn.setToolTip("Set current frame as analysis start")
@@ -317,7 +631,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.set_end_btn.setToolTip("Set current frame as analysis end")
         frame_control_layout.addWidget(self.set_end_btn)
 
-        self.auto_detect_btn = QtWidgets.QPushButton("Auto-Detect")
+        self.auto_detect_btn = QtWidgets.QPushButton("Auto-Detect (Ctrl+D)")
         self.auto_detect_btn.setToolTip("Automatically detect start/end frames based on ROI brightness")
         frame_control_layout.addWidget(self.auto_detect_btn)
         self.left_layout.addLayout(frame_control_layout)
@@ -332,12 +646,21 @@ class VideoAnalyzer(QtWidgets.QWidget):
 
         # Action Buttons Layout
         action_layout = QtWidgets.QHBoxLayout()
-        self.analyze_btn = QtWidgets.QPushButton('Analyze Brightness')
-        self.analyze_btn.setToolTip("Run brightness analysis on the selected frame range and ROIs, and automatically generate plots")
+        self.analyze_btn = QtWidgets.QPushButton('Analyze Brightness (F5)')
+        self.analyze_btn.setToolTip("Run brightness analysis on the selected frame range and ROIs")
         action_layout.addWidget(self.analyze_btn)
         self.left_layout.addLayout(action_layout)
 
         # --- Right Layout Widgets ---
+        # Video info group
+        self.video_info_groupbox = QtWidgets.QGroupBox("Video Information")
+        video_info_layout = QtWidgets.QVBoxLayout()
+        self.video_info_label = QtWidgets.QLabel("No video loaded")
+        self.video_info_label.setWordWrap(True)
+        video_info_layout.addWidget(self.video_info_label)
+        self.video_info_groupbox.setLayout(video_info_layout)
+        self.right_layout.addWidget(self.video_info_groupbox)
+
         # Brightness Display
         self.brightness_groupbox = QtWidgets.QGroupBox("ROI Brightness: Mean±Median (Current Frame)")
         brightness_groupbox_layout = QtWidgets.QVBoxLayout()
@@ -361,7 +684,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
         rect_btn_layout.addWidget(self.add_rect_btn)
 
         self.del_rect_btn = QtWidgets.QPushButton("Delete ROI")
-        self.del_rect_btn.setToolTip("Delete the selected ROI from the list")
+        self.del_rect_btn.setToolTip("Delete the selected ROI from the list (Delete key)")
         rect_btn_layout.addWidget(self.del_rect_btn)
 
         self.clear_rect_btn = QtWidgets.QPushButton("Clear All")
@@ -371,13 +694,18 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.rect_groupbox.setLayout(rect_groupbox_layout)
         self.right_layout.addWidget(self.rect_groupbox)
 
+        # Cache status
+        self.cache_status_label = QtWidgets.QLabel("Cache: 0 frames")
+        self.cache_status_label.setObjectName("statusLabel")
+        self.right_layout.addWidget(self.cache_status_label)
+
         # Results/Status Label
         self.results_label = QtWidgets.QLabel("Load a video to begin analysis.")
         self.results_label.setObjectName("resultsLabel")
         self.results_label.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
         self.results_label.setWordWrap(True)
-        self.results_label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding) # Allow expansion
-        self.right_layout.addWidget(self.results_label, stretch=1) # Give stretch factor
+        self.results_label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self.right_layout.addWidget(self.results_label, stretch=1)
 
     def _connect_signals(self):
         """Connect widget signals to their corresponding slots."""
@@ -388,6 +716,8 @@ class VideoAnalyzer(QtWidgets.QWidget):
 
         self.prev_frame_btn.clicked.connect(lambda: self.step_frames(-1))
         self.next_frame_btn.clicked.connect(lambda: self.step_frames(1))
+        self.jump_back_btn.clicked.connect(lambda: self.step_frames(-JUMP_FRAMES))
+        self.jump_forward_btn.clicked.connect(lambda: self.step_frames(JUMP_FRAMES))
         self.set_start_btn.clicked.connect(self.set_start_frame)
         self.set_end_btn.clicked.connect(self.set_end_frame)
         self.auto_detect_btn.clicked.connect(self.auto_detect_range)
@@ -399,41 +729,72 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.del_rect_btn.clicked.connect(self.delete_selected_rectangle)
         self.clear_rect_btn.clicked.connect(self.clear_all_rectangles)
 
-        # Connect mouse events directly (overriding QWidget methods)
+        # Connect mouse events directly
         self.image_label.mousePressEvent = self.image_mouse_press
         self.image_label.mouseMoveEvent = self.image_mouse_move
         self.image_label.mouseReleaseEvent = self.image_mouse_release
 
     def _update_widget_states(self, video_loaded=False, rois_exist=False):
         """Enable/disable widgets based on application state."""
-        self.frame_slider.setEnabled(video_loaded)
-        self.frame_spinbox.setEnabled(video_loaded)
-        self.prev_frame_btn.setEnabled(video_loaded)
-        self.next_frame_btn.setEnabled(video_loaded)
-        self.set_start_btn.setEnabled(video_loaded)
-        self.set_end_btn.setEnabled(video_loaded)
-        self.auto_detect_btn.setEnabled(video_loaded and rois_exist)
-        self.analyze_btn.setEnabled(video_loaded and rois_exist)
-        self.add_rect_btn.setEnabled(video_loaded)
-        self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None)
-        self.clear_rect_btn.setEnabled(video_loaded and rois_exist)
+        self.frame_slider.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.frame_spinbox.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.prev_frame_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.next_frame_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.jump_back_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.jump_forward_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.set_start_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.set_end_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.auto_detect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        self.analyze_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        self.add_rect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
+        self.clear_rect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+
+    def _update_cache_status(self):
+        """Update cache status display."""
+        cache_size = self.frame_cache.get_size()
+        self.cache_status_label.setText(f"Cache: {cache_size}/{FRAME_CACHE_SIZE} frames")
+
+    def _update_video_info(self):
+        """Update video information display."""
+        if not self.video_path or not self.cap:
+            self.video_info_label.setText("No video loaded")
+            self.file_info_label.setText("No video loaded")
+            return
+        
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        duration_sec = self.total_frames / fps if fps > 0 else 0
+        
+        file_name = os.path.basename(self.video_path)
+        file_size = os.path.getsize(self.video_path) / (1024 * 1024)  # MB
+        
+        info_text = f"""
+<b>File:</b> {file_name}<br>
+<b>Size:</b> {file_size:.1f} MB<br>
+<b>Resolution:</b> {width} × {height}<br>
+<b>Frames:</b> {self.total_frames}<br>
+<b>FPS:</b> {fps:.2f}<br>
+<b>Duration:</b> {duration_sec:.1f}s<br>
+<b>Analysis Range:</b> {self.start_frame + 1}-{(self.end_frame or 0) + 1}
+        """.strip()
+        
+        self.video_info_label.setText(info_text)
+        self.file_info_label.setText(f"Loaded: {file_name}")
 
     # --- Event Handling ---
 
     # File-picker slot
     def open_video_dialog(self):
-        """
-        Present a Finder/Explorer dialog, let the user pick a video file,
-        and load it just as if it had been dragged in.
-        """
-        # Start in the same folder as the last-opened clip if we have one
+        """Present a file dialog to select a video file."""
         initial_dir = os.path.dirname(self.video_path) if self.video_path else ""
 
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Open Video File",
             initial_dir,
-            "Video Files (*.mp4 *.mov *.avi *.mkv *.wmv);;All Files (*)"
+            "Video Files (*.mp4 *.mov *.avi *.mkv *.wmv *.m4v *.flv);;All Files (*)"
         )
         if path:
             self.video_path = path
@@ -463,9 +824,10 @@ class VideoAnalyzer(QtWidgets.QWidget):
             event.ignore()
 
     def closeEvent(self, event: QtGui.QCloseEvent):
-        """Release video capture resources when the window closes."""
+        """Release resources and save settings when the window closes."""
         if self.cap:
             self.cap.release()
+        self._save_settings()
         super().closeEvent(event)
 
     def resizeEvent(self, event: QtGui.QResizeEvent):
@@ -512,14 +874,19 @@ class VideoAnalyzer(QtWidgets.QWidget):
              self._reset_state()
              return
 
+        # Clear cache when loading new video
+        self.frame_cache.clear()
+        
         self.current_frame_index = 0
         self.start_frame = 0
-        self.end_frame = self.total_frames - 1 # Default end frame
+        self.end_frame = self.total_frames - 1
 
         # Load the first frame
         ret, frame = self.cap.read()
         if ret:
             self.frame = frame
+            self.frame_cache.put(0, frame)  # Cache first frame
+            
             # Update UI elements for the loaded video
             self.frame_slider.setRange(0, self.total_frames - 1)
             self.frame_slider.setValue(0)
@@ -527,12 +894,19 @@ class VideoAnalyzer(QtWidgets.QWidget):
             self.frame_spinbox.setValue(0)
             self.update_frame_label()
             self.show_frame()
+            self._update_video_info()
+            self._update_cache_status()
+            
+            # Add to recent files
+            self._add_recent_file(self.video_path)
+            
             self.results_label.setText(f"Loaded: {os.path.basename(self.video_path)}\n"
                                        f"Frames: {self.total_frames}\n"
                                        "Draw ROIs or use Auto-Detect.")
             self._update_widget_states(video_loaded=True, rois_exist=bool(self.rects))
+            self.statusBar().showMessage(f"Loaded: {os.path.basename(self.video_path)}")
 
-            # Attempt auto-detection if ROIs already exist (e.g., loaded state later)
+            # Attempt auto-detection if ROIs already exist
             if self.rects:
                 self.auto_detect_range()
         else:
@@ -553,16 +927,21 @@ class VideoAnalyzer(QtWidgets.QWidget):
         self.start_frame = 0
         self.end_frame = None
         self.out_paths = []
-        self.image_label.setText("Drag & Drop Video File Here") # Reset text
-        self.image_label.setPixmap(QtGui.QPixmap()) # Clear image
+        self.frame_cache.clear()
+        
+        self.image_label.setText("Drag & Drop Video File Here")
+        self.image_label.setPixmap(QtGui.QPixmap())
         self.update_frame_label(reset=True)
         self.update_rect_list()
         self.brightness_display_label.setText("N/A")
         self.results_label.setText("Load a video to begin analysis.")
+        self.file_info_label.setText("No video loaded")
+        self.video_info_label.setText("No video loaded")
         self.frame_slider.setRange(0, 0)
         self.frame_spinbox.setRange(0, 0)
+        self._update_cache_status()
         self._update_widget_states(video_loaded=False, rois_exist=False)
-
+        self.statusBar().showMessage("Ready - Load a video to begin")
 
     def slider_frame_changed(self, value: int):
         """Handles frame changes initiated by the slider."""
@@ -588,27 +967,39 @@ class VideoAnalyzer(QtWidgets.QWidget):
             self.frame_slider.setValue(new_idx) # Let slider signal handle the update
 
     def _seek_to_frame(self, frame_index: int):
-        """Reads and displays the specified frame index."""
+        """Reads and displays the specified frame index with caching."""
         if not self.cap or not self.cap.isOpened():
             return
         if frame_index < 0 or frame_index >= self.total_frames:
-            print(f"Warning: Attempted to seek to invalid frame index {frame_index}")
+            logging.warning(f"Attempted to seek to invalid frame index {frame_index}")
             return
 
+        # Check cache first
+        cached_frame = self.frame_cache.get(frame_index)
+        if cached_frame is not None:
+            self.frame = cached_frame
+            self.current_frame_index = frame_index
+            self.show_frame()
+            self.update_frame_label()
+            self._update_current_brightness_display()
+            return
+
+        # Not in cache, read from video
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ret, frame = self.cap.read()
         if ret:
             self.frame = frame
             self.current_frame_index = frame_index
+            
+            # Cache the frame
+            self.frame_cache.put(frame_index, frame)
+            self._update_cache_status()
+            
             self.show_frame()
             self.update_frame_label()
-            self._update_current_brightness_display() # Update brightness for the new frame
+            self._update_current_brightness_display()
         else:
-            # Error reading frame, maybe log this?
-            print(f"Warning: Failed to read frame at index {frame_index}")
-            # Optionally disable controls or show an error?
-            # For now, just don't update the display
-            pass
+            logging.warning(f"Failed to read frame at index {frame_index}")
 
     def update_frame_label(self, reset=False):
         """Updates the frame counter label (e.g., "Frame: 10 / 100")."""
@@ -1295,10 +1686,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
     # --- Analysis and Plotting ---
 
     def analyze_video(self):
-        """
-        Performs brightness analysis over the selected frame range for each ROI,
-        saves the results to CSV files, and automatically generates and displays plots.
-        """
+        """Performs brightness analysis with enhanced progress tracking and error handling."""
         # --- Preconditions ---
         if not self.video_path:
             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Please load a video file first.")
@@ -1310,103 +1698,129 @@ class VideoAnalyzer(QtWidgets.QWidget):
              QtWidgets.QMessageBox.warning(self, "Analysis Error", "Invalid start/end frame range selected.")
              return
 
+        # Set analysis state
+        self._analysis_in_progress = True
+        self._update_widget_states(video_loaded=True, rois_exist=True)
+        
         # --- Get Save Directory ---
-        # Suggest the directory of the video file as a starting point
         initial_dir = os.path.dirname(self.video_path) if self.video_path else ""
-        save_dir = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose Directory to Save Analysis Results and Plots", initial_dir)
+        save_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Choose Directory to Save Analysis Results and Plots", initial_dir)
         if not save_dir:
             self.results_label.setText("Analysis cancelled (no save directory chosen).")
+            self._analysis_in_progress = False
+            self._update_widget_states(video_loaded=True, rois_exist=True)
             return
 
         # --- Setup ---
         self.results_label.setText("Starting analysis...")
-        self.brightness_display_label.setText("Analyzing...") # Indicate analysis in progress
-        QtWidgets.QApplication.processEvents() # Update UI
-
-        analysis_cap = cv2.VideoCapture(self.video_path)
-        if not analysis_cap.isOpened():
-            QtWidgets.QMessageBox.critical(self, "Error", f"Could not open video file for analysis: {os.path.basename(self.video_path)}")
-            self.results_label.setText("Error opening video for analysis.")
-            self.brightness_display_label.setText("Error")
-            return
-
-        # Frame range for analysis (inclusive)
-        start = self.start_frame
-        end = self.end_frame
-        num_frames_to_analyze = end - start + 1
-
-        # Data structure: list of lists for mean and median, one inner list per ROI
-        brightness_mean_data = [[] for _ in self.rects]
-        brightness_median_data = [[] for _ in self.rects]
-
-        # --- Progress Dialog ---
-        progress = QtWidgets.QProgressDialog("Analyzing video frames...", "Cancel", 0, num_frames_to_analyze, self)
-        progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle("Analyzing Brightness")
-        progress.setValue(0)
-        progress.show()
+        self.brightness_display_label.setText("Analyzing...")
+        self.statusBar().showMessage("Running brightness analysis...")
         QtWidgets.QApplication.processEvents()
 
-        # --- Frame Processing Loop ---
-        analysis_cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-        analysis_cancelled = False
-        frames_processed = 0
+        try:
+            analysis_cap = cv2.VideoCapture(self.video_path)
+            if not analysis_cap.isOpened():
+                raise Exception(f"Could not open video file for analysis: {os.path.basename(self.video_path)}")
 
-        for f_idx in range(start, end + 1):
-            if progress.wasCanceled():
-                analysis_cancelled = True
-                break
+            # Frame range for analysis (inclusive)
+            start = self.start_frame
+            end = self.end_frame
+            num_frames_to_analyze = end - start + 1
 
-            ret, frame = analysis_cap.read()
-            if not ret:
-                print(f"Warning: Could not read frame {f_idx} during analysis. Stopping analysis.")
-                # Adjust the number of frames if we stopped early
-                num_frames_to_analyze = frames_processed
-                # Trim data lists to match processed frames
-                brightness_mean_data = [lst[:frames_processed] for lst in brightness_mean_data]
-                brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
-                break
+            # Data structure: list of lists for mean and median, one inner list per ROI
+            brightness_mean_data = [[] for _ in self.rects]
+            brightness_median_data = [[] for _ in self.rects]
 
-            fh, fw = frame.shape[:2]
-            for r_idx, (pt1, pt2) in enumerate(self.rects):
-                # Ensure ROI coords are valid for this frame
-                x1, y1 = max(0, pt1[0]), max(0, pt1[1])
-                x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
+            # --- Progress Dialog ---
+            progress = QtWidgets.QProgressDialog("Analyzing video frames...", "Cancel", 0, num_frames_to_analyze, self)
+            progress.setWindowModality(QtCore.Qt.WindowModal)
+            progress.setWindowTitle("Analyzing Brightness")
+            progress.setValue(0)
+            progress.show()
+            QtWidgets.QApplication.processEvents()
 
-                if x2 > x1 and y2 > y1:
-                    roi = frame[y1:y2, x1:x2]
-                    mean_val, median_val = self._compute_brightness_stats(roi)
-                    brightness_mean_data[r_idx].append(mean_val)
-                    brightness_median_data[r_idx].append(median_val)
-                else:
-                    brightness_mean_data[r_idx].append(0.0) # Append 0 for invalid ROI size
-                    brightness_median_data[r_idx].append(0.0)
+            # --- Frame Processing Loop ---
+            analysis_cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+            analysis_cancelled = False
+            frames_processed = 0
+            start_time = time.time()
 
-            frames_processed += 1
-            progress.setValue(frames_processed)
-            if frames_processed % 10 == 0: # Keep UI responsive
-                 QtWidgets.QApplication.processEvents()
+            for f_idx in range(start, end + 1):
+                if progress.wasCanceled():
+                    analysis_cancelled = True
+                    break
 
-        analysis_cap.release()
-        progress.close()
+                ret, frame = analysis_cap.read()
+                if not ret:
+                    logging.warning(f"Could not read frame {f_idx} during analysis. Stopping analysis.")
+                    num_frames_to_analyze = frames_processed
+                    brightness_mean_data = [lst[:frames_processed] for lst in brightness_mean_data]
+                    brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
+                    break
 
-        if analysis_cancelled:
-            self.results_label.setText("Analysis cancelled by user.")
-            self._update_current_brightness_display() # Restore brightness display
-            return
+                fh, fw = frame.shape[:2]
+                for r_idx, (pt1, pt2) in enumerate(self.rects):
+                    x1, y1 = max(0, pt1[0]), max(0, pt1[1])
+                    x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
 
-        if frames_processed == 0:
-             QtWidgets.QMessageBox.warning(self, "Analysis", "No frames were processed during analysis.")
-             self.results_label.setText("Analysis completed, but no frames processed.")
-             self._update_current_brightness_display()
-             return
+                    if x2 > x1 and y2 > y1:
+                        roi = frame[y1:y2, x1:x2]
+                        mean_val, median_val = self._compute_brightness_stats(roi)
+                        brightness_mean_data[r_idx].append(mean_val)
+                        brightness_median_data[r_idx].append(median_val)
+                    else:
+                        brightness_mean_data[r_idx].append(0.0)
+                        brightness_median_data[r_idx].append(0.0)
 
-        # --- Save Results and Generate Plots ---
-        self.out_paths = [] # Clear previous paths
+                frames_processed += 1
+                
+                # Update progress with time estimate
+                if frames_processed % 10 == 0:
+                    elapsed_time = time.time() - start_time
+                    if elapsed_time > 0:
+                        fps = frames_processed / elapsed_time
+                        remaining_frames = num_frames_to_analyze - frames_processed
+                        eta_seconds = remaining_frames / fps if fps > 0 else 0
+                        progress.setLabelText(f"Analyzing frame {frames_processed}/{num_frames_to_analyze}\n"
+                                            f"Speed: {fps:.1f} fps, ETA: {eta_seconds:.0f}s")
+                    
+                progress.setValue(frames_processed)
+                QtWidgets.QApplication.processEvents()
+
+            analysis_cap.release()
+            progress.close()
+
+            if analysis_cancelled:
+                self.results_label.setText("Analysis cancelled by user.")
+                self._update_current_brightness_display()
+                return
+
+            if frames_processed == 0:
+                 QtWidgets.QMessageBox.warning(self, "Analysis", "No frames were processed during analysis.")
+                 self.results_label.setText("Analysis completed, but no frames processed.")
+                 self._update_current_brightness_display()
+                 return
+
+            # --- Save Results and Generate Plots ---
+            self._save_analysis_results(brightness_mean_data, brightness_median_data, save_dir, frames_processed)
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Analysis Error", f"An error occurred during analysis:\n{str(e)}")
+            self.results_label.setText(f"Analysis failed: {str(e)}")
+            logging.error(f"Analysis error: {e}")
+        finally:
+            self._analysis_in_progress = False
+            self._update_widget_states(video_loaded=True, rois_exist=True)
+            self.statusBar().showMessage("Analysis complete")
+
+    def _save_analysis_results(self, brightness_mean_data, brightness_median_data, save_dir, frames_processed):
+        """Save analysis results and generate plots."""
+        self.out_paths = []
         plot_paths = []
         base_video_name = os.path.splitext(os.path.basename(self.video_path))[0]
         analysis_name = self.analysis_name_input.text().strip() or "DefaultAnalysis"
-        analysis_name = "".join(c for c in analysis_name if c.isalnum() or c in ('_', '-')).rstrip() # Sanitize name
+        analysis_name = "".join(c for c in analysis_name if c.isalnum() or c in ('_', '-')).rstrip()
 
         summary_lines = [f"Analysis Complete ({frames_processed} frames analyzed):"]
         avg_brightness_summary = []
@@ -1429,10 +1843,10 @@ class VideoAnalyzer(QtWidgets.QWidget):
             
             if not mean_data: 
                 progress.setValue(r_idx + 1)
-                continue # Skip if no data for this ROI
+                continue
 
             # Create DataFrame with both mean and median
-            frame_numbers = range(start, start + len(mean_data)) # Use actual frame numbers
+            frame_numbers = range(self.start_frame, self.start_frame + len(mean_data))
             df = pd.DataFrame({
                 "frame": frame_numbers, 
                 "brightness_mean": mean_data,
@@ -1445,7 +1859,7 @@ class VideoAnalyzer(QtWidgets.QWidget):
             avg_brightness_summary.append(f"ROI {r_idx+1} Mean: {avg_mean:.2f}, Median: {avg_median:.2f}")
 
             # Construct filename and save CSV
-            base_filename = f"{analysis_name}_{base_video_name}_ROI{r_idx+1}_frames{start+1}-{start+len(mean_data)}"
+            base_filename = f"{analysis_name}_{base_video_name}_ROI{r_idx+1}_frames{self.start_frame+1}-{self.start_frame+len(mean_data)}"
             csv_file = f"{base_filename}_brightness.csv"
             csv_path = os.path.join(save_dir, csv_file)
             
@@ -1454,79 +1868,15 @@ class VideoAnalyzer(QtWidgets.QWidget):
                 self.out_paths.append(csv_path)
                 summary_lines.append(f" - Saved CSV: {csv_file}")
                 
-                # Generate plot for this ROI
-                try:
-                    frames = df['frame']
-                    brightness_mean = df['brightness_mean']
-                    brightness_median = df['brightness_median']
-
-                    if not brightness_mean.empty:
-                        # Find peaks and means for both series
-                        idx_peak_mean = brightness_mean.idxmax()
-                        frame_peak_mean, val_peak_mean = frames.iloc[idx_peak_mean], brightness_mean.iloc[idx_peak_mean]
-                        mean_of_means = brightness_mean.mean()
-                        
-                        idx_peak_median = brightness_median.idxmax()
-                        frame_peak_median, val_peak_median = frames.iloc[idx_peak_median], brightness_median.iloc[idx_peak_median]
-                        mean_of_medians = brightness_median.mean()
-
-                        plt.style.use('seaborn-v0_8-darkgrid') # Use a nice plotting style
-                        fig, ax = plt.subplots(figsize=(10, 6)) # Create figure and axes
-
-                        # Plot both mean and median lines
-                        ax.plot(frames, brightness_mean, label='Mean Brightness', color=COLOR_ACCENT, linewidth=1.5)
-                        ax.plot(frames, brightness_median, label='Median Brightness', color=COLOR_SUCCESS, linewidth=1.5)
-                        
-                        # Add horizontal lines for averages
-                        ax.axhline(mean_of_means, color=COLOR_ACCENT, linestyle='--', alpha=0.7, label=f'Avg Mean ({mean_of_means:.1f})')
-                        ax.axhline(mean_of_medians, color=COLOR_SUCCESS, linestyle='--', alpha=0.7, label=f'Avg Median ({mean_of_medians:.1f})')
-                        
-                        # Mark peak points
-                        ax.scatter([frame_peak_mean], [val_peak_mean], color=COLOR_ERROR, zorder=5, s=50, label=f'Peak Mean ({val_peak_mean:.1f})')
-                        ax.scatter([frame_peak_median], [val_peak_median], color=COLOR_WARNING, zorder=5, s=50, label=f'Peak Median ({val_peak_median:.1f})')
-
-                        # Annotate peak points
-                        ax.annotate(f'Peak Mean\nFrame {frame_peak_mean}\n({val_peak_mean:.1f})',
-                                    xy=(frame_peak_mean, val_peak_mean),
-                                    xytext=(10, 15), textcoords='offset points',
-                                    ha='left', va='bottom', color=COLOR_ERROR,
-                                    arrowprops=dict(arrowstyle="->", color=COLOR_ERROR))
-                                    
-                        ax.annotate(f'Peak Median\nFrame {frame_peak_median}\n({val_peak_median:.1f})',
-                                    xy=(frame_peak_median, val_peak_median),
-                                    xytext=(-10, 15), textcoords='offset points',
-                                    ha='right', va='bottom', color=COLOR_WARNING,
-                                    arrowprops=dict(arrowstyle="->", color=COLOR_WARNING))
-
-                        # Customize plot
-                        plot_title = f"{analysis_name} - {base_video_name} - ROI {r_idx+1}"
-                        ax.set_title(plot_title, fontsize=14, fontweight='bold')
-                        ax.set_xlabel('Frame Number', fontsize=12)
-                        ax.set_ylabel('L* Brightness', fontsize=12)
-                        ax.legend(fontsize=10, loc='best')
-                        ax.tick_params(axis='both', which='major', labelsize=10)
-                        ax.grid(True, alpha=0.3)
-                        fig.tight_layout() # Adjust layout
-
-                        # Save plot
-                        plot_filename = f"{base_filename}_plot.png"
-                        plot_save_path = os.path.join(save_dir, plot_filename)
-                        plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
-                        plt.show() # Display the plot
-                        plt.close(fig) # Close the figure to free memory
-                        plot_paths.append(plot_save_path)
-                        summary_lines.append(f" - Saved Plot: {plot_filename}")
-
-                except Exception as e:
-                    plot_failed = True
-                    error_msg = f"Failed to generate plot for ROI {r_idx+1}: {e}"
-                    print(error_msg) # Also print to console
-                    summary_lines.append(f" - FAILED to generate plot for ROI {r_idx+1}")
+                # Generate enhanced plot for this ROI
+                self._generate_enhanced_plot(df, base_filename, save_dir, r_idx, analysis_name, base_video_name)
+                summary_lines.append(f" - Saved Plot: {base_filename}_plot.png")
 
             except Exception as e:
-                error_msg = f"Failed to save CSV for ROI {r_idx+1}:\n{e}"
-                QtWidgets.QMessageBox.critical(self, "Error Saving File", error_msg)
-                summary_lines.append(f" - FAILED to save ROI {r_idx+1} data.")
+                plot_failed = True
+                error_msg = f"Failed to save/plot ROI {r_idx+1}: {e}"
+                logging.error(error_msg)
+                summary_lines.append(f" - FAILED: ROI {r_idx+1}")
 
             progress.setValue(r_idx + 1)
             QtWidgets.QApplication.processEvents()
@@ -1539,8 +1889,94 @@ class VideoAnalyzer(QtWidgets.QWidget):
             
         self.results_label.setText("\n".join(summary_lines))
         self.brightness_display_label.setText(", ".join(avg_brightness_summary) if avg_brightness_summary else "N/A")
-        self._update_widget_states(video_loaded=True, rois_exist=bool(self.rects))
 
+    def _generate_enhanced_plot(self, df, base_filename, save_dir, r_idx, analysis_name, base_video_name):
+        """Generate enhanced plots with better styling and information."""
+        try:
+            frames = df['frame']
+            brightness_mean = df['brightness_mean']
+            brightness_median = df['brightness_median']
+
+            if brightness_mean.empty:
+                return
+
+            # Statistics
+            idx_peak_mean = brightness_mean.idxmax()
+            frame_peak_mean, val_peak_mean = frames.iloc[idx_peak_mean], brightness_mean.iloc[idx_peak_mean]
+            mean_of_means = brightness_mean.mean()
+            std_of_means = brightness_mean.std()
+            
+            idx_peak_median = brightness_median.idxmax()
+            frame_peak_median, val_peak_median = frames.iloc[idx_peak_median], brightness_median.iloc[idx_peak_median]
+            mean_of_medians = brightness_median.mean()
+            std_of_medians = brightness_median.std()
+
+            # Create enhanced plot
+            plt.style.use('seaborn-v0_8-darkgrid')
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+
+            # Main brightness plot
+            ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
+            ax1.plot(frames, brightness_median, label='Median Brightness', color='#70ad47', linewidth=2, alpha=0.8)
+            
+            # Add confidence bands (mean ± std)
+            ax1.fill_between(frames, brightness_mean - std_of_means, brightness_mean + std_of_means, 
+                           alpha=0.2, color='#5a9bd5', label=f'Mean ±1σ ({std_of_means:.1f})')
+            ax1.fill_between(frames, brightness_median - std_of_medians, brightness_median + std_of_medians, 
+                           alpha=0.2, color='#70ad47', label=f'Median ±1σ ({std_of_medians:.1f})')
+            
+            # Add horizontal lines for averages
+            ax1.axhline(mean_of_means, color='#5a9bd5', linestyle='--', alpha=0.7, 
+                       label=f'Avg Mean ({mean_of_means:.1f})')
+            ax1.axhline(mean_of_medians, color='#70ad47', linestyle='--', alpha=0.7, 
+                       label=f'Avg Median ({mean_of_medians:.1f})')
+            
+            # Mark peak points
+            ax1.scatter([frame_peak_mean], [val_peak_mean], color='#ff0000', zorder=5, s=100, 
+                       marker='^', label=f'Peak Mean ({val_peak_mean:.1f})')
+            ax1.scatter([frame_peak_median], [val_peak_median], color='#ed7d31', zorder=5, s=100, 
+                       marker='v', label=f'Peak Median ({val_peak_median:.1f})')
+
+            ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
+            ax1.set_ylabel('L* Brightness', fontsize=12)
+            ax1.legend(fontsize=10, loc='best')
+            ax1.grid(True, alpha=0.3)
+
+            # Difference plot (Mean - Median)
+            difference = brightness_mean - brightness_median
+            ax2.plot(frames, difference, color='#ed7d31', linewidth=1.5, label='Mean - Median')
+            ax2.axhline(0, color='black', linestyle='-', alpha=0.5, linewidth=1)
+            ax2.fill_between(frames, 0, difference, alpha=0.3, color='#ed7d31')
+            
+            ax2.set_title('Difference Between Mean and Median Brightness', fontsize=14)
+            ax2.set_xlabel('Frame Number', fontsize=12)
+            ax2.set_ylabel('Brightness Difference', fontsize=12)
+            ax2.legend(fontsize=10)
+            ax2.grid(True, alpha=0.3)
+
+            # Add statistics text box
+            stats_text = f"""Statistics:
+Mean: {mean_of_means:.2f} ± {std_of_means:.2f}
+Median: {mean_of_medians:.2f} ± {std_of_medians:.2f}
+Peak Mean: {val_peak_mean:.2f} @ Frame {frame_peak_mean}
+Peak Median: {val_peak_median:.2f} @ Frame {frame_peak_median}
+Frames Analyzed: {len(frames)}"""
+            
+            ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+            plt.tight_layout()
+
+            # Save plot
+            plot_filename = f"{base_filename}_plot.png"
+            plot_save_path = os.path.join(save_dir, plot_filename)
+            plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
+            plt.show()
+            plt.close(fig)
+
+        except Exception as e:
+            logging.error(f"Failed to generate plot for ROI {r_idx+1}: {e}")
+            raise
 
     # --- Utility Methods ---
 
@@ -1594,17 +2030,11 @@ class VideoAnalyzer(QtWidgets.QWidget):
         """
         mean_brightness, _ = self._compute_brightness_stats(roi_bgr)
         return mean_brightness
-
-
-# --- Main Execution ---
-if __name__ == '__main__':
-    # Ensure high DPI scaling is handled correctly
-    if hasattr(QtCore.Qt, 'AA_EnableHighDpiScaling'):
-        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-    if hasattr(QtCore.Qt, 'AA_UseHighDpiPixmaps'):
-        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-
+    
+if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    analyzer_window = VideoAnalyzer()
-    analyzer_window.show()
+
+    window = VideoAnalyzer()
+    window.show()
+
     sys.exit(app.exec_())
