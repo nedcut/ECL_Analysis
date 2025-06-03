@@ -39,10 +39,10 @@ Advanced video brightness analysis tool for analyzing brightness changes in vide
 ```bash
 # Clone the repository
 git clone [repository-url]
-cd ECL/ECL_Analysis
+cd ECL_Analysis
 
 # Install dependencies
-pip install PyQt5 opencv-python numpy pandas matplotlib
+pip install -r requirements.txt
 
 # Run the application
 python main.py
@@ -135,36 +135,3 @@ Settings are automatically saved to `brightness_analyzer_settings.json`:
 - Use smaller ROIs for faster analysis
 - Close unnecessary applications during long analyses
 - Consider reducing video resolution for very large files
-
-## Development
-
-### Code Structure
-- `main.py`: Main application with UI and analysis logic
-- `FrameCache`: Efficient frame caching system
-- `VideoAnalyzer`: Main Qt application class
-
-### Contributing
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with appropriate tests
-4. Submit a pull request
-
-## License
-
-[Add your license information here]
-
-## Version History
-
-### v2.0 (Current)
-- Complete UI overhaul with professional styling
-- Added frame caching for smooth navigation
-- Enhanced keyboard shortcuts and menu system
-- Dual-statistic analysis (mean + median)
-- Improved plotting with statistical overlays
-- Recent files management
-- Better error handling and progress tracking
-
-### v1.0
-- Basic video analysis functionality
-- Simple ROI management
-- CSV export capabilities
