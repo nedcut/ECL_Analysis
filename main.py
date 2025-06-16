@@ -12,7 +12,7 @@ import logging
 from collections import deque, OrderedDict
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Constants ---
 DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif"
@@ -38,8 +38,9 @@ ROI_LABEL_FONT_SCALE = 0.8
 ROI_LABEL_THICKNESS = 2
 
 AUTO_DETECT_BASELINE_PERCENTILE = 5
-AUTO_DETECT_THRESHOLD_L_UNITS = 5.0
+LEGACY_AUTO_DETECT_THRESHOLD_L_UNITS = 5.0 # Deprecated: Threshold is now set manually or from background ROI
 BRIGHTNESS_NOISE_FLOOR_PERCENTILE = 2
+DEFAULT_MANUAL_THRESHOLD = 5.0           # ← NEW
 
 MOUSE_RESIZE_HANDLE_SENSITIVITY = 10
 
@@ -131,6 +132,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Settings
         self.settings = {}
+        
+        # Threshold / background
+        self.manual_threshold = DEFAULT_MANUAL_THRESHOLD
+        self.background_roi_idx = None       # index into self.rects
 
     def _load_settings(self):
         """Load application settings from file."""
@@ -670,6 +675,35 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.brightness_groupbox.setLayout(brightness_groupbox_layout)
         self.right_layout.addWidget(self.brightness_groupbox)
 
+        # -- Threshold groupbox
+        self.threshold_groupbox = QtWidgets.QGroupBox("Threshold Settings")
+        th_layout = QtWidgets.QVBoxLayout()
+        
+        # Manual threshold controls
+        manual_layout = QtWidgets.QHBoxLayout()
+        manual_layout.addWidget(QtWidgets.QLabel("Manual ΔL*:"))
+        self.threshold_spin = QtWidgets.QDoubleSpinBox()
+        self.threshold_spin.setDecimals(1)
+        self.threshold_spin.setRange(0.0, 100.0)
+        self.threshold_spin.setSingleStep(0.5)
+        self.threshold_spin.setValue(self.manual_threshold)
+        manual_layout.addWidget(self.threshold_spin)
+        th_layout.addLayout(manual_layout)
+        
+        # Background ROI controls
+        bg_layout = QtWidgets.QHBoxLayout()
+        self.set_bg_btn = QtWidgets.QPushButton("Set Selected ROI as Background")
+        bg_layout.addWidget(self.set_bg_btn)
+        th_layout.addLayout(bg_layout)
+        
+        # Current threshold display
+        self.threshold_display_label = QtWidgets.QLabel("Active Threshold: Manual (5.0 L*)")
+        self.threshold_display_label.setStyleSheet("color: #ffc000; font-weight: bold; padding: 4px;")
+        th_layout.addWidget(self.threshold_display_label)
+        
+        self.threshold_groupbox.setLayout(th_layout)
+        self.right_layout.addWidget(self.threshold_groupbox)
+
         # Rectangle Controls
         self.rect_groupbox = QtWidgets.QGroupBox("Regions of Interest (ROI)")
         rect_groupbox_layout = QtWidgets.QVBoxLayout()
@@ -734,6 +768,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.image_label.mouseMoveEvent = self.image_mouse_move
         self.image_label.mouseReleaseEvent = self.image_mouse_release
 
+        self.threshold_spin.valueChanged.connect(self._on_threshold_changed)
+        self.set_bg_btn.clicked.connect(self._set_background_roi)
+
     def _update_widget_states(self, video_loaded=False, rois_exist=False):
         """Enable/disable widgets based on application state."""
         self.frame_slider.setEnabled(video_loaded and not self._analysis_in_progress)
@@ -749,6 +786,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.add_rect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.clear_rect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        self.set_bg_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        self.threshold_spin.setEnabled(not self._analysis_in_progress)
 
     def _update_cache_status(self):
         """Update cache status display."""
@@ -886,6 +925,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if ret:
             self.frame = frame
             self.frame_cache.put(0, frame)  # Cache first frame
+
+            # Ensure the pixmap scales to the label’s current size the first time we draw it
+            self._current_image_size = self.image_label.size()
             
             # Update UI elements for the loaded video
             self.frame_slider.setRange(0, self.total_frames - 1)
@@ -896,6 +938,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.show_frame()
             self._update_video_info()
             self._update_cache_status()
+            self._update_threshold_display()
             
             # Add to recent files
             self._add_recent_file(self.video_path)
@@ -982,6 +1025,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.show_frame()
             self.update_frame_label()
             self._update_current_brightness_display()
+            self._update_threshold_display()
             return
 
         # Not in cache, read from video
@@ -998,6 +1042,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.show_frame()
             self.update_frame_label()
             self._update_current_brightness_display()
+            self._update_threshold_display()
         else:
             logging.warning(f"Failed to read frame at index {frame_index}")
 
@@ -1067,7 +1112,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         brightness_mean_values = []
         brightness_median_values = []
         fh, fw = self.frame.shape[:2]
-        for pt1, pt2 in self.rects:
+        for idx, (pt1, pt2) in enumerate(self.rects):
+            # Skip background ROI from measurements
+            if idx == self.background_roi_idx:
+                continue
+                
             # Ensure ROI coordinates are valid within the frame
             x1 = max(0, min(pt1[0], fw - 1))
             y1 = max(0, min(pt1[1], fh - 1))
@@ -1077,17 +1126,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if x2 > x1 and y2 > y1: # Check for valid ROI area
                 roi = self.frame[y1:y2, x1:x2]
                 mean_val, median_val = self._compute_brightness_stats(roi)
-                brightness_mean_values.append(mean_val)
-                brightness_median_values.append(median_val)
+                brightness_mean_values.append((idx, mean_val, median_val))
             else:
-                brightness_mean_values.append(0.0) # Append 0 if ROI is invalid/empty
-                brightness_median_values.append(0.0)
+                brightness_mean_values.append((idx, 0.0, 0.0)) # Append 0 if ROI is invalid/empty
 
         if brightness_mean_values:
             # Display both mean and median brightness for each ROI
             display_parts = []
-            for i, (mean_val, median_val) in enumerate(zip(brightness_mean_values, brightness_median_values)):
-                display_parts.append(f"R{i+1}: {mean_val:.1f}±{median_val:.1f}")
+            for idx, mean_val, median_val in brightness_mean_values:
+                display_parts.append(f"R{idx+1}: {mean_val:.1f}±{median_val:.1f}")
             self.brightness_display_label.setText(", ".join(display_parts))
         else:
             self.brightness_display_label.setText("N/A")
@@ -1106,7 +1153,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Ensure coordinates are ordered correctly for display
             disp_x1, disp_y1 = min(x1, x2), min(y1, y2)
             disp_x2, disp_y2 = max(x1, x2), max(y1, y2)
-            self.rect_list.addItem(f"ROI {idx+1}: ({disp_x1},{disp_y1}) - ({disp_x2},{disp_y2})")
+            prefix = "* " if idx == self.background_roi_idx else ""
+            self.rect_list.addItem(f"{prefix}ROI {idx+1}: ({disp_x1},{disp_y1})-({disp_x2},{disp_y2})")
 
         # Restore selection if possible
         if 0 <= current_row < len(self.rects):
@@ -1119,6 +1167,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         self.rect_list.blockSignals(False)
         self._update_widget_states(video_loaded=bool(self.cap), rois_exist=bool(self.rects))
+        self._update_threshold_display()
 
 
     def toggle_add_rectangle_mode(self, checked: bool):
@@ -1151,6 +1200,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Deletes the currently selected ROI."""
         if self.selected_rect_idx is not None and 0 <= self.selected_rect_idx < len(self.rects):
             del self.rects[self.selected_rect_idx]
+            
+            # Handle background ROI index adjustment
+            if self.background_roi_idx == self.selected_rect_idx:
+                self.background_roi_idx = None
+            elif self.background_roi_idx is not None and self.selected_rect_idx < self.background_roi_idx:
+                self.background_roi_idx -= 1
+            
             # Adjust selection if the deleted item wasn't the last one
             if self.selected_rect_idx >= len(self.rects) and len(self.rects) > 0:
                  self.selected_rect_idx = len(self.rects) - 1
@@ -1170,8 +1226,75 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if reply == QtWidgets.QMessageBox.Yes:
             self.rects.clear()
             self.selected_rect_idx = None
+            self.background_roi_idx = None
             self.update_rect_list()
             self.show_frame()
+
+    def _set_background_roi(self):
+        """Mark current ROI as background reference for auto-detect."""
+        if self.selected_rect_idx is None:
+            QtWidgets.QMessageBox.information(self, "Background ROI",
+                                              "Select an ROI first.")
+            return
+        
+        self.background_roi_idx = self.selected_rect_idx
+        
+        # Calculate background threshold for display
+        if self.frame is not None:
+            threshold_value = self._calculate_background_threshold()
+            if threshold_value is not None:
+                self.results_label.setText(f"Background ROI set to ROI {self.selected_rect_idx + 1}\n"
+                                         f"Current background threshold: {threshold_value:.1f} L*")
+            else:
+                self.results_label.setText(f"Background ROI set to ROI {self.selected_rect_idx + 1}\n"
+                                         f"(Threshold will be calculated during full video scan)")
+        else:
+            self.results_label.setText(f"Background ROI set to ROI {self.selected_rect_idx + 1}")
+        
+        self.update_rect_list()
+
+    def _calculate_background_threshold(self) -> Optional[float]:
+        """Calculate the current background threshold based on background ROI or manual setting."""
+        if self.background_roi_idx is not None and self.frame is not None:
+            # Calculate threshold from current frame's background ROI
+            if 0 <= self.background_roi_idx < len(self.rects):
+                pt1, pt2 = self.rects[self.background_roi_idx]
+                fh, fw = self.frame.shape[:2]
+                
+                # Ensure ROI coordinates are valid within the frame
+                x1 = max(0, min(pt1[0], fw - 1))
+                y1 = max(0, min(pt1[1], fh - 1))
+                x2 = max(0, min(pt2[0], fw - 1))
+                y2 = max(0, min(pt2[1], fh - 1))
+                
+                if x2 > x1 and y2 > y1:
+                    roi = self.frame[y1:y2, x1:x2]
+                    mean_brightness, _ = self._compute_brightness_stats(roi)
+                    return mean_brightness
+        
+        # If no background ROI or calculation failed, return manual threshold
+        return None
+
+    def _update_threshold_display(self):
+        """Update the threshold display label with current active threshold."""
+        if self.background_roi_idx is not None:
+            # Background ROI mode
+            if self.frame is not None:
+                threshold_value = self._calculate_background_threshold()
+                if threshold_value is not None:
+                    self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} ({threshold_value:.1f} L*)")
+                else:
+                    self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} (calculating...)")
+            else:
+                self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} (no frame)")
+        else:
+            # Manual threshold mode
+            self.threshold_display_label.setText(f"Active Threshold: Manual ({self.manual_threshold:.1f} L*)")
+
+    def _on_threshold_changed(self, value: float):
+        """Handle changes to the manual threshold spinbox."""
+        self.manual_threshold = value
+        self._update_threshold_display()
 
     # --- Mouse Interaction on Image Label ---
 
@@ -1556,6 +1679,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if self.end_frame is not None and self.end_frame < self.start_frame:
                 self.end_frame = self.start_frame
                 self.results_label.setText(f"Start frame set to {self.start_frame + 1}. End frame adjusted.")
+        self._update_threshold_display() # Update threshold display after setting frames
 
     def set_end_frame(self):
         """Sets the current frame as the end frame for analysis."""
@@ -1566,6 +1690,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if self.start_frame > self.end_frame:
                 self.start_frame = self.end_frame
                 self.results_label.setText(f"End frame set to {self.end_frame + 1}. Start frame adjusted.")
+        self._update_threshold_display() # Update threshold display after setting frames
 
     def auto_detect_range(self):
         """
@@ -1590,11 +1715,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
              QtWidgets.QMessageBox.warning(self, "Auto-Detect", "Video appears to have no frames for scanning.")
              scan_cap.release()
              return
-
-        brightness_per_frame = np.zeros(total, dtype=np.float32)
-
-        # Progress Dialog
-        progress = QtWidgets.QProgressDialog("Scanning video for brightness changes...", "Cancel", 0, total, self)
+        
+        brightness_per_frame = np.zeros(total)
+        background_brightness_per_frame = np.zeros(total) if self.background_roi_idx is not None else None
+        
+        # --- Progress Dialog ---
+        progress = QtWidgets.QProgressDialog("Scanning video for auto-detection...", "Cancel", 0, total, self)
         progress.setWindowModality(QtCore.Qt.WindowModal)
         progress.setWindowTitle("Auto-Detecting Range")
         progress.setValue(0)
@@ -1611,21 +1737,29 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if not ret:
                 total = idx # Adjust total if read failed early
                 brightness_per_frame = brightness_per_frame[:total] # Trim array
-                print(f"Warning: Auto-detect scan stopped early at frame {idx} due to read error.")
+                if background_brightness_per_frame is not None:
+                    background_brightness_per_frame = background_brightness_per_frame[:total]
+                logging.warning(f"Auto-detect scan stopped early at frame {idx} due to read error.")
                 break
 
-            # Calculate average brightness across *all* defined ROIs for this frame
-            current_frame_roi_brightness = []
+            # Calculate average brightness across ROIs for this frame
+            current_frame_measurement_roi_brightness = []
             fh, fw = frame.shape[:2]
-            for pt1, pt2 in self.rects:
+            for roi_idx, (pt1, pt2) in enumerate(self.rects):
                 x1, y1 = max(0, pt1[0]), max(0, pt1[1])
                 x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
                 if x2 > x1 and y2 > y1:
                     roi = frame[y1:y2, x1:x2]
-                    current_frame_roi_brightness.append(self._compute_brightness(roi))
+                    brightness = self._compute_brightness(roi)
+                    
+                    if roi_idx == self.background_roi_idx:
+                        if background_brightness_per_frame is not None:
+                            background_brightness_per_frame[idx] = brightness
+                    else:
+                        current_frame_measurement_roi_brightness.append(brightness)
 
-            # Store the mean brightness of all ROIs for the current frame
-            brightness_per_frame[idx] = np.mean(current_frame_roi_brightness) if current_frame_roi_brightness else 0.0
+            # Store the mean brightness of all measurement ROIs for the current frame
+            brightness_per_frame[idx] = np.mean(current_frame_measurement_roi_brightness) if current_frame_measurement_roi_brightness else 0.0
 
             progress.setValue(idx + 1)
             if idx % 10 == 0: # Update UI periodically to keep it responsive
@@ -1638,16 +1772,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.results_label.setText("Auto-detect scan cancelled.")
             return
 
-        if brightness_per_frame.size == 0:
+        if brightness_per_frame.size == 0 and (background_brightness_per_frame is None or background_brightness_per_frame.size == 0):
             QtWidgets.QMessageBox.warning(self, "Auto-Detect", "Scan completed, but no brightness data was gathered.")
             return
 
         # --- Analyze Brightness Data ---
         try:
-            # Calculate baseline (e.g., 5th percentile)
-            baseline = np.percentile(brightness_per_frame, AUTO_DETECT_BASELINE_PERCENTILE)
-            # Set threshold slightly above baseline
-            threshold = baseline + AUTO_DETECT_THRESHOLD_L_UNITS
+            if self.background_roi_idx is not None and background_brightness_per_frame is not None:
+                # Threshold = mean brightness of background ROI over scan + manual delta
+                valid_bg_frames = background_brightness_per_frame[background_brightness_per_frame > 0]
+                background_baseline = np.mean(valid_bg_frames) if valid_bg_frames.size > 0 else 0
+                threshold = background_baseline + self.manual_threshold
+            else:
+                baseline = np.percentile(brightness_per_frame, AUTO_DETECT_BASELINE_PERCENTILE)
+                threshold = baseline + self.manual_threshold
         except IndexError:
              QtWidgets.QMessageBox.warning(self, "Auto-Detect", "Not enough frame data to determine brightness baseline.")
              return
@@ -1728,9 +1866,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             end = self.end_frame
             num_frames_to_analyze = end - start + 1
 
-            # Data structure: list of lists for mean and median, one inner list per ROI
-            brightness_mean_data = [[] for _ in self.rects]
-            brightness_median_data = [[] for _ in self.rects]
+            # Data structure: list of lists for mean and median, one inner list per non-background ROI
+            non_background_rois = [i for i in range(len(self.rects)) if i != self.background_roi_idx]
+            brightness_mean_data = [[] for _ in non_background_rois]
+            brightness_median_data = [[] for _ in non_background_rois]
 
             # --- Progress Dialog ---
             progress = QtWidgets.QProgressDialog("Analyzing video frames...", "Cancel", 0, num_frames_to_analyze, self)
@@ -1760,18 +1899,19 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     break
 
                 fh, fw = frame.shape[:2]
-                for r_idx, (pt1, pt2) in enumerate(self.rects):
+                for data_idx, roi_idx in enumerate(non_background_rois):
+                    pt1, pt2 = self.rects[roi_idx]
                     x1, y1 = max(0, pt1[0]), max(0, pt1[1])
                     x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
 
                     if x2 > x1 and y2 > y1:
                         roi = frame[y1:y2, x1:x2]
                         mean_val, median_val = self._compute_brightness_stats(roi)
-                        brightness_mean_data[r_idx].append(mean_val)
-                        brightness_median_data[r_idx].append(median_val)
+                        brightness_mean_data[data_idx].append(mean_val)
+                        brightness_median_data[data_idx].append(median_val)
                     else:
-                        brightness_mean_data[r_idx].append(0.0)
-                        brightness_median_data[r_idx].append(0.0)
+                        brightness_mean_data[data_idx].append(0.0)
+                        brightness_median_data[data_idx].append(0.0)
 
                 frames_processed += 1
                 
@@ -1803,7 +1943,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                  return
 
             # --- Save Results and Generate Plots ---
-            self._save_analysis_results(brightness_mean_data, brightness_median_data, save_dir, frames_processed)
+            self._save_analysis_results(brightness_mean_data, brightness_median_data, save_dir, frames_processed, non_background_rois)
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Analysis Error", f"An error occurred during analysis:\n{str(e)}")
@@ -1814,7 +1954,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_widget_states(video_loaded=True, rois_exist=True)
             self.statusBar().showMessage("Analysis complete")
 
-    def _save_analysis_results(self, brightness_mean_data, brightness_median_data, save_dir, frames_processed):
+    def _save_analysis_results(self, brightness_mean_data, brightness_median_data, save_dir, frames_processed, non_background_rois):
         """Save analysis results and generate plots."""
         self.out_paths = []
         plot_paths = []
@@ -1834,15 +1974,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         QtWidgets.QApplication.processEvents()
 
         plot_failed = False
-        for r_idx in range(len(brightness_mean_data)):
+        for data_idx in range(len(brightness_mean_data)):
             if progress.wasCanceled():
                 break
                 
-            mean_data = brightness_mean_data[r_idx]
-            median_data = brightness_median_data[r_idx]
+            actual_roi_idx = non_background_rois[data_idx]  # Get the actual ROI index
+            mean_data = brightness_mean_data[data_idx]
+            median_data = brightness_median_data[data_idx]
             
             if not mean_data: 
-                progress.setValue(r_idx + 1)
+                progress.setValue(data_idx + 1)
                 continue
 
             # Create DataFrame with both mean and median
@@ -1856,10 +1997,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Calculate averages for summary
             avg_mean = np.mean(mean_data)
             avg_median = np.mean(median_data)
-            avg_brightness_summary.append(f"ROI {r_idx+1} Mean: {avg_mean:.2f}, Median: {avg_median:.2f}")
+            avg_brightness_summary.append(f"ROI {actual_roi_idx+1} Mean: {avg_mean:.2f}, Median: {avg_median:.2f}")
 
-            # Construct filename and save CSV
-            base_filename = f"{analysis_name}_{base_video_name}_ROI{r_idx+1}_frames{self.start_frame+1}-{self.start_frame+len(mean_data)}"
+            # Construct filename and save CSV using actual ROI number
+            base_filename = f"{analysis_name}_{base_video_name}_ROI{actual_roi_idx+1}_frames{self.start_frame+1}-{self.start_frame+len(mean_data)}"
             csv_file = f"{base_filename}_brightness.csv"
             csv_path = os.path.join(save_dir, csv_file)
             
@@ -1869,16 +2010,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 summary_lines.append(f" - Saved CSV: {csv_file}")
                 
                 # Generate enhanced plot for this ROI
-                self._generate_enhanced_plot(df, base_filename, save_dir, r_idx, analysis_name, base_video_name)
+                self._generate_enhanced_plot(df, base_filename, save_dir, actual_roi_idx, analysis_name, base_video_name)
                 summary_lines.append(f" - Saved Plot: {base_filename}_plot.png")
 
             except Exception as e:
                 plot_failed = True
-                error_msg = f"Failed to save/plot ROI {r_idx+1}: {e}"
+                error_msg = f"Failed to save/plot ROI {actual_roi_idx+1}: {e}"
                 logging.error(error_msg)
-                summary_lines.append(f" - FAILED: ROI {r_idx+1}")
+                summary_lines.append(f" - FAILED: ROI {actual_roi_idx+1}")
 
-            progress.setValue(r_idx + 1)
+            progress.setValue(data_idx + 1)
             QtWidgets.QApplication.processEvents()
 
         progress.close()
@@ -1941,6 +2082,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             ax1.set_ylabel('L* Brightness', fontsize=12)
             ax1.legend(fontsize=10, loc='best')
             ax1.grid(True, alpha=0.3)
+            
+            # Adjust y-axis limits to provide more space at the top for statistics panel
+            y_min, y_max = ax1.get_ylim()
+            y_range = y_max - y_min
+            # Add 15% padding at the top to accommodate the statistics panel
+            ax1.set_ylim(y_min, y_max + 0.15 * y_range)
 
             # Difference plot (Mean - Median)
             difference = brightness_mean - brightness_median
@@ -1954,7 +2101,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             ax2.legend(fontsize=10)
             ax2.grid(True, alpha=0.3)
 
-            # Add statistics text box
+            # Add statistics text box - positioned in top-right to avoid interference
             stats_text = f"""Statistics:
 Mean: {mean_of_means:.2f} ± {std_of_means:.2f}
 Median: {mean_of_medians:.2f} ± {std_of_medians:.2f}
@@ -1962,8 +2109,9 @@ Peak Mean: {val_peak_mean:.2f} @ Frame {frame_peak_mean}
 Peak Median: {val_peak_median:.2f} @ Frame {frame_peak_median}
 Frames Analyzed: {len(frames)}"""
             
-            ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
-                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
+                    verticalalignment='top', horizontalalignment='right', 
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
             plt.tight_layout()
 
@@ -1973,6 +2121,13 @@ Frames Analyzed: {len(frames)}"""
             plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
             plt.show()
             plt.close(fig)
+            
+            # Automatically open the generated PNG file
+            try:
+                import subprocess
+                subprocess.run(['open', plot_save_path], check=True)
+            except Exception as e:
+                logging.warning(f"Could not automatically open plot file {plot_save_path}: {e}")
 
         except Exception as e:
             logging.error(f"Failed to generate plot for ROI {r_idx+1}: {e}")
@@ -2031,10 +2186,14 @@ Frames Analyzed: {len(frames)}"""
         mean_brightness, _ = self._compute_brightness_stats(roi_bgr)
         return mean_brightness
     
-if __name__ == "__main__":
+if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
+    
+    # Set up logging
+    logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    window = VideoAnalyzer()
-    window.show()
+    # Create and show the main window
+    win = VideoAnalyzer()
+    win.show()
 
     sys.exit(app.exec_())
