@@ -104,7 +104,7 @@ Each analysis generates:
 ### Brightness Calculation
 - Converts BGR video frames to CIE LAB color space
 - Uses L* channel for perceptually uniform brightness
-- Filters pixels below 10 L* units to remove noise
+- Filters pixels below threshold, default 5 L* units to remove noise
 - Calculates both mean and median for robust statistics
 
 ### Performance Optimizations

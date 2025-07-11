@@ -38,7 +38,6 @@ ROI_LABEL_FONT_SCALE = 0.8
 ROI_LABEL_THICKNESS = 2
 
 AUTO_DETECT_BASELINE_PERCENTILE = 5
-LEGACY_AUTO_DETECT_THRESHOLD_L_UNITS = 5.0 # Deprecated: Threshold is now set manually or from background ROI
 BRIGHTNESS_NOISE_FLOOR_PERCENTILE = 2
 DEFAULT_MANUAL_THRESHOLD = 5.0           # ← NEW
 
@@ -2159,8 +2158,8 @@ Frames Analyzed: {len(frames)}"""
             # Convert raw L to L* scale (0–100)
             l_star = l_chan * 100.0 / 255.0
 
-            # Keep only pixels with brightness > 10
-            mask = l_star > 10
+            # Keep only pixels with brightness > threshold
+            mask = l_star > self.manual_threshold
             if not np.any(mask):
                 return 0.0, 0.0
 
