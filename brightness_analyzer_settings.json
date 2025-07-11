@@ -1,0 +1,23 @@
+{
+  "window_geometry": {
+    "x": 389,
+    "y": 184,
+    "width": 1000,
+    "height": 779
+  },
+  "window_maximized": false,
+  "recent_files": [
+    "/Users/nedcutler/Desktop/cache/IMG_3279.MOV"
+  ],
+  "default_manual_threshold": 5.0,
+  "default_noise_floor": 10.0,
+  "frame_cache_size": 100,
+  "theme": "dark",
+  "auto_save_results": true,
+  "show_progress_details": true,
+  "default_jump_frames": 10,
+  "auto_detect_on_load": false,
+  "default_output_format": "csv",
+  "plot_dpi": 300,
+  "plot_style": "default"
+}
