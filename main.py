@@ -1125,16 +1125,21 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 cv2.rectangle(frame_to_draw_on, pt1_frame, pt2_frame, (0, 255, 255), ROI_THICKNESS_DEFAULT) # Use a distinct color (cyan)
 
     def _update_current_brightness_display(self):
-        """Calculates and displays the mean and median brightness for the current frame's ROIs."""
+        """Calculates and displays comprehensive brightness information for the current frame's ROIs."""
         if self.frame is None or not self.rects:
             self.brightness_display_label.setText("N/A")
             return
 
-        brightness_mean_values = []
-        brightness_median_values = []
+        roi_data = []
+        background_brightness = None
         fh, fw = self.frame.shape[:2]
+        
+        # Calculate background brightness if background ROI is defined
+        if self.background_roi_idx is not None:
+            background_brightness = self._compute_background_brightness(self.frame)
+        
         for idx, (pt1, pt2) in enumerate(self.rects):
-            # Skip background ROI from measurements
+            # Handle background ROI separately
             if idx == self.background_roi_idx:
                 continue
                 
@@ -1146,23 +1151,38 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             if x2 > x1 and y2 > y1: # Check for valid ROI area
                 roi = self.frame[y1:y2, x1:x2]
-                # Calculate background brightness for this frame
-                background_brightness = self._compute_background_brightness(self.frame)
                 l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(roi, background_brightness)
-                brightness_mean_values.append((idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median))
+                roi_data.append((idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median))
             else:
-                brightness_mean_values.append((idx, 0.0, 0.0, 0.0, 0.0)) # Append 0 if ROI is invalid/empty
+                roi_data.append((idx, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)) # Append zeros if ROI is invalid/empty
 
-        if brightness_mean_values:
-            # Display both mean and median brightness for each ROI
-            display_parts = []
-            for idx, raw_mean, raw_median, bg_sub_mean, bg_sub_median in brightness_mean_values:
-                # Show background-subtracted values if background ROI is defined
+        if roi_data:
+            # Build comprehensive display
+            display_lines = ["Current Brightness:"]
+            
+            for idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median in roi_data:
                 if self.background_roi_idx is not None:
-                    display_parts.append(f"R{idx+1}: {bg_sub_mean:.2f}±{bg_sub_median:.2f}")
+                    # Show L* with background subtraction and blue channel
+                    display_lines.append(f"ROI {idx+1}: L* {l_raw_mean:.1f} (BG-Sub: {l_bg_sub_mean:.1f}) | Blue: {b_raw_mean:.0f}")
                 else:
-                    display_parts.append(f"R{idx+1}: {raw_mean:.2f}±{raw_median:.2f}")
-            self.brightness_display_label.setText(", ".join(display_parts))
+                    # Show raw L* and blue channel when no background ROI
+                    display_lines.append(f"ROI {idx+1}: L* {l_raw_mean:.1f} | Blue: {b_raw_mean:.0f}")
+            
+            # Add background ROI info if defined
+            if self.background_roi_idx is not None and background_brightness is not None:
+                # Calculate blue channel for background ROI
+                bg_pt1, bg_pt2 = self.rects[self.background_roi_idx]
+                bg_x1 = max(0, min(bg_pt1[0], fw - 1))
+                bg_y1 = max(0, min(bg_pt1[1], fh - 1))
+                bg_x2 = max(0, min(bg_pt2[0], fw - 1))
+                bg_y2 = max(0, min(bg_pt2[1], fh - 1))
+                
+                if bg_x2 > bg_x1 and bg_y2 > bg_y1:
+                    bg_roi = self.frame[bg_y1:bg_y2, bg_x1:bg_x2]
+                    _, _, _, _, bg_b_mean, _, _, _ = self._compute_brightness_stats(bg_roi)
+                    display_lines.append(f"Background: L* {background_brightness:.1f} | Blue: {bg_b_mean:.0f}")
+            
+            self.brightness_display_label.setText("\n".join(display_lines))
         else:
             self.brightness_display_label.setText("N/A")
 

@@ -18,6 +18,7 @@ Brightness Sorcerer v2.0 is a PyQt5-based desktop application for advanced video
 #### Video Processing Pipeline
 - OpenCV-based video loading and frame extraction
 - CIE LAB color space conversion for perceptually uniform brightness (L* channel, 0-100 scale)
+- Blue channel extraction for blue light analysis (0-255 scale)
 - Frame caching system for performance optimization
 - Noise filtering (removes pixels below 5 L* units by default)
 
@@ -28,14 +29,16 @@ Brightness Sorcerer v2.0 is a PyQt5-based desktop application for advanced video
 - Real-time brightness display for current frame
 
 #### Analysis Engine
-- Dual statistics: mean and median brightness calculation
+- Dual statistics: mean and median brightness calculation for both L* and blue channels
+- Background ROI subtraction for noise reduction and baseline correction
 - Auto-detection of frame ranges based on brightness thresholds
 - Manual threshold controls with background ROI support
 - Progress tracking with ETA estimation
+- Real-time brightness display with comprehensive statistics
 
 #### Data Export
-- CSV export with frame-by-frame brightness data
-- Enhanced dual-panel matplotlib plots (300 DPI)
+- CSV export with frame-by-frame brightness data (L* and blue channels, raw and background-subtracted)
+- Enhanced dual-panel matplotlib plots (300 DPI) with separate L* and blue channel subplots
 - Statistical overlays, confidence bands, and peak detection
 
 ## Development Commands
@@ -78,9 +81,11 @@ pip install -r requirements.txt
 
 ### Core Analysis Methods
 - `analyze_video()` (main.py:1825) - Primary analysis execution
-- `_compute_brightness_stats()` (main.py:2137) - Brightness calculation for ROI
+- `_compute_brightness_stats()` (main.py:2301) - Brightness and blue channel calculation for ROI (returns 8-tuple)
+- `_compute_background_brightness()` - Background ROI brightness calculation for subtraction
 - `_save_analysis_results()` (main.py:1956) - Data export and plotting
-- `_generate_enhanced_plot()` (main.py:2033) - Statistical plot generation
+- `_generate_enhanced_plot()` (main.py:2033) - Dual-panel statistical plot generation
+- `_update_current_brightness_display()` (main.py:1127) - Real-time comprehensive brightness display
 
 ### ROI Management
 - `_draw_rois()` (main.py:1083) - ROI rendering on video frame
@@ -92,11 +97,21 @@ pip install -r requirements.txt
 - Keyboard shortcuts for efficient navigation
 - Real-time brightness display updates
 
+### Blue Channel Analysis Feature
+- Extracts blue channel values (0-255 range) alongside L* brightness measurements
+- Useful for blue light analysis and screen brightness correlation studies
+- Displays in real-time brightness panel: "ROI 1: L* 45.2 (BG-Sub: 29.9) | Blue: 125"
+- Exported in CSV with `blue_mean` and `blue_median` columns
+- Visualized in dedicated subplot in enhanced dual-panel plots
+- Background ROI blue values also calculated and displayed
+
 ## File Structure and Output
 
 ### Generated Files
 - CSV files: `{analysis_name}_{video_name}_ROI{N}_frames{start}-{end}_brightness.csv`
+  - Columns: frame, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, blue_mean, blue_median, timestamp
 - Plot images: `{analysis_name}_{video_name}_ROI{N}_frames{start}-{end}_plot.png`
+  - Dual-panel plots with L* brightness (top) and blue channel (bottom) subplots
 - Settings: `brightness_analyzer_settings.json`
 
 ### Supported Video Formats
