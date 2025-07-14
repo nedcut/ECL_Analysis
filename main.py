@@ -26,7 +26,7 @@ except ImportError:
     logging.warning("librosa not available - audio analysis disabled")
 
 # Set up logging
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Constants ---
 DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif"
@@ -202,6 +202,7 @@ class AudioAnalyzer:
         self.available = LIBROSA_AVAILABLE
         self.sample_rate = 44100
         self.hop_length = 512
+        self.n_fft = 2048  # Larger FFT window for better frequency resolution
         
     def extract_audio_from_video(self, video_path: str) -> Tuple[Optional[np.ndarray], Optional[float]]:
         """
@@ -227,16 +228,16 @@ class AudioAnalyzer:
             return None, None
     
     def detect_beeps(self, audio_data: np.ndarray, sample_rate: float, 
-                     min_frequency: float = 800.0, max_frequency: float = 4000.0,
+                     target_frequency: float = 7000.0, frequency_tolerance: float = 50.0,
                      threshold_percentile: float = 95.0, min_duration: float = 0.1) -> List[float]:
         """
-        Detect beeps/tones in audio data.
+        Detect beeps/tones in audio data targeting a specific frequency.
         
         Args:
             audio_data: Audio waveform data
             sample_rate: Sample rate of audio
-            min_frequency: Minimum frequency to detect (Hz)
-            max_frequency: Maximum frequency to detect (Hz)
+            target_frequency: Target frequency to detect (Hz) - default 7000Hz
+            frequency_tolerance: Tolerance around target frequency (Hz) - default ±500Hz
             threshold_percentile: Percentile threshold for detection
             min_duration: Minimum duration of beep (seconds)
             
@@ -248,21 +249,34 @@ class AudioAnalyzer:
         
         try:
             # Compute STFT to get frequency domain representation
-            stft = librosa.stft(audio_data, hop_length=self.hop_length)
+            stft = librosa.stft(audio_data, hop_length=self.hop_length, n_fft=self.n_fft)
             magnitude = np.abs(stft)
             
             # Get frequency bins
-            freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=stft.shape[0]*2-1)
+            freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=self.n_fft)
+            freq_resolution = freqs[1] - freqs[0]
             
-            # Find frequency bins in our target range
+            # Find frequency bins around our target frequency
+            min_frequency = target_frequency - frequency_tolerance
+            max_frequency = target_frequency + frequency_tolerance
             freq_mask = (freqs >= min_frequency) & (freqs <= max_frequency)
             target_magnitude = magnitude[freq_mask, :]
             
-            # Sum energy in target frequency range for each time frame
-            energy_per_frame = np.sum(target_magnitude, axis=0)
+            logging.info(f"Targeting {target_frequency}Hz ±{frequency_tolerance}Hz ({min_frequency:.1f}-{max_frequency:.1f}Hz)")
+            logging.info(f"Frequency resolution: {freq_resolution:.1f}Hz, {np.sum(freq_mask)} bins selected")
+            
+            # Use maximum energy instead of sum to focus on the strongest signal in our frequency range
+            # This helps when the beep is very pure tone at 7000Hz
+            energy_per_frame = np.max(target_magnitude, axis=0)
             
             # Calculate threshold based on percentile
             threshold = np.percentile(energy_per_frame, threshold_percentile)
+            
+            # Also calculate some statistics for better insight
+            mean_energy = np.mean(energy_per_frame)
+            max_energy = np.max(energy_per_frame)
+            
+            logging.info(f"Energy stats: mean={mean_energy:.2f}, max={max_energy:.2f}, threshold={threshold:.2f}")
             
             # Find frames above threshold
             above_threshold = energy_per_frame > threshold
@@ -3009,7 +3023,7 @@ if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
     
     # Set up logging
-    logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     # Create and show the main window
     win = VideoAnalyzer()
