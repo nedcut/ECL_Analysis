@@ -40,6 +40,7 @@ ROI_LABEL_THICKNESS = 2
 AUTO_DETECT_BASELINE_PERCENTILE = 5
 BRIGHTNESS_NOISE_FLOOR_PERCENTILE = 2
 DEFAULT_MANUAL_THRESHOLD = 5.0
+MORPHOLOGICAL_KERNEL_SIZE = 3
 
 MOUSE_RESIZE_HANDLE_SENSITIVITY = 10
 
@@ -1147,8 +1148,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 roi = self.frame[y1:y2, x1:x2]
                 # Calculate background brightness for this frame
                 background_brightness = self._compute_background_brightness(self.frame)
-                raw_mean, raw_median, bg_sub_mean, bg_sub_median = self._compute_brightness_stats(roi, background_brightness)
-                brightness_mean_values.append((idx, raw_mean, raw_median, bg_sub_mean, bg_sub_median))
+                l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(roi, background_brightness)
+                brightness_mean_values.append((idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median))
             else:
                 brightness_mean_values.append((idx, 0.0, 0.0, 0.0, 0.0)) # Append 0 if ROI is invalid/empty
 
@@ -1158,9 +1159,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             for idx, raw_mean, raw_median, bg_sub_mean, bg_sub_median in brightness_mean_values:
                 # Show background-subtracted values if background ROI is defined
                 if self.background_roi_idx is not None:
-                    display_parts.append(f"R{idx+1}: {bg_sub_mean:.1f}±{bg_sub_median:.1f}")
+                    display_parts.append(f"R{idx+1}: {bg_sub_mean:.2f}±{bg_sub_median:.2f}")
                 else:
-                    display_parts.append(f"R{idx+1}: {raw_mean:.1f}±{raw_median:.1f}")
+                    display_parts.append(f"R{idx+1}: {raw_mean:.2f}±{raw_median:.2f}")
             self.brightness_display_label.setText(", ".join(display_parts))
         else:
             self.brightness_display_label.setText("N/A")
@@ -1270,7 +1271,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             threshold_value = self._calculate_background_threshold()
             if threshold_value is not None:
                 self.results_label.setText(f"Background ROI set to ROI {self.selected_rect_idx + 1}\n"
-                                         f"Current background threshold: {threshold_value:.1f} L*")
+                                         f"Current background threshold: {threshold_value:.2f} L*")
             else:
                 self.results_label.setText(f"Background ROI set to ROI {self.selected_rect_idx + 1}\n"
                                          f"(Threshold will be calculated during full video scan)")
@@ -1295,8 +1296,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 
                 if x2 > x1 and y2 > y1:
                     roi = self.frame[y1:y2, x1:x2]
-                    raw_mean, _, _, _ = self._compute_brightness_stats(roi)
-                    return raw_mean
+                    l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
+                    return l_raw_mean
         
         # If no background ROI or calculation failed, return manual threshold
         return None
@@ -1308,14 +1309,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if self.frame is not None:
                 threshold_value = self._calculate_background_threshold()
                 if threshold_value is not None:
-                    self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} ({threshold_value:.1f} L*)")
+                    self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} ({threshold_value:.2f} L*)")
                 else:
                     self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} (calculating...)")
             else:
                 self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} (no frame)")
         else:
             # Manual threshold mode
-            self.threshold_display_label.setText(f"Active Threshold: Manual ({self.manual_threshold:.1f} L*)")
+            self.threshold_display_label.setText(f"Active Threshold: Manual ({self.manual_threshold:.2f} L*)")
 
     def _on_mask_checkbox_toggled(self, checked: bool):
         """Handle pixel mask visualization checkbox toggle."""
@@ -1958,6 +1959,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             non_background_rois = [i for i in range(len(self.rects)) if i != self.background_roi_idx]
             brightness_mean_data = [[] for _ in non_background_rois]
             brightness_median_data = [[] for _ in non_background_rois]
+            blue_mean_data = [[] for _ in non_background_rois]
+            blue_median_data = [[] for _ in non_background_rois]
             background_values_per_frame = []  # Track background brightness for each frame
 
             # --- Progress Dialog ---
@@ -1985,6 +1988,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     num_frames_to_analyze = frames_processed
                     brightness_mean_data = [lst[:frames_processed] for lst in brightness_mean_data]
                     brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
+                    blue_mean_data = [lst[:frames_processed] for lst in blue_mean_data]
+                    blue_median_data = [lst[:frames_processed] for lst in blue_median_data]
                     break
 
                 # Calculate background brightness for this frame
@@ -1999,17 +2004,23 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
                     if x2 > x1 and y2 > y1:
                         roi = frame[y1:y2, x1:x2]
-                        raw_mean, raw_median, bg_sub_mean, bg_sub_median = self._compute_brightness_stats(roi, background_brightness)
+                        l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(roi, background_brightness)
                         # Store background-subtracted values if background ROI defined, otherwise raw values
                         if background_brightness is not None:
-                            brightness_mean_data[data_idx].append(bg_sub_mean)
-                            brightness_median_data[data_idx].append(bg_sub_median)
+                            brightness_mean_data[data_idx].append(l_bg_sub_mean)
+                            brightness_median_data[data_idx].append(l_bg_sub_median)
+                            blue_mean_data[data_idx].append(b_bg_sub_mean)
+                            blue_median_data[data_idx].append(b_bg_sub_median)
                         else:
-                            brightness_mean_data[data_idx].append(raw_mean)
-                            brightness_median_data[data_idx].append(raw_median)
+                            brightness_mean_data[data_idx].append(l_raw_mean)
+                            brightness_median_data[data_idx].append(l_raw_median)
+                            blue_mean_data[data_idx].append(b_raw_mean)
+                            blue_median_data[data_idx].append(b_raw_median)
                     else:
                         brightness_mean_data[data_idx].append(0.0)
                         brightness_median_data[data_idx].append(0.0)
+                        blue_mean_data[data_idx].append(0.0)
+                        blue_median_data[data_idx].append(0.0)
 
                 frames_processed += 1
                 
@@ -2041,7 +2052,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                  return
 
             # --- Save Results and Generate Plots ---
-            self._save_analysis_results(brightness_mean_data, brightness_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame)
+            self._save_analysis_results(brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame)
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Analysis Error", f"An error occurred during analysis:\n{str(e)}")
@@ -2052,7 +2063,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_widget_states(video_loaded=True, rois_exist=True)
             self.statusBar().showMessage("Analysis complete")
 
-    def _save_analysis_results(self, brightness_mean_data, brightness_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame):
+    def _save_analysis_results(self, brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame):
         """Save analysis results and generate plots."""
         self.out_paths = []
         plot_paths = []
@@ -2079,23 +2090,29 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             actual_roi_idx = non_background_rois[data_idx]  # Get the actual ROI index
             mean_data = brightness_mean_data[data_idx]
             median_data = brightness_median_data[data_idx]
+            blue_mean = blue_mean_data[data_idx]
+            blue_median = blue_median_data[data_idx]
             
             if not mean_data: 
                 progress.setValue(data_idx + 1)
                 continue
 
-            # Create DataFrame with both mean and median
+            # Create DataFrame with L* and blue channel data
             frame_numbers = range(self.start_frame, self.start_frame + len(mean_data))
             df = pd.DataFrame({
                 "frame": frame_numbers, 
                 "brightness_mean": mean_data,
-                "brightness_median": median_data
+                "brightness_median": median_data,
+                "blue_mean": blue_mean,
+                "blue_median": blue_median
             })
 
             # Calculate averages for summary
             avg_mean = np.mean(mean_data)
             avg_median = np.mean(median_data)
-            avg_brightness_summary.append(f"ROI {actual_roi_idx+1} Mean: {avg_mean:.2f}, Median: {avg_median:.2f}")
+            avg_blue_mean = np.mean(blue_mean)
+            avg_blue_median = np.mean(blue_median)
+            avg_brightness_summary.append(f"ROI {actual_roi_idx+1} L*: {avg_mean:.2f}±{avg_median:.2f}, Blue: {avg_blue_mean:.1f}±{avg_blue_median:.1f}")
 
             # Construct filename and save CSV using actual ROI number
             base_filename = f"{analysis_name}_{base_video_name}_ROI{actual_roi_idx+1}_frames{self.start_frame+1}-{self.start_frame+len(mean_data)}"
@@ -2135,6 +2152,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             frames = df['frame']
             brightness_mean = df['brightness_mean']
             brightness_median = df['brightness_median']
+            blue_mean = df['blue_mean']
+            blue_median = df['blue_median']
 
             if brightness_mean.empty:
                 return
@@ -2149,10 +2168,21 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             frame_peak_median, val_peak_median = frames.iloc[idx_peak_median], brightness_median.iloc[idx_peak_median]
             mean_of_medians = brightness_median.mean()
             std_of_medians = brightness_median.std()
+            
+            # Blue channel statistics
+            idx_peak_blue_mean = blue_mean.idxmax()
+            frame_peak_blue_mean, val_peak_blue_mean = frames.iloc[idx_peak_blue_mean], blue_mean.iloc[idx_peak_blue_mean]
+            mean_of_blue_means = blue_mean.mean()
+            std_of_blue_means = blue_mean.std()
+            
+            idx_peak_blue_median = blue_median.idxmax()
+            frame_peak_blue_median, val_peak_blue_median = frames.iloc[idx_peak_blue_median], blue_median.iloc[idx_peak_blue_median]
+            mean_of_blue_medians = blue_median.mean()
+            std_of_blue_medians = blue_median.std()
 
-            # Create enhanced plot
+            # Create enhanced plot with dual subplots
             plt.style.use('seaborn-v0_8-darkgrid')
-            fig, ax1 = plt.subplots(1, 1, figsize=(12, 8))
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
 
             # Main brightness plot
             ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
@@ -2186,7 +2216,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                        marker='v', label=f'Peak Median ({val_peak_median:.1f})')
 
             ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
-            ax1.set_xlabel('Frame Number', fontsize=12)
             ax1.set_ylabel('L* Brightness', fontsize=12)
             ax1.legend(fontsize=10, loc='best')
             ax1.grid(True, alpha=0.3)
@@ -2208,6 +2237,44 @@ Frames Analyzed: {len(frames)}"""
             ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
                     verticalalignment='top', horizontalalignment='right', 
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            
+            # Blue channel plot
+            ax2.plot(frames, blue_mean, label='Blue Mean', color='#0066cc', linewidth=2, alpha=0.8)
+            ax2.plot(frames, blue_median, label='Blue Median', color='#3399ff', linewidth=2, alpha=0.8)
+            
+            # Add confidence bands for blue channel
+            ax2.fill_between(frames, blue_mean - std_of_blue_means, blue_mean + std_of_blue_means, 
+                           alpha=0.2, color='#0066cc', label=f'Blue Mean ±1σ ({std_of_blue_means:.1f})')
+            ax2.fill_between(frames, blue_median - std_of_blue_medians, blue_median + std_of_blue_medians, 
+                           alpha=0.2, color='#3399ff', label=f'Blue Median ±1σ ({std_of_blue_medians:.1f})')
+            
+            # Add horizontal lines for blue averages
+            ax2.axhline(mean_of_blue_means, color='#0066cc', linestyle='--', alpha=0.7, 
+                       label=f'Avg Blue Mean ({mean_of_blue_means:.1f})')
+            ax2.axhline(mean_of_blue_medians, color='#3399ff', linestyle='--', alpha=0.7, 
+                       label=f'Avg Blue Median ({mean_of_blue_medians:.1f})')
+            
+            # Mark blue peak points
+            ax2.scatter([frame_peak_blue_mean], [val_peak_blue_mean], color='#ff0000', zorder=5, s=100, 
+                       marker='^', label=f'Peak Blue Mean ({val_peak_blue_mean:.1f})')
+            ax2.scatter([frame_peak_blue_median], [val_peak_blue_median], color='#ed7d31', zorder=5, s=100, 
+                       marker='v', label=f'Peak Blue Median ({val_peak_blue_median:.1f})')
+            
+            ax2.set_xlabel('Frame Number', fontsize=12)
+            ax2.set_ylabel('Blue Channel Value', fontsize=12)
+            ax2.legend(fontsize=10, loc='best')
+            ax2.grid(True, alpha=0.3)
+            
+            # Add blue channel statistics text box
+            blue_stats_text = f"""Blue Channel Statistics:
+Mean: {mean_of_blue_means:.1f} ± {std_of_blue_means:.1f}
+Median: {mean_of_blue_medians:.1f} ± {std_of_blue_medians:.1f}
+Peak Mean: {val_peak_blue_mean:.1f} @ Frame {frame_peak_blue_mean}
+Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
+            
+            ax2.text(0.98, 0.98, blue_stats_text, transform=ax2.transAxes, fontsize=9,
+                    verticalalignment='top', horizontalalignment='right', 
+                    bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
 
             plt.tight_layout()
 
@@ -2231,23 +2298,25 @@ Frames Analyzed: {len(frames)}"""
 
     # --- Utility Methods ---
 
-    def _compute_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float]:
+    def _compute_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
         """
         Calculates brightness statistics for an ROI with optional background subtraction.
 
         Converts BGR to CIE LAB color space and uses the L* channel.
-        Can perform unthresholded analysis with background subtraction.
+        Also extracts blue channel statistics for blue light analysis.
 
         Args:
             roi_bgr: The region of interest as a NumPy array (BGR format).
             background_brightness: Optional background L* value to subtract from all pixels.
 
         Returns:
-            Tuple of (raw_mean, raw_median, bg_sub_mean, bg_sub_median) as L* values (0-100 range)
-            or (0.0, 0.0, 0.0, 0.0) if the ROI is invalid or calculation fails.
+            Tuple of (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, 
+                     b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median)
+            L* values in 0-100 range, Blue values in 0-255 range
+            or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) if the ROI is invalid or calculation fails.
         """
         if roi_bgr is None or roi_bgr.size == 0:
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
         try:
             lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
@@ -2255,37 +2324,71 @@ Frames Analyzed: {len(frames)}"""
 
             # Convert raw L to L* scale (0–100)
             l_star = l_chan * 100.0 / 255.0
+            
+            # Extract blue channel (BGR format, so blue is index 0)
+            blue_chan = roi_bgr[:, :, 0].astype(np.float32)
 
-            # Calculate raw statistics (unthresholded)
-            raw_mean = float(np.mean(l_star))
-            raw_median = float(np.median(l_star))
+            # Calculate raw L* statistics (unthresholded)
+            l_raw_mean = float(np.mean(l_star))
+            l_raw_median = float(np.median(l_star))
+            
+            # Calculate raw blue statistics (unthresholded)
+            b_raw_mean = float(np.mean(blue_chan))
+            b_raw_median = float(np.median(blue_chan))
             
             # Calculate background-subtracted statistics if background provided
             if background_brightness is not None:
                 # Filter pixels above background threshold, then subtract background
                 above_background_mask = l_star > background_brightness
+                
+                # Apply morphological operations to clean up the mask (remove noise/stray pixels)
+                if np.any(above_background_mask):
+                    # Create structuring element for morphological operations
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
+                                                     (MORPHOLOGICAL_KERNEL_SIZE, MORPHOLOGICAL_KERNEL_SIZE))
+                    
+                    # Convert boolean mask to uint8 for morphological operations
+                    mask_uint8 = above_background_mask.astype(np.uint8) * 255
+                    
+                    # Apply opening (erosion followed by dilation) to remove small noise
+                    cleaned_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+                    
+                    # Convert back to boolean mask
+                    above_background_mask = cleaned_mask > 0
+                
                 if np.any(above_background_mask):
                     # Only analyze pixels above background threshold
-                    filtered_pixels = l_star[above_background_mask]
-                    bg_subtracted_pixels = filtered_pixels - background_brightness
-                    bg_sub_mean = float(np.mean(bg_subtracted_pixels))
-                    bg_sub_median = float(np.median(bg_subtracted_pixels))
+                    filtered_l_pixels = l_star[above_background_mask]
+                    filtered_b_pixels = blue_chan[above_background_mask]
+                    
+                    # Background-subtracted L* statistics
+                    bg_subtracted_l_pixels = filtered_l_pixels - background_brightness
+                    l_bg_sub_mean = float(np.mean(bg_subtracted_l_pixels))
+                    l_bg_sub_median = float(np.median(bg_subtracted_l_pixels))
+                    
+                    # Blue channel statistics for masked pixels (no background subtraction for blue)
+                    b_bg_sub_mean = float(np.mean(filtered_b_pixels))
+                    b_bg_sub_median = float(np.median(filtered_b_pixels))
                 else:
                     # No pixels above background - return 0
-                    bg_sub_mean = 0.0
-                    bg_sub_median = 0.0
+                    l_bg_sub_mean = 0.0
+                    l_bg_sub_median = 0.0
+                    b_bg_sub_mean = 0.0
+                    b_bg_sub_median = 0.0
             else:
-                bg_sub_mean = raw_mean
-                bg_sub_median = raw_median
+                l_bg_sub_mean = l_raw_mean
+                l_bg_sub_median = l_raw_median
+                b_bg_sub_mean = b_raw_mean
+                b_bg_sub_median = b_raw_median
             
-            return raw_mean, raw_median, bg_sub_mean, bg_sub_median
+            return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
 
         except cv2.error as e:
             print(f"OpenCV error during brightness computation: {e}")
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         except Exception as e:
             print(f"Error during brightness computation: {e}")
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
     def _compute_background_brightness(self, frame: np.ndarray) -> Optional[float]:
         """
@@ -2295,7 +2398,7 @@ Frames Analyzed: {len(frames)}"""
             frame: Current video frame in BGR format
             
         Returns:
-            Mean L* brightness of background ROI, or None if no background ROI defined
+            90th percentile L* brightness of background ROI, or None if no background ROI defined
         """
         if self.background_roi_idx is None or frame is None:
             return None
@@ -2314,7 +2417,7 @@ Frames Analyzed: {len(frames)}"""
             l_chan = lab[:, :, 0].astype(np.float32)
             l_star = l_chan * 100.0 / 255.0
             
-            return float(np.mean(l_star))
+            return float(np.percentile(l_star, 90))
             
         except Exception as e:
             print(f"Error computing background brightness: {e}")
@@ -2325,8 +2428,8 @@ Frames Analyzed: {len(frames)}"""
         Legacy method for backward compatibility.
         Returns only the mean brightness for existing code that expects a single value.
         """
-        raw_mean, _, _, _ = self._compute_brightness_stats(roi_bgr)
-        return raw_mean
+        l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi_bgr)
+        return l_raw_mean
     
 if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
