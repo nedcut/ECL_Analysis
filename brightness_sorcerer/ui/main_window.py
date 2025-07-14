@@ -36,6 +36,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.app_controller.register_ui_callback('video_load_failed', self._on_video_load_failed)
         self.app_controller.register_ui_callback('session_saved', self._on_session_saved)
         self.app_controller.register_ui_callback('session_loaded', self._on_session_loaded)
+        self.app_controller.register_ui_callback('analysis_progress', self._on_analysis_progress)
+        self.app_controller.register_ui_callback('analysis_completed', self._on_analysis_completed)
+        self.app_controller.register_ui_callback('analysis_failed', self._on_analysis_failed)
+        self.app_controller.register_ui_callback('display_update_needed', self._on_display_update_needed)
         
         logging.info("Main window initialized")
     
@@ -66,7 +70,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Status bar
         self.status_bar = self.statusBar()
-        self.status_bar.showMessage("Ready - Load a video to begin")
+        self.status_bar.showMessage("Ready - Load a video to begin (Ctrl+O) or drag & drop a video file")
         
         # Progress widget in status bar
         self.progress_widget = QtWidgets.QWidget()
@@ -103,6 +107,22 @@ class MainWindow(QtWidgets.QMainWindow):
         # Recent files
         self.recent_files_menu = file_menu.addMenu('Recent Files')
         self._update_recent_files_menu()
+        
+        file_menu.addSeparator()
+        
+        # Save session
+        save_action = QtWidgets.QAction('&Save Session...', self)
+        save_action.setShortcut('Ctrl+S')
+        save_action.setStatusTip('Save current analysis session')
+        save_action.triggered.connect(self._save_session_dialog)
+        file_menu.addAction(save_action)
+        
+        # Load session
+        load_action = QtWidgets.QAction('&Load Session...', self)
+        load_action.setShortcut('Ctrl+L')
+        load_action.setStatusTip('Load an analysis session')
+        load_action.triggered.connect(self._load_session_dialog)
+        file_menu.addAction(load_action)
         
         file_menu.addSeparator()
         
@@ -157,10 +177,19 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def _setup_shortcuts(self):
         """Setup keyboard shortcuts."""
-        # Video navigation shortcuts are handled by the video widget
+        # Video navigation shortcuts
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left), self, lambda: self._step_video_frames(-1))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right), self, lambda: self._step_video_frames(1))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_PageUp), self, lambda: self._step_video_frames(-10))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_PageDown), self, lambda: self._step_video_frames(10))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Home), self, self._go_to_first_frame)
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_End), self, self._go_to_last_frame)
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Space), self, self._toggle_playback)
         
         # ROI shortcuts
         QtWidgets.QShortcut(QtGui.QKeySequence('Ctrl+R'), self, self._add_roi)
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Delete), self, self._delete_selected_roi)
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self, self._cancel_roi_interaction)
         
         # Analysis shortcuts
         QtWidgets.QShortcut(QtGui.QKeySequence('F5'), self, self._run_analysis)
@@ -169,12 +198,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def _connect_signals(self):
         """Connect widget signals."""
         # Video widget signals
-        self.video_widget.frame_changed.connect(self._on_frame_changed)
-        self.video_widget.roi_interaction.connect(self._on_roi_interaction)
-        
+        if self.video_widget:
+            self.video_widget.frame_changed.connect(self._on_frame_changed)
+            self.video_widget.roi_interaction.connect(self._on_roi_interaction)
+
         # Controls panel signals
-        self.controls_panel.analysis_widget.analyze_requested.connect(self._start_analysis)
-        self.controls_panel.analysis_widget.auto_detect_requested.connect(self._auto_detect_range)
+        if self.controls_panel:
+            self.controls_panel.analysis_widget.analyze_requested.connect(self._start_analysis)
+            self.controls_panel.analysis_widget.auto_detect_requested.connect(self._auto_detect_range)
+            self.controls_panel.roi_widget.roi_selected.connect(self.app_controller.select_roi)
+            self.controls_panel.roi_widget.roi_deleted.connect(self.app_controller.delete_roi)
+            self.controls_panel.roi_widget.background_roi_changed.connect(self.app_controller.set_background_roi)
+            self.controls_panel.roi_widget.add_roi_requested.connect(self._add_roi)
         
         # Application controller will handle progress callbacks
     
@@ -206,7 +241,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """Set application theme."""
         if theme_name == 'dark':
             apply_dark_theme(QtWidgets.QApplication.instance())
-        # Light theme would be implemented similarly
+        elif theme_name == 'light':
+            apply_light_theme(QtWidgets.QApplication.instance())
         
         self.app_controller.settings_manager.set_setting('theme', theme_name)
     
@@ -229,9 +265,13 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
         
-        if self.video_widget.load_video(file_path):
+        result = self.app_controller.load_video(file_path)
+        if result.is_success():
             self.app_controller.settings_manager.add_recent_file(file_path)
             self._update_recent_files_menu()
+            
+            # Update video display and controls
+            self.video_widget.update_display()
             
             # Update status
             video_info = self.app_controller.video_processor.get_video_info()
@@ -251,7 +291,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Update recent files menu."""
         self.recent_files_menu.clear()
         
-        recent_files = self.settings_manager.get_recent_files()
+        recent_files = self.app_controller.settings_manager.get_recent_files()
         if not recent_files:
             no_recent_action = QtWidgets.QAction('No recent files', self)
             no_recent_action.setEnabled(False)
@@ -266,89 +306,55 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def _add_roi(self):
         """Add a new ROI."""
-        if not self.video_processor.is_loaded():
+        if not self.app_controller.video_processor.is_loaded():
             return
         
         # Add ROI at center of current frame
-        frame_size = self.video_processor.frame_size
+        frame_size = self.app_controller.video_processor.frame_size
         center_x = frame_size[0] // 2 - 100
         center_y = frame_size[1] // 2 - 75
         
-        self.roi_manager.add_roi(center_x, center_y, 200, 150)
-        self.video_widget.update_display()
+        # Use the application controller's add_roi method which triggers UI notifications
+        result = self.app_controller.add_roi(center_x, center_y, 200, 150)
+        if result.is_success():
+            self.video_widget.update_display()
     
     def _run_analysis(self):
         """Run brightness analysis."""
-        if not self.video_processor.is_loaded():
+        if not self.app_controller.video_processor.is_loaded():
             QtWidgets.QMessageBox.information(
                 self, "No Video", "Please load a video file first."
             )
             return
         
-        if not self.roi_manager.rois:
+        if not self.app_controller.roi_manager.rois:
             QtWidgets.QMessageBox.information(
                 self, "No ROIs", "Please add at least one ROI before running analysis."
             )
             return
         
-        # This would trigger the controls panel to show its analysis dialog
-        # For now, just show a placeholder
-        QtWidgets.QMessageBox.information(
-            self, "Analysis", "Analysis feature will be completed in the next phase."
-        )
+        # Trigger the controls panel to start analysis
+        if self.controls_panel:
+            self.controls_panel.analysis_widget.start_analysis()
     
     def _auto_detect_range(self):
         """Auto-detect frame range."""
-        if not self.video_processor.is_loaded():
+        if not self.app_controller.video_processor.is_loaded():
             return
         
-        if not self.roi_manager.rois:
+        if not self.app_controller.roi_manager.rois:
             QtWidgets.QMessageBox.information(
                 self, "No ROIs", "Please add at least one ROI before auto-detection."
             )
             return
         
-        # Run auto-detection
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        try:
-            background_roi = self.roi_manager.get_background_roi()
-            result = self.brightness_analyzer.auto_detect_frame_range(
-                self.roi_manager.rois, background_roi
-            )
-            
-            if result:
-                start_frame, end_frame = result
-                self.controls_panel.analysis_widget.set_auto_detected_range(start_frame, end_frame)
-                self.status_bar.showMessage(
-                    f"Auto-detected range: frames {start_frame} - {end_frame}", 3000
-                )
-            else:
-                QtWidgets.QMessageBox.information(
-                    self, "Auto-Detection", 
-                    "Could not detect a suitable frame range. Please set manually."
-                )
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
+        self.app_controller.auto_detect_frame_range()
+        QtWidgets.QApplication.restoreOverrideCursor()
     
     def _start_analysis(self, start_frame: int, end_frame: int, output_dir: str):
         """Start brightness analysis."""
-        if self._analysis_in_progress:
-            return
-        
-        self._analysis_in_progress = True
-        
-        # Get background ROI
-        background_roi = self.roi_manager.get_background_roi()
-        
-        # Start analysis in a separate thread (would be implemented with QThread)
-        # For now, just show completion message
-        QtWidgets.QMessageBox.information(
-            self, "Analysis Started", 
-            f"Analysis would run from frame {start_frame} to {end_frame}\n"
-            f"Output directory: {output_dir}"
-        )
-        
-        self._analysis_in_progress = False
+        self.app_controller.start_analysis(start_frame, end_frame, output_dir)
     
     def _on_analysis_progress(self, current: int, total: int, message: str):
         """Handle analysis progress updates."""
@@ -364,8 +370,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_frame_changed(self, frame_index: int):
         """Handle frame navigation."""
         # Update status bar with current frame info
-        if self.video_processor.is_loaded():
-            video_info = self.video_processor.get_video_info()
+        if self.app_controller.video_processor.is_loaded():
+            video_info = self.app_controller.video_processor.get_video_info()
             fps = video_info['fps']
             current_time = frame_index / fps if fps > 0 else 0
             self.status_bar.showMessage(
@@ -379,6 +385,130 @@ class MainWindow(QtWidgets.QMainWindow):
         elif action == "deleted":
             self.status_bar.showMessage(f"ROI deleted", 2000)
     
+    def _cancel_roi_interaction(self):
+        """Cancel any ongoing ROI interaction."""
+        self.app_controller.roi_manager.cancel_all_interactions()
+        self.video_widget.update_display()
+
+    def _delete_selected_roi(self):
+        """Delete the currently selected ROI."""
+        if self.app_controller.roi_manager.selected_roi_index is not None:
+            roi_index = self.app_controller.roi_manager.selected_roi_index
+            self.app_controller.delete_roi(roi_index)
+
+    def _step_video_frames(self, step: int):
+        """Step video frames using keyboard shortcuts."""
+        if self.video_widget and self.app_controller.video_processor.is_loaded():
+            self.video_widget._step_frames(step)
+
+    def _go_to_first_frame(self):
+        """Go to the first frame of the video."""
+        if self.video_widget and self.app_controller.video_processor.is_loaded():
+            self.app_controller.seek_to_frame(0)
+            self.video_widget.update_display()
+
+    def _go_to_last_frame(self):
+        """Go to the last frame of the video."""
+        if self.video_widget and self.app_controller.video_processor.is_loaded():
+            total_frames = self.app_controller.video_processor.total_frames
+            self.app_controller.seek_to_frame(total_frames - 1)
+            self.video_widget.update_display()
+
+    def _toggle_playback(self):
+        """Toggle video playback using keyboard shortcut."""
+        if self.video_widget and self.app_controller.video_processor.is_loaded():
+            self.video_widget._toggle_playback()
+
+    def _on_display_update_needed(self):
+        """Handle display update requests from the application controller."""
+        if self.video_widget:
+            self.video_widget.update_display()
+
+    def _on_video_load_failed(self, error_message: str):
+        """Handle video load failure."""
+        QtWidgets.QMessageBox.critical(self, "Video Load Error", f"Failed to load video: {error_message}")
+        self.status_bar.showMessage("Failed to load video", 3000)
+
+    def _on_session_loaded(self, session):
+        """Handle session load success."""
+        self.status_bar.showMessage(f"Session loaded: {session.session_id}", 3000)
+
+    def _on_analysis_completed(self, success: bool):
+        """Handle analysis completion."""
+        self.progress_bar.setVisible(False)
+        self.progress_label.setVisible(False)
+        if success:
+            self.status_bar.showMessage("Analysis completed successfully", 3000)
+        else:
+            self.status_bar.showMessage("Analysis completed with issues", 3000)
+
+    def _on_analysis_failed(self, error_message: str):
+        """Handle analysis failure."""
+        self.progress_bar.setVisible(False)
+        self.progress_label.setVisible(False)
+        QtWidgets.QMessageBox.critical(self, "Analysis Error", f"Analysis failed: {error_message}")
+        self.status_bar.showMessage("Analysis failed", 3000)
+
+    def _on_session_saved(self, file_path: str):
+        """Handle session save success."""
+        self.status_bar.showMessage(f"Session saved to {file_path}", 3000)
+    
+
+
+
+
+    def _on_session_save_failed(self, error_message: str):
+        """Handle session save failure."""
+        QtWidgets.QMessageBox.critical(self, "Session Save Error", f"Failed to save session: {error_message}")
+
+    def _on_session_load_failed(self, error_message: str):
+        """Handle session load failure."""
+        QtWidgets.QMessageBox.critical(self, "Session Load Error", f"Failed to load session: {error_message}")
+
+    def _on_roi_add_failed(self, error_message: str):
+        """Handle ROI add failure."""
+        QtWidgets.QMessageBox.critical(self, "ROI Add Error", f"Failed to add ROI: {error_message}")
+
+    def _on_roi_delete_failed(self, error_message: str):
+        """Handle ROI delete failure."""
+        QtWidgets.QMessageBox.critical(self, "ROI Delete Error", f"Failed to delete ROI: {error_message}")
+
+    def _on_roi_rename_failed(self, error_message: str):
+        """Handle ROI rename failure."""
+        QtWidgets.QMessageBox.critical(self, "ROI Rename Error", f"Failed to rename ROI: {error_message}")
+
+    def _on_background_roi_change_failed(self, error_message: str):
+        """Handle background ROI change failure."""
+        QtWidgets.QMessageBox.critical(self, "Background ROI Error", f"Failed to set background ROI: {error_message}")
+
+    def _on_frame_range_detection_failed(self, error_message: str):
+        """Handle frame range detection failure."""
+        QtWidgets.QMessageBox.critical(self, "Auto-Detection Error", f"Failed to auto-detect frame range: {error_message}")
+
+    def _on_threshold_change_failed(self, error_message: str):
+        """Handle threshold change failure."""
+        QtWidgets.QMessageBox.critical(self, "Threshold Error", f"Failed to change threshold: {error_message}")
+
+    def _save_session_dialog(self):
+        """Open dialog to save current session."""
+        if not self.app_controller.current_session:
+            QtWidgets.QMessageBox.information(self, "No Session", "No active session to save.")
+            return
+
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Analysis Session", "", "JSON Session Files (*.json)"
+        )
+        if file_path:
+            self.app_controller.save_session(file_path)
+
+    def _load_session_dialog(self):
+        """Open dialog to load an analysis session."""
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Analysis Session", "", "JSON Session Files (*.json)"
+        )
+        if file_path:
+            self.app_controller.load_session(file_path)
+
     def _show_shortcuts_dialog(self):
         """Show keyboard shortcuts dialog."""
         shortcuts_text = """
@@ -386,11 +516,12 @@ class MainWindow(QtWidgets.QMainWindow):
         
         <h4>Video Navigation</h4>
         <b>← / Backspace</b> - Previous frame<br>
-        <b>→ / Space</b> - Next frame<br>
+        <b>→</b> - Next frame<br>
         <b>Page Up</b> - Jump back 10 frames<br>
         <b>Page Down</b> - Jump forward 10 frames<br>
         <b>Home</b> - Go to first frame<br>
         <b>End</b> - Go to last frame<br>
+        <b>Space</b> - Play/Pause video<br>
         
         <h4>ROI Management</h4>
         <b>Ctrl+R</b> - Add new ROI<br>
@@ -403,6 +534,8 @@ class MainWindow(QtWidgets.QMainWindow):
         
         <h4>File Operations</h4>
         <b>Ctrl+O</b> - Open video file<br>
+        <b>Ctrl+S</b> - Save session<br>
+        <b>Ctrl+L</b> - Load session<br>
         <b>Ctrl+Q</b> - Exit application<br>
         """
         
@@ -468,12 +601,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Handle window close event."""
         self._save_settings()
         
-        # Cancel any ongoing analysis
-        if self._analysis_in_progress:
-            self.brightness_analyzer.cancel_analysis()
-        
-        # Clean up resources
-        self.video_processor.release()
+        self.app_controller.cleanup()
         
         event.accept()
         logging.info("Application closed")

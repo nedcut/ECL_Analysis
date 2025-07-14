@@ -133,7 +133,9 @@ def roi_manager():
 @pytest.fixture
 def brightness_analyzer(video_processor):
     """Create a BrightnessAnalyzer instance for testing."""
-    return BrightnessAnalyzer(video_processor)
+    from brightness_sorcerer.core.threshold_manager import ThresholdManager
+    threshold_manager = ThresholdManager()
+    return BrightnessAnalyzer(video_processor, threshold_manager)
 
 
 @pytest.fixture

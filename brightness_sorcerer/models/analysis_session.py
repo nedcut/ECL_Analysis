@@ -63,11 +63,7 @@ class AnalysisConfig:
             'start_frame': self.start_frame,
             'end_frame': self.end_frame,
             'threshold_config': {
-                'manual_threshold': self.threshold_config.manual_threshold,
-                'noise_floor': self.threshold_config.noise_floor,
-                'baseline_percentile': self.threshold_config.baseline_percentile,
-                'min_consecutive_frames': self.threshold_config.min_consecutive_frames,
-                'use_background_roi': self.threshold_config.use_background_roi
+                'threshold': self.threshold_config.threshold
             },
             'output_directory': self.output_directory,
             'save_csv': self.save_csv,
@@ -83,11 +79,7 @@ class AnalysisConfig:
         """Create from dictionary."""
         threshold_data = data.get('threshold_config', {})
         threshold_config = ThresholdConfig(
-            manual_threshold=threshold_data.get('manual_threshold', 5.0),
-            noise_floor=threshold_data.get('noise_floor', 10.0),
-            baseline_percentile=threshold_data.get('baseline_percentile', 5.0),
-            min_consecutive_frames=threshold_data.get('min_consecutive_frames', 3),
-            use_background_roi=threshold_data.get('use_background_roi', True)
+            threshold=threshold_data.get('threshold', 10.0)
         )
         
         return cls(

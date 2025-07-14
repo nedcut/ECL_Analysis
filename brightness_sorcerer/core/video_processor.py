@@ -190,6 +190,10 @@ class VideoProcessor:
         self.frame_size = (0, 0)
         self.video_path = None
     
+    def cleanup(self):
+        """Alias for release() method."""
+        self.release()
+    
     def __del__(self):
         """Ensure proper cleanup."""
         self.release()

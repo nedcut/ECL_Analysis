@@ -51,10 +51,10 @@ class ROI:
     
     def intersects(self, other: 'ROI') -> bool:
         """Check if this ROI intersects with another ROI."""
-        return not (self.x + self.width < other.x or 
-                   other.x + other.width < self.x or
-                   self.y + self.height < other.y or 
-                   other.y + other.height < self.y)
+        return not (self.x + self.width <= other.x or 
+                   other.x + other.width <= self.x or
+                   self.y + self.height <= other.y or 
+                   other.y + other.height <= self.y)
     
     def is_valid_for_frame(self, frame_width: int, frame_height: int) -> bool:
         """Check if ROI is within frame boundaries."""

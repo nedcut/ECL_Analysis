@@ -9,9 +9,10 @@ import logging
 
 from ..models.roi import ROI
 from ..models.analysis_result import AnalysisResult, FrameAnalysis
-from ..utils.color_utils import calculate_brightness_stats, detect_brightness_threshold
+from ..utils.color_utils import calculate_brightness_stats
 from ..utils.math_utils import find_analysis_range
 from .video_processor import VideoProcessor
+from .threshold_manager import ThresholdManager
 
 # Constants
 AUTO_DETECT_BASELINE_PERCENTILE = 5
@@ -23,10 +24,9 @@ MIN_CONSECUTIVE_FRAMES = 3
 class BrightnessAnalyzer:
     """Core brightness analysis engine."""
     
-    def __init__(self, video_processor: VideoProcessor):
+    def __init__(self, video_processor: VideoProcessor, threshold_manager: ThresholdManager):
         self.video_processor = video_processor
-        self.manual_threshold = DEFAULT_MANUAL_THRESHOLD
-        self.noise_floor = DEFAULT_BRIGHTNESS_NOISE_FLOOR
+        self.threshold_manager = threshold_manager
         
         # Progress tracking
         self.progress_callback: Optional[Callable[[int, int, str], None]] = None
@@ -34,6 +34,9 @@ class BrightnessAnalyzer:
         
         # Analysis state
         self.current_result: Optional[AnalysisResult] = None
+        
+        # Noise floor
+        self.noise_floor = DEFAULT_BRIGHTNESS_NOISE_FLOOR
     
     def set_progress_callback(self, callback: Callable[[int, int, str], None]):
         """Set callback for progress updates."""
@@ -42,7 +45,30 @@ class BrightnessAnalyzer:
     def cancel_analysis(self):
         """Request cancellation of current analysis."""
         self.cancel_requested = True
+
+    def calculate_roi_average_brightness(self, roi: ROI) -> Optional[float]:
+        """Calculate the average brightness of an ROI."""
+        if not self.video_processor.is_loaded():
+            return None
+
+        frame = self.video_processor.get_current_frame()
+        if frame is None:
+            return None
+
+        roi_region = roi.extract_region(frame)
+        if roi_region is None:
+            return None
+
+        stats = calculate_brightness_stats(roi_region, 0)  # No noise floor
+        return stats.get('mean')
     
+    def auto_detect_range(self, video_processor: VideoProcessor, roi: ROI) -> Tuple[int, int]:
+        """Auto-detect optimal frame range for analysis using a single ROI."""
+        result = self.auto_detect_frame_range([roi])
+        if result:
+            return result
+        return (0, video_processor.total_frames - 1)
+
     def auto_detect_frame_range(self, rois: List[ROI], 
                                background_roi: Optional[ROI] = None) -> Optional[Tuple[int, int]]:
         """Auto-detect optimal frame range for analysis."""
@@ -58,13 +84,7 @@ class BrightnessAnalyzer:
             brightness_values = []
             
             # Determine threshold
-            threshold = self.manual_threshold
-            if background_roi:
-                frame = self.video_processor.get_current_frame()
-                if frame is not None:
-                    bg_region = background_roi.extract_region(frame)
-                    if bg_region is not None:
-                        threshold = detect_brightness_threshold(bg_region, self.manual_threshold, self.noise_floor)
+            threshold = self.threshold_manager.get_threshold()
             
             # Analyze sample frames
             for i, frame_idx in enumerate(sample_frames):
@@ -130,20 +150,9 @@ class BrightnessAnalyzer:
                 total_frames=end_frame - start_frame + 1,
                 fps=video_info['fps'],
                 roi_labels=roi_labels,
-                noise_floor=self.noise_floor,
+                brightness_threshold=self.threshold_manager.get_threshold(),
                 background_roi_label=background_roi.label if background_roi else None
             )
-            
-            # Calculate threshold
-            threshold = self.manual_threshold
-            if background_roi:
-                frame = self.video_processor.get_frame_at_index(start_frame)
-                if frame:
-                    bg_region = background_roi.extract_region(frame)
-                    if bg_region is not None:
-                        threshold = detect_brightness_threshold(bg_region, self.manual_threshold, self.noise_floor)
-            
-            result.brightness_threshold = threshold
             
             # Analyze each frame
             total_frames = end_frame - start_frame + 1
@@ -200,6 +209,17 @@ class BrightnessAnalyzer:
         except Exception as e:
             logging.error(f"Error during brightness analysis: {e}")
             return None
+    
+    def analyze_video(self, video_processor: VideoProcessor, rois: List[ROI], 
+                     start_frame: int, end_frame: int, output_directory: str,
+                     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+                     background_roi: Optional[ROI] = None) -> Optional[AnalysisResult]:
+        """Analyze video - wrapper for analyze_brightness method."""
+        # Set progress callback if provided
+        if progress_callback:
+            self.set_progress_callback(progress_callback)
+        
+        return self.analyze_brightness(rois, start_frame, end_frame, output_directory, background_roi)
     
     def _save_analysis_results(self, result: AnalysisResult, output_directory: str):
         """Save analysis results to files."""
@@ -282,7 +302,6 @@ class BrightnessAnalyzer:
             info_text.append(f"Video: {os.path.basename(result.video_path)}")
             info_text.append(f"Frames: {result.start_frame} - {result.end_frame}")
             info_text.append(f"Duration: {result.get_analysis_duration():.1f}s")
-            info_text.append(f"Noise Floor: {result.noise_floor:.1f}")
             if result.brightness_threshold:
                 info_text.append(f"Threshold: {result.brightness_threshold:.1f}")
             
@@ -316,7 +335,6 @@ class BrightnessAnalyzer:
                 'total_frames': result.total_frames
             },
             'analysis_parameters': {
-                'noise_floor': result.noise_floor,
                 'brightness_threshold': result.brightness_threshold,
                 'roi_count': len(result.roi_labels)
             },

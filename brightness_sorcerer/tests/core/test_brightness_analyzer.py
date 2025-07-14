@@ -17,10 +17,12 @@ class TestBrightnessAnalyzer:
     @pytest.mark.unit
     def test_init(self, mock_video_processor):
         """Test BrightnessAnalyzer initialization."""
-        analyzer = BrightnessAnalyzer(mock_video_processor)
+        from brightness_sorcerer.core.threshold_manager import ThresholdManager
+        threshold_manager = ThresholdManager()
+        analyzer = BrightnessAnalyzer(mock_video_processor, threshold_manager)
         
         assert analyzer.video_processor is mock_video_processor
-        assert analyzer.manual_threshold == 5.0
+        assert analyzer.threshold_manager is threshold_manager
         assert analyzer.noise_floor == 10.0
         assert analyzer.progress_callback is None
         assert not analyzer.cancel_requested

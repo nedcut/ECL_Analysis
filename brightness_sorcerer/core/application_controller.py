@@ -1,11 +1,11 @@
 """Application controller for coordinating business logic and UI interactions."""
 
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, List
 import logging
 from pathlib import Path
 
 from ..models.analysis_session import AnalysisSession, AnalysisConfig
-from ..models.video_data import VideoData
+from ..models.video_data import VideoData, VideoMetadata
 from ..models.roi import ROI
 from ..core.video_processor import VideoProcessor
 from ..core.roi_manager import ROIManager
@@ -35,17 +35,15 @@ class ApplicationController:
         # Core components
         self.video_processor = VideoProcessor()
         self.roi_manager = ROIManager()
-        self.brightness_analyzer = BrightnessAnalyzer()
-        self.settings_manager = SettingsManager()
-        
-        # Threshold management
         self.threshold_manager = ThresholdManager()
+        self.brightness_analyzer = BrightnessAnalyzer(self.video_processor, self.threshold_manager)
+        self.settings_manager = SettingsManager()
         
         # Current session
         self.current_session: Optional[AnalysisSession] = None
         
         # UI callbacks
-        self.ui_callbacks: Dict[str, Callable] = {}
+        self.ui_callbacks: Dict[str, List[Callable]] = {}
         
         # Analysis state
         self._analysis_running = False
@@ -54,15 +52,25 @@ class ApplicationController:
     
     def register_ui_callback(self, event_name: str, callback: Callable):
         """Register a UI callback for specific events."""
-        self.ui_callbacks[event_name] = callback
+        if event_name not in self.ui_callbacks:
+            self.ui_callbacks[event_name] = []
+        self.ui_callbacks[event_name].append(callback)
     
     def _notify_ui(self, event_name: str, *args, **kwargs):
         """Notify UI of events."""
         if event_name in self.ui_callbacks:
-            try:
-                self.ui_callbacks[event_name](*args, **kwargs)
-            except Exception as e:
-                logging.error(f"Error in UI callback {event_name}: {e}")
+            for callback in self.ui_callbacks[event_name]:
+                try:
+                    callback(*args, **kwargs)
+                except Exception as e:
+                    logging.error(f"Error in UI callback {event_name}: {e}")
+                    # Continue processing other callbacks even if one fails
+
+    def stop_analysis(self):
+        """Stop ongoing brightness analysis."""
+        if self._analysis_running:
+            self.brightness_analyzer.cancel_analysis()
+            logging.info("Analysis cancellation requested")
     
     # Video Management
     
@@ -74,14 +82,22 @@ class ApplicationController:
             
             # Create video data model
             info = self.video_processor.get_video_info()
+            video_file_data = VideoData.from_video_file(video_path)
+            metadata = video_file_data.metadata if video_file_data else VideoMetadata.from_file_path(video_path)
+            
+            # Extract width and height from frame_size tuple
+            width, height = info['frame_size']
+            
             video_data = VideoData(
                 filename=Path(video_path).name,
                 file_path=video_path,
-                width=info['width'],
-                height=info['height'],
+                file_extension=Path(video_path).suffix.lower(),
+                metadata=metadata,
+                width=width,
+                height=height,
                 total_frames=info['total_frames'],
                 fps=info['fps'],
-                duration=info['duration']
+                duration_seconds=info['duration_seconds']
             )
             
             # Create new session
@@ -94,7 +110,7 @@ class ApplicationController:
             )
             
             # Reset ROI manager
-            self.roi_manager.clear_rois()
+            self.roi_manager.clear_all()
             
             logging.info(f"Video loaded: {video_path}")
             return video_data
@@ -106,7 +122,7 @@ class ApplicationController:
         else:
             self._notify_ui('video_load_failed', str(result.error))
         
-        return result
+        return result  # type: ignore
     
     def get_current_frame(self) -> Optional[Any]:
         """Get the current video frame."""
@@ -145,8 +161,10 @@ class ApplicationController:
         
         if result.is_success():
             self._notify_ui('roi_added', result.unwrap())
+        else:
+            self._notify_ui('roi_add_failed', str(result.error))
         
-        return result
+        return result  # type: ignore
     
     def delete_roi(self, roi_index: int) -> Result[bool, BrightnessSorcererError]:
         """Delete an ROI."""
@@ -163,8 +181,10 @@ class ApplicationController:
         
         if result.is_success() and result.unwrap():
             self._notify_ui('roi_deleted', roi_index)
+        else:
+            self._notify_ui('roi_delete_failed', str(result.error))
         
-        return result
+        return result  # type: ignore
     
     def select_roi(self, roi_index: Optional[int]) -> None:
         """Select an ROI."""
@@ -183,6 +203,14 @@ class ApplicationController:
             if success and self.current_session:
                 self.current_session.set_background_roi(roi_index)
                 logging.info(f"Background ROI set to index: {roi_index}")
+
+                if roi_index is not None:
+                    roi = self.roi_manager.get_roi(roi_index)
+                    if roi:
+                        avg_brightness = self.brightness_analyzer.calculate_roi_average_brightness(roi)
+                        if avg_brightness is not None:
+                            self.threshold_manager.set_threshold(avg_brightness)
+                            self._notify_ui('threshold_changed', avg_brightness)
             
             return success
         
@@ -190,8 +218,10 @@ class ApplicationController:
         
         if result.is_success():
             self._notify_ui('background_roi_changed', roi_index)
+        else:
+            self._notify_ui('background_roi_change_failed', str(result.error))
         
-        return result
+        return result  # type: ignore
     
     def rename_roi(self, roi_index: int, new_label: str) -> Result[bool, BrightnessSorcererError]:
         """Rename an ROI."""
@@ -213,8 +243,10 @@ class ApplicationController:
         
         if result.is_success():
             self._notify_ui('roi_renamed', roi_index, new_label)
+        else:
+            self._notify_ui('roi_rename_failed', str(result.error))
         
-        return result
+        return result  # type: ignore
     
     # Mouse Interaction Handling
     
@@ -340,7 +372,8 @@ class ApplicationController:
         # Validate configuration
         config_result = self.validate_analysis_config(start_frame, end_frame, output_dir)
         if config_result.is_error():
-            return error(AnalysisError("Invalid configuration", str(config_result.error)))
+            self._notify_ui('analysis_failed', str(config_result.error)) # Pass error message
+            return error(config_result.error) # Propagate the error
         
         def _start_analysis():
             self._analysis_running = True
@@ -358,7 +391,6 @@ class ApplicationController:
                     end_frame,
                     output_dir,
                     progress_callback=progress_callback,
-                    threshold_manager=self.threshold_manager,
                     background_roi=self.current_session.get_background_roi()
                 )
                 
@@ -379,7 +411,7 @@ class ApplicationController:
         else:
             self._notify_ui('analysis_failed', str(analysis_result.error))
         
-        return analysis_result
+        return analysis_result  # type: ignore
     
     def auto_detect_frame_range(self) -> Result[tuple[int, int], AnalysisError]:
         """Auto-detect optimal frame range for analysis."""
@@ -404,35 +436,37 @@ class ApplicationController:
         if result.is_success():
             start, end = result.unwrap()
             self._notify_ui('frame_range_detected', start, end)
+        else:
+            self._notify_ui('frame_range_detection_failed', str(result.error))
         
-        return result
+        return result  # type: ignore
     
     # Settings Management
     
-    def update_threshold_settings(self, **kwargs) -> Result[bool, BrightnessSorcererError]:
+    def update_threshold_settings(self, threshold: float) -> Result[bool, BrightnessSorcererError]:
         """Update threshold settings."""
         def _update_threshold():
-            self.threshold_manager.update_config(**kwargs)
+            self.threshold_manager.set_threshold(threshold)
             
             # Update session config if available
             if self.current_session:
-                for key, value in kwargs.items():
-                    if hasattr(self.current_session.config.threshold_config, key):
-                        setattr(self.current_session.config.threshold_config, key, value)
+                self.current_session.config.threshold_config.threshold = threshold
                 self.current_session.touch()
             
             # Save to settings
-            self.settings_manager.save_threshold_config(self.threshold_manager.get_config_dict())
+            self.settings_manager.save_settings()
             
-            logging.info(f"Threshold settings updated: {kwargs}")
+            logging.info(f"Threshold settings updated: {threshold}")
             return True
         
         result = safe_call(_update_threshold)
         
         if result.is_success():
-            self._notify_ui('threshold_settings_updated', kwargs)
+            self._notify_ui('threshold_changed', threshold)
+        else:
+            self._notify_ui('threshold_change_failed', str(result.error))
         
-        return result
+        return result  # type: ignore
     
     def get_analysis_defaults(self) -> Dict[str, Any]:
         """Get default analysis settings."""
@@ -444,11 +478,11 @@ class ApplicationController:
         """Save the current analysis session."""
         def _save_session():
             if not self.current_session:
-                raise FileOperationError(file_path, "save", "No session to save")
+                raise FileOperationError(file_path, "save")
             
             success = self.current_session.save_to_file(file_path)
             if not success:
-                raise FileOperationError(file_path, "save", "Failed to save session")
+                raise FileOperationError(file_path, "save")
             
             return True
         
@@ -456,15 +490,17 @@ class ApplicationController:
         
         if result.is_success():
             self._notify_ui('session_saved', file_path)
+        else:
+            self._notify_ui('session_save_failed', str(result.error))
         
-        return result
+        return result  # type: ignore
     
     def load_session(self, file_path: str) -> Result[AnalysisSession, FileOperationError]:
         """Load an analysis session."""
         def _load_session():
             session = AnalysisSession.load_from_file(file_path)
             if session is None:
-                raise FileOperationError(file_path, "load", "Failed to load session")
+                raise FileOperationError(file_path, "load")
             
             self.current_session = session
             
@@ -475,7 +511,7 @@ class ApplicationController:
                     logging.warning(f"Could not reload video: {session.video_data.file_path}")
             
             # Restore ROIs
-            self.roi_manager.clear_rois()
+            self.roi_manager.clear_all()
             for roi in session.rois:
                 self.roi_manager.add_roi_object(roi)
             
@@ -490,8 +526,10 @@ class ApplicationController:
         
         if result.is_success():
             self._notify_ui('session_loaded', result.unwrap())
+        else:
+            self._notify_ui('session_load_failed', str(result.error))
         
-        return result
+        return result  # type: ignore
     
     def get_session_summary(self) -> Optional[Dict[str, Any]]:
         """Get summary of current session."""
@@ -503,7 +541,7 @@ class ApplicationController:
     
     def cleanup(self):
         """Clean up resources."""
-        self.video_processor.cleanup()
-        self.roi_manager.clear_rois()
+        self.video_processor.cleanup()  # type: ignore
+        self.roi_manager.clear_all()
         self.current_session = None
         logging.info("ApplicationController cleaned up")

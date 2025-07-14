@@ -24,8 +24,8 @@ class VideoDisplayLabel(QtWidgets.QLabel):
         self.setMinimumSize(400, 300)
         self.setStyleSheet("border: 1px solid #555; background-color: #1e1e1e;")
         self.setAlignment(QtCore.Qt.AlignCenter)
-        self.setScaledContents(False)
-        self.setText("No video loaded")
+        self.setScaledContents(False)  # Don't auto-scale contents
+        self.setText("No video loaded\n\nDrag and drop a video file here,\nor use File → Open Video")
         
         # Mouse tracking
         self.setMouseTracking(True)
@@ -51,24 +51,28 @@ class VideoDisplayLabel(QtWidgets.QLabel):
             
             # Create QImage
             qt_image = QtGui.QImage(rgb_frame.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888)
-            
-            # Scale to fit widget while maintaining aspect ratio
-            widget_size = self.size()
-            scaled_pixmap = QtGui.QPixmap.fromImage(qt_image).scaled(
-                widget_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
-            )
+            pixmap = QtGui.QPixmap.fromImage(qt_image)
             
             # Calculate scale factor and offsets for coordinate conversion
-            if w > 0 and h > 0:
-                scale_x = scaled_pixmap.width() / w
-                scale_y = scaled_pixmap.height() / h
-                self._scale_factor = min(scale_x, scale_y)
+            if not pixmap.isNull():
+                pixmap_size = pixmap.size()
+                widget_size = self.size()
                 
-                # Calculate centering offsets
-                scaled_w = int(w * self._scale_factor)
-                scaled_h = int(h * self._scale_factor)
-                self._offset_x = (widget_size.width() - scaled_w) // 2
-                self._offset_y = (widget_size.height() - scaled_h) // 2
+                scale_x = widget_size.width() / pixmap_size.width()
+                scale_y = widget_size.height() / pixmap_size.height()
+                self._scale_factor = min(scale_x, scale_y)
+            
+            # Scale to fit widget while maintaining aspect ratio
+            scaled_pixmap = pixmap.scaled(
+                self.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+            )
+            
+            # Calculate offsets for coordinate conversion
+            scaled_w = int(pixmap_size.width() * self._scale_factor)
+            scaled_h = int(pixmap_size.height() * self._scale_factor)
+            
+            self._offset_x = (widget_size.width() - scaled_w) // 2
+            self._offset_y = (widget_size.height() - scaled_h) // 2
             
             self.setPixmap(scaled_pixmap)
             
@@ -124,6 +128,13 @@ class VideoWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self.app_controller = app_controller
         
+        # Playback state
+        self.is_playing = False
+        self.fast_forward_mode = False
+        self.playback_speed = 1.0
+        self.playback_timer = QtCore.QTimer()
+        self.playback_timer.timeout.connect(self._advance_frame)
+        
         self._setup_ui()
         self._connect_signals()
         
@@ -141,6 +152,9 @@ class VideoWidget(QtWidgets.QWidget):
         
         # Video display
         self.video_display = VideoDisplayLabel()
+        self.video_display.setMinimumSize(400, 300)
+        self.video_display.setMaximumSize(1200, 900)  # Prevent excessive resizing
+        self.video_display.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         layout.addWidget(self.video_display)
         
         # Frame navigation controls
@@ -161,17 +175,54 @@ class VideoWidget(QtWidgets.QWidget):
         # Navigation buttons
         btn_layout = QtWidgets.QHBoxLayout()
         
+        # Frame-by-frame controls
         self.prev_frame_btn = QtWidgets.QPushButton("◀")
         self.prev_frame_btn.setMaximumWidth(40)
         self.prev_frame_btn.setEnabled(False)
+        self.prev_frame_btn.setToolTip("Previous frame")
         btn_layout.addWidget(self.prev_frame_btn)
         
         self.next_frame_btn = QtWidgets.QPushButton("▶")
         self.next_frame_btn.setMaximumWidth(40)
         self.next_frame_btn.setEnabled(False)
+        self.next_frame_btn.setToolTip("Next frame")
         btn_layout.addWidget(self.next_frame_btn)
         
+        btn_layout.addWidget(QtWidgets.QLabel("|"))
+        
+        # 10-frame skip controls
+        self.prev_10_btn = QtWidgets.QPushButton("◀◀")
+        self.prev_10_btn.setMaximumWidth(50)
+        self.prev_10_btn.setEnabled(False)
+        self.prev_10_btn.setToolTip("Skip back 10 frames")
+        btn_layout.addWidget(self.prev_10_btn)
+        
+        self.next_10_btn = QtWidgets.QPushButton("▶▶")
+        self.next_10_btn.setMaximumWidth(50)
+        self.next_10_btn.setEnabled(False)
+        self.next_10_btn.setToolTip("Skip forward 10 frames")
+        btn_layout.addWidget(self.next_10_btn)
+        
+        btn_layout.addWidget(QtWidgets.QLabel("|"))
+        
+        # Playback controls
+        self.play_pause_btn = QtWidgets.QPushButton("▶")
+        self.play_pause_btn.setMaximumWidth(40)
+        self.play_pause_btn.setEnabled(False)
+        self.play_pause_btn.setToolTip("Play/Pause")
+        btn_layout.addWidget(self.play_pause_btn)
+        
+        self.fast_forward_btn = QtWidgets.QPushButton("⏩")
+        self.fast_forward_btn.setMaximumWidth(40)
+        self.fast_forward_btn.setEnabled(False)
+        self.fast_forward_btn.setToolTip("Fast forward")
+        btn_layout.addWidget(self.fast_forward_btn)
+        
         btn_layout.addStretch()
+        
+        # Speed control
+        self.speed_label = QtWidgets.QLabel("1x")
+        btn_layout.addWidget(self.speed_label)
         
         self.zoom_label = QtWidgets.QLabel("100%")
         btn_layout.addWidget(self.zoom_label)
@@ -185,16 +236,21 @@ class VideoWidget(QtWidgets.QWidget):
         self.prev_frame_btn.clicked.connect(lambda: self._step_frames(-1))
         self.next_frame_btn.clicked.connect(lambda: self._step_frames(1))
         
+        # 10-frame skip controls
+        self.prev_10_btn.clicked.connect(lambda: self._step_frames(-10))
+        self.next_10_btn.clicked.connect(lambda: self._step_frames(10))
+        
+        # Playback controls
+        self.play_pause_btn.clicked.connect(self._toggle_playback)
+        self.fast_forward_btn.clicked.connect(self._toggle_fast_forward)
+        
         # Mouse interactions
         self.video_display.mouse_pressed.connect(self._on_mouse_pressed)
         self.video_display.mouse_moved.connect(self._on_mouse_moved)
         self.video_display.mouse_released.connect(self._on_mouse_released)
         self.video_display.mouse_double_clicked.connect(self._on_mouse_double_clicked)
     
-    def load_video(self, video_path: str) -> bool:
-        """Load a video file via the application controller."""
-        result = self.app_controller.load_video(video_path)
-        return result.is_success()
+    
     
     def _update_video_controls(self):
         """Update video controls based on loaded video."""
@@ -207,18 +263,30 @@ class VideoWidget(QtWidgets.QWidget):
             self.frame_slider.setValue(0)
             self.frame_slider.setEnabled(True)
             
-            # Enable controls
+            # Enable all controls
             self.prev_frame_btn.setEnabled(True)
             self.next_frame_btn.setEnabled(True)
+            self.prev_10_btn.setEnabled(True)
+            self.next_10_btn.setEnabled(True)
+            self.play_pause_btn.setEnabled(True)
+            self.fast_forward_btn.setEnabled(True)
             
             # Update frame info
             self._update_frame_info()
         else:
-            # Disable controls
+            # Disable all controls
             self.frame_slider.setEnabled(False)
             self.prev_frame_btn.setEnabled(False)
             self.next_frame_btn.setEnabled(False)
+            self.prev_10_btn.setEnabled(False)
+            self.next_10_btn.setEnabled(False)
+            self.play_pause_btn.setEnabled(False)
+            self.fast_forward_btn.setEnabled(False)
             self.frame_info_label.setText("No video")
+            
+            # Stop playback if running
+            if self.is_playing:
+                self._pause_playback()
     
     def _update_frame_info(self):
         """Update frame information display."""
@@ -272,6 +340,76 @@ class VideoWidget(QtWidgets.QWidget):
             self.update_display()
             self.frame_changed.emit(self.app_controller.video_processor.current_frame_index)
     
+    def _toggle_playback(self):
+        """Toggle play/pause."""
+        if not self.app_controller.video_processor.is_loaded():
+            return
+            
+        if self.is_playing:
+            self._pause_playback()
+        else:
+            self._start_playback()
+    
+    def _start_playback(self):
+        """Start video playback."""
+        if not self.app_controller.video_processor.is_loaded():
+            return
+            
+        self.is_playing = True
+        self.play_pause_btn.setText("⏸")
+        self.play_pause_btn.setToolTip("Pause")
+        
+        # Calculate timer interval based on FPS and playback speed
+        fps = self.app_controller.video_processor.fps
+        if fps > 0:
+            interval = int(1000 / (fps * self.playback_speed))
+            self.playback_timer.start(interval)
+    
+    def _pause_playback(self):
+        """Pause video playback."""
+        self.is_playing = False
+        self.playback_timer.stop()
+        self.play_pause_btn.setText("▶")
+        self.play_pause_btn.setToolTip("Play")
+    
+    def _toggle_fast_forward(self):
+        """Toggle fast forward mode."""
+        if not self.app_controller.video_processor.is_loaded():
+            return
+            
+        if self.fast_forward_mode:
+            self.fast_forward_mode = False
+            self.playback_speed = 1.0
+            self.fast_forward_btn.setText("⏩")
+            self.speed_label.setText("1x")
+        else:
+            self.fast_forward_mode = True
+            self.playback_speed = 4.0
+            self.fast_forward_btn.setText("⏸")
+            self.speed_label.setText("4x")
+            
+        # Update timer if playing
+        if self.is_playing:
+            self._pause_playback()
+            self._start_playback()
+    
+    def _advance_frame(self):
+        """Advance to next frame during playback."""
+        if not self.app_controller.video_processor.is_loaded():
+            self._pause_playback()
+            return
+            
+        # Check if we've reached the end
+        current_frame = self.app_controller.video_processor.current_frame_index
+        total_frames = self.app_controller.video_processor.total_frames
+        
+        if current_frame >= total_frames - 1:
+            self._pause_playback()
+            return
+            
+        # Advance frame
+        self._step_frames(1)
+    
     def _on_frame_slider_changed(self, frame_index: int):
         """Handle frame slider changes."""
         if self.app_controller.seek_to_frame(frame_index):
@@ -303,6 +441,7 @@ class VideoWidget(QtWidgets.QWidget):
         """Handle video loaded from controller."""
         self._update_video_controls()
         self.update_display()
+        self.update_display()
     
     def _on_roi_created(self, roi_index: int):
         """Handle ROI creation from controller."""
@@ -312,35 +451,4 @@ class VideoWidget(QtWidgets.QWidget):
         """Handle ROI selection from controller."""
         self.update_display()
     
-    def keyPressEvent(self, event):
-        """Handle key press events."""
-        key = event.key()
-        
-        if key in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Backspace):
-            self._step_frames(-1)
-        elif key in (QtCore.Qt.Key_Right, QtCore.Qt.Key_Space):
-            self._step_frames(1)
-        elif key == QtCore.Qt.Key_PageUp:
-            self._step_frames(-10)
-        elif key == QtCore.Qt.Key_PageDown:
-            self._step_frames(10)
-        elif key == QtCore.Qt.Key_Home:
-            if self.app_controller.video_processor.is_loaded():
-                self._on_frame_slider_changed(0)
-        elif key == QtCore.Qt.Key_End:
-            if self.app_controller.video_processor.is_loaded():
-                info = self.app_controller.video_processor.get_video_info()
-                self._on_frame_slider_changed(info['total_frames'] - 1)
-        elif key == QtCore.Qt.Key_Delete:
-            # Delete selected ROI
-            if self.app_controller.roi_manager.selected_roi_index is not None:
-                roi_index = self.app_controller.roi_manager.selected_roi_index
-                result = self.app_controller.delete_roi(roi_index)
-                if result.is_success():
-                    self.roi_interaction.emit("deleted", roi_index, -1)
-        elif key == QtCore.Qt.Key_Escape:
-            # Cancel current action
-            self.app_controller.roi_manager.cancel_all_interactions()
-            self.update_display()
-        else:
-            super().keyPressEvent(event)
+    

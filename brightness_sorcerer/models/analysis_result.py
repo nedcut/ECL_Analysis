@@ -38,7 +38,6 @@ class AnalysisResult:
     # Analysis parameters
     roi_labels: List[str] = field(default_factory=list)
     brightness_threshold: Optional[float] = None
-    noise_floor: float = 10.0
     background_roi_label: Optional[str] = None
     
     # Frame-by-frame data
@@ -151,7 +150,6 @@ class AnalysisResult:
                 'analysis_timestamp': self.analysis_timestamp.isoformat(),
                 'roi_labels': self.roi_labels,
                 'brightness_threshold': self.brightness_threshold,
-                'noise_floor': self.noise_floor,
                 'background_roi_label': self.background_roi_label
             },
             'frame_data': [
@@ -189,7 +187,6 @@ class AnalysisResult:
             analysis_timestamp=datetime.fromisoformat(metadata['analysis_timestamp']),
             roi_labels=metadata.get('roi_labels', []),
             brightness_threshold=metadata.get('brightness_threshold'),
-            noise_floor=metadata.get('noise_floor', 10.0),
             background_roi_label=metadata.get('background_roi_label'),
             summary_stats=data.get('summary_stats', {})
         )

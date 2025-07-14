@@ -44,3 +44,377 @@
 2025-07-10 17:39:55,120 - root - INFO - Application closed
 2025-07-10 17:39:55,133 - __main__ - INFO - Cleaning up application resources
 2025-07-10 17:39:55,133 - __main__ - INFO - Cleanup completed
+2025-07-10 21:31:08,775 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-10 21:31:08,775 - __main__ - INFO - Application initialized successfully
+2025-07-10 21:31:08,890 - __main__ - ERROR - Application error: BrightnessAnalyzer.__init__() missing 1 required positional argument: 'video_processor'
+Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 50, in run
+    self.main_window = MainWindow()
+                       ~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/main_window.py", line 23, in __init__
+    self.app_controller = ApplicationController()
+                          ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/core/application_controller.py", line 38, in __init__
+    self.brightness_analyzer = BrightnessAnalyzer()
+                               ~~~~~~~~~~~~~~~~~~^^
+TypeError: BrightnessAnalyzer.__init__() missing 1 required positional argument: 'video_processor'
+2025-07-10 21:31:15,687 - __main__ - INFO - Cleaning up application resources
+2025-07-10 21:31:15,687 - __main__ - INFO - Cleanup completed
+2025-07-10 21:33:17,621 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-10 21:33:17,621 - __main__ - INFO - Application initialized successfully
+2025-07-10 21:33:17,717 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-10 21:33:17,717 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:33:17,717 - root - INFO - ApplicationController initialized
+2025-07-10 21:33:17,746 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=0.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:33:17,746 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 21:33:17,746 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:33:17,746 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 21:33:17,806 - __main__ - ERROR - Application error: 'MainWindow' object has no attribute 'settings_manager'
+Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 50, in run
+    self.main_window = MainWindow()
+                       ~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/main_window.py", line 30, in __init__
+    self._setup_menus()
+    ~~~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/main_window.py", line 105, in _setup_menus
+    self._update_recent_files_menu()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/main_window.py", line 254, in _update_recent_files_menu
+    recent_files = self.settings_manager.get_recent_files()
+                   ^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'MainWindow' object has no attribute 'settings_manager'
+2025-07-10 21:33:21,369 - __main__ - INFO - Cleaning up application resources
+2025-07-10 21:33:21,369 - __main__ - INFO - Cleanup completed
+2025-07-10 21:35:01,175 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-10 21:35:01,175 - __main__ - INFO - Application initialized successfully
+2025-07-10 21:35:01,294 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-10 21:35:01,294 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:35:01,294 - root - INFO - ApplicationController initialized
+2025-07-10 21:35:01,325 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=0.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:35:01,326 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 21:35:01,326 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:35:01,326 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 21:35:01,381 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 21:35:01,381 - root - INFO - Main window initialized
+2025-07-10 21:35:01,391 - __main__ - INFO - Main window created and shown
+2025-07-10 21:35:13,683 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4 (781 frames, 30.11 fps)
+2025-07-10 21:35:34,470 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-10 21:35:34,470 - __main__ - INFO - Application initialized successfully
+2025-07-10 21:35:34,568 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-10 21:35:34,568 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:35:34,568 - root - INFO - ApplicationController initialized
+2025-07-10 21:35:34,589 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=0.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:35:34,589 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 21:35:34,589 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:35:34,590 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 21:35:34,638 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 21:35:34,638 - root - INFO - Main window initialized
+2025-07-10 21:35:34,651 - __main__ - INFO - Main window created and shown
+2025-07-10 21:36:01,430 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4 (781 frames, 30.11 fps)
+2025-07-10 21:36:01,460 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-10 21:36:01,460 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 21:36:01,461 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-10 21:36:03,727 - root - INFO - Added ROI 0: ROI(x=310, y=181, w=287, h=253, label='ROI 1')
+2025-07-10 21:36:18,748 - root - INFO - Added ROI 1: ROI(x=100, y=100, w=200, h=150, label='ROI')
+2025-07-10 21:36:18,748 - root - INFO - ROI added: ROI at index 1
+2025-07-10 21:36:38,364 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 21:36:38,365 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 21:36:38,366 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 21:43:59,777 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-10 21:43:59,777 - __main__ - INFO - Application initialized successfully
+2025-07-10 21:43:59,881 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-10 21:43:59,881 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:43:59,881 - root - INFO - ApplicationController initialized
+2025-07-10 21:43:59,916 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=0.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:43:59,916 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 21:43:59,916 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 21:43:59,916 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 21:43:59,970 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 21:43:59,970 - root - INFO - Main window initialized
+2025-07-10 21:43:59,981 - __main__ - INFO - Main window created and shown
+2025-07-10 21:44:06,437 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4 (781 frames, 30.11 fps)
+2025-07-10 21:44:06,468 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-10 21:44:06,469 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 21:44:06,469 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-10 21:44:13,464 - root - INFO - Added ROI 0: ROI(x=281, y=161, w=247, h=225, label='ROI 1')
+2025-07-10 21:44:24,423 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 21:44:24,424 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 21:44:24,425 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:01:31,596 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-10 22:01:31,596 - __main__ - INFO - Application initialized successfully
+2025-07-10 22:01:31,699 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-10 22:01:31,700 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 22:01:31,700 - root - INFO - ApplicationController initialized
+2025-07-10 22:01:31,706 - __main__ - ERROR - Application error: 'ROIListWidget' object has no attribute '_on_delete_roi_clicked'
+Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 50, in run
+    self.main_window = MainWindow()
+                       ~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/main_window.py", line 29, in __init__
+    self._setup_ui()
+    ~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/main_window.py", line 64, in _setup_ui
+    self.controls_panel = ControlsPanel(self.app_controller)
+                          ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/controls_panel.py", line 433, in __init__
+    self._setup_ui()
+    ~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/controls_panel.py", line 442, in _setup_ui
+    self.roi_widget = ROIListWidget(self.app_controller)
+                      ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/controls_panel.py", line 28, in __init__
+    self._connect_signals()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/controls_panel.py", line 78, in _connect_signals
+    self.delete_roi_btn.clicked.connect(self._on_delete_roi_clicked)
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'ROIListWidget' object has no attribute '_on_delete_roi_clicked'. Did you mean: '_on_add_roi_clicked'?
+2025-07-10 22:05:04,654 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-10 22:05:04,654 - __main__ - INFO - Application initialized successfully
+2025-07-10 22:05:04,747 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-10 22:05:04,747 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 22:05:04,747 - root - INFO - ApplicationController initialized
+2025-07-10 22:05:04,770 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=0.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 22:05:04,770 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 22:05:04,770 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 22:05:04,770 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 22:05:04,819 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:05:04,819 - root - INFO - Main window initialized
+2025-07-10 22:05:04,833 - __main__ - INFO - Main window created and shown
+2025-07-10 22:05:10,383 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4 (781 frames, 30.11 fps)
+2025-07-10 22:05:10,414 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-10 22:05:10,414 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:05:10,415 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-10 22:05:12,013 - root - INFO - Added ROI 0: ROI(x=375, y=153, w=379, h=214, label='ROI 1')
+2025-07-10 22:05:28,753 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:05:28,753 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:05:28,753 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:10:59,608 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-10 22:10:59,608 - __main__ - INFO - Application initialized successfully
+2025-07-10 22:10:59,713 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-10 22:10:59,713 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 22:10:59,713 - root - INFO - ApplicationController initialized
+2025-07-10 22:10:59,743 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=0.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 22:10:59,744 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 22:10:59,744 - root - INFO - ThresholdManager configuration updated: ThresholdConfig(manual_threshold=5.0, noise_floor=10.0, baseline_percentile=5.0, min_consecutive_frames=3, use_background_roi=True)
+2025-07-10 22:10:59,744 - root - ERROR - Failed to save threshold settings: 'SettingsManager' object has no attribute 'save_threshold_config'
+2025-07-10 22:10:59,792 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:10:59,792 - root - INFO - Main window initialized
+2025-07-10 22:10:59,802 - __main__ - INFO - Main window created and shown
+2025-07-10 22:11:07,329 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4 (781 frames, 30.11 fps)
+2025-07-10 22:11:07,356 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-10 22:11:07,366 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:11:07,366 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-10 22:11:20,714 - root - INFO - Added ROI 0: ROI(x=827, y=173, w=129, h=121, label='ROI 1')
+2025-07-10 22:11:24,638 - root - INFO - Added ROI 1: ROI(x=606, y=382, w=90, h=99, label='ROI 2')
+2025-07-10 22:11:58,167 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:11:58,168 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:11:58,168 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:35:48,814 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-10 22:35:48,814 - __main__ - INFO - Application initialized successfully
+2025-07-10 22:35:48,914 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(threshold=10.0)
+2025-07-10 22:35:48,914 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-10 22:35:48,914 - root - INFO - ApplicationController initialized
+2025-07-10 22:35:48,947 - __main__ - ERROR - Application error: 'threshold'
+Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 50, in run
+    self.main_window = MainWindow()
+                       ~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/main_window.py", line 29, in __init__
+    self._setup_ui()
+    ~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/main_window.py", line 64, in _setup_ui
+    self.controls_panel = ControlsPanel(self.app_controller)
+                          ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/controls_panel.py", line 471, in __init__
+    self._setup_ui()
+    ~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/controls_panel.py", line 484, in _setup_ui
+    self.analysis_widget = AnalysisControlsWidget(self.app_controller)
+                           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/controls_panel.py", line 222, in __init__
+    self._load_settings()
+    ~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/controls_panel.py", line 333, in _load_settings
+    self.threshold_spin.setValue(defaults['threshold'])
+                                 ~~~~~~~~^^^^^^^^^^^^^
+KeyError: 'threshold'
+2025-07-10 22:35:51,465 - __main__ - INFO - Cleaning up application resources
+2025-07-10 22:35:51,466 - __main__ - INFO - Cleanup completed
+2025-07-10 22:37:57,480 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-10 22:37:57,480 - __main__ - INFO - Application initialized successfully
+2025-07-10 22:37:57,566 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(threshold=10.0)
+2025-07-10 22:37:57,566 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-10 22:37:57,566 - root - INFO - ApplicationController initialized
+2025-07-10 22:37:57,587 - root - INFO - Threshold set to: 5.0
+2025-07-10 22:37:57,641 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:37:57,641 - root - INFO - Main window initialized
+2025-07-10 22:37:57,651 - __main__ - INFO - Main window created and shown
+2025-07-10 22:38:08,753 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4 (781 frames, 30.11 fps)
+2025-07-10 22:38:08,780 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-10 22:38:08,789 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:38:08,789 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-10 22:38:18,680 - root - INFO - Added ROI 0: ROI(x=829, y=181, w=123, h=103, label='ROI 1')
+2025-07-10 22:38:21,056 - root - INFO - Added ROI 1: ROI(x=825, y=380, w=152, h=139, label='ROI 2')
+2025-07-10 22:38:59,114 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:38:59,119 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-10 22:38:59,123 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:39:10,393 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-14 09:39:10,393 - __main__ - INFO - Application initialized successfully
+2025-07-14 09:39:10,525 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(threshold=10.0)
+2025-07-14 09:39:10,526 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-14 09:39:10,526 - root - INFO - ApplicationController initialized
+2025-07-14 09:39:10,563 - root - INFO - Threshold set to: 5.0
+2025-07-14 09:39:10,563 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:39:10,563 - root - INFO - Threshold settings updated: 5.0
+2025-07-14 09:39:10,658 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:39:10,658 - __main__ - ERROR - Application error: 'MainWindow' object has no attribute '_on_video_load_failed'
+Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 50, in run
+    self.main_window = MainWindow()
+                       ~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/brightness_sorcerer/ui/main_window.py", line 36, in __init__
+    self.app_controller.register_ui_callback('video_load_failed', self._on_video_load_failed)
+                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'MainWindow' object has no attribute '_on_video_load_failed'. Did you mean: '_on_session_load_failed'?
+2025-07-14 09:39:35,381 - __main__ - INFO - Application interrupted by user
+2025-07-14 09:41:09,495 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-14 09:41:09,496 - __main__ - INFO - Application initialized successfully
+2025-07-14 09:41:09,605 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(threshold=10.0)
+2025-07-14 09:41:09,606 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-14 09:41:09,606 - root - INFO - ApplicationController initialized
+2025-07-14 09:41:09,641 - root - INFO - Threshold set to: 5.0
+2025-07-14 09:41:09,641 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:41:09,641 - root - INFO - Threshold settings updated: 5.0
+2025-07-14 09:41:09,698 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:41:09,698 - root - INFO - Main window initialized
+2025-07-14 09:41:09,712 - __main__ - INFO - Main window created and shown
+2025-07-14 09:41:18,010 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4 (781 frames, 30.11 fps)
+2025-07-14 09:41:18,040 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-14 09:41:18,051 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:41:18,051 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-14 09:41:24,092 - root - INFO - Added ROI 0: ROI(x=821, y=181, w=142, h=109, label='ROI 1')
+2025-07-14 09:41:29,214 - root - INFO - Auto-detected frame range: 0 - 600
+2025-07-14 09:41:29,214 - root - INFO - Auto-detected frame range: 0 - 600
+2025-07-14 09:41:59,155 - root - INFO - Threshold set to: 0.0
+2025-07-14 09:41:59,157 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:41:59,157 - root - INFO - Threshold settings updated: 0.0
+2025-07-14 09:41:59,698 - root - INFO - Threshold set to: 10.0
+2025-07-14 09:41:59,699 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:41:59,700 - root - INFO - Threshold settings updated: 10.0
+2025-07-14 09:42:01,619 - root - INFO - Threshold set to: 1.0
+2025-07-14 09:42:01,620 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:42:01,620 - root - INFO - Threshold settings updated: 1.0
+2025-07-14 09:42:03,250 - root - INFO - Threshold set to: 1.0
+2025-07-14 09:42:03,252 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:42:03,252 - root - INFO - Threshold settings updated: 1.0
+2025-07-14 09:42:10,697 - root - INFO - Added ROI 1: ROI(x=540, y=285, w=200, h=150, label='ROI 2')
+2025-07-14 09:42:24,543 - root - INFO - Saved CSV: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_094224.csv
+2025-07-14 09:42:24,544 - root - INFO - Saved metadata: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_094224_metadata.json
+2025-07-14 09:42:24,824 - root - INFO - Saved plot: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_094224.png
+2025-07-14 09:42:24,824 - root - INFO - Analysis completed successfully: /Users/nedcutler/Desktop/cache
+2025-07-14 09:50:31,847 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-14 09:50:31,847 - __main__ - INFO - Application initialized successfully
+2025-07-14 09:50:31,949 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(threshold=10.0)
+2025-07-14 09:50:31,949 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-14 09:50:31,949 - root - INFO - ApplicationController initialized
+2025-07-14 09:50:31,984 - root - INFO - Threshold set to: 5.0
+2025-07-14 09:50:31,984 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:50:31,985 - root - INFO - Threshold settings updated: 5.0
+2025-07-14 09:50:32,038 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:50:32,038 - root - INFO - Main window initialized
+2025-07-14 09:50:32,132 - __main__ - INFO - Main window created and shown
+2025-07-14 09:50:45,163 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4 (781 frames, 30.11 fps)
+2025-07-14 09:50:45,192 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-14 09:50:45,201 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:50:45,201 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-14 09:51:01,995 - root - INFO - Added ROI 0: ROI(x=540, y=285, w=200, h=150, label='ROI 1')
+2025-07-14 09:51:34,236 - root - INFO - Added ROI 1: ROI(x=641, y=475, w=87, h=69, label='ROI 2')
+2025-07-14 09:51:49,919 - root - INFO - Saved CSV: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_095149.csv
+2025-07-14 09:51:49,919 - root - INFO - Saved metadata: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_095149_metadata.json
+2025-07-14 09:51:50,136 - root - INFO - Saved plot: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_095149.png
+2025-07-14 09:51:50,136 - root - INFO - Analysis completed successfully: /Users/nedcutler/Desktop/cache
+2025-07-14 09:52:02,252 - root - INFO - Saved CSV: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_095201.csv
+2025-07-14 09:52:02,253 - root - INFO - Saved metadata: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_095201_metadata.json
+2025-07-14 09:52:02,429 - root - INFO - Saved plot: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_095201.png
+2025-07-14 09:52:02,429 - root - INFO - Analysis completed successfully: /Users/nedcutler/Desktop/cache
+2025-07-14 09:52:43,795 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:52:43,796 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:52:43,796 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 09:52:43,814 - root - INFO - ApplicationController cleaned up
+2025-07-14 09:52:43,815 - root - INFO - Application closed
+2025-07-14 09:52:43,820 - __main__ - INFO - Cleaning up application resources
+2025-07-14 09:52:43,820 - __main__ - INFO - Cleanup completed
+2025-07-14 12:58:15,022 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-14 12:58:15,022 - __main__ - INFO - Application initialized successfully
+2025-07-14 12:58:15,173 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(threshold=10.0)
+2025-07-14 12:58:15,173 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-14 12:58:15,173 - root - INFO - ApplicationController initialized
+2025-07-14 12:58:15,212 - root - INFO - Threshold set to: 5.0
+2025-07-14 12:58:15,212 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 12:58:15,212 - root - INFO - Threshold settings updated: 5.0
+2025-07-14 12:58:15,277 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 12:58:15,277 - root - INFO - Main window initialized
+2025-07-14 12:58:15,371 - __main__ - INFO - Main window created and shown
+2025-07-14 12:58:26,422 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4 (781 frames, 30.11 fps)
+2025-07-14 12:58:26,450 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-14 12:58:26,459 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 12:58:26,461 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-14 12:58:31,449 - root - INFO - Added ROI 0: ROI(x=540, y=285, w=200, h=150, label='ROI 1')
+2025-07-14 12:58:31,449 - root - INFO - ROI added: ROI 1 at index 0
+2025-07-14 12:58:36,199 - root - INFO - Added ROI 1: ROI(x=540, y=285, w=200, h=150, label='ROI 2')
+2025-07-14 12:58:36,200 - root - INFO - ROI added: ROI 2 at index 1
+2025-07-14 12:58:38,774 - root - INFO - Background ROI set to index: 1
+2025-07-14 12:58:38,863 - root - INFO - Threshold set to: 1.1055666208267212
+2025-07-14 12:58:38,863 - root - INFO - Threshold set to: 1.11
+2025-07-14 12:58:38,863 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 12:58:38,863 - root - INFO - Threshold settings updated: 1.11
+2025-07-14 12:59:03,033 - root - INFO - Saved CSV: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_125902.csv
+2025-07-14 12:59:03,034 - root - INFO - Saved metadata: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_125902_metadata.json
+2025-07-14 12:59:03,265 - root - INFO - Saved plot: /Users/nedcutler/Desktop/cache/Jasper Data Device 1_analysis_20250714_125902.png
+2025-07-14 12:59:03,265 - root - INFO - Analysis completed successfully: /Users/nedcutler/Desktop/cache
+2025-07-14 13:02:50,398 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:02:50,400 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:02:50,400 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:02:50,422 - root - INFO - ApplicationController cleaned up
+2025-07-14 13:02:50,422 - root - INFO - Application closed
+2025-07-14 13:02:50,433 - __main__ - INFO - Cleaning up application resources
+2025-07-14 13:02:50,433 - __main__ - INFO - Cleanup completed
+2025-07-14 13:03:31,732 - __main__ - INFO - Initializing Brightness Sorcerer v3.0
+2025-07-14 13:03:31,732 - __main__ - INFO - Application initialized successfully
+2025-07-14 13:03:31,834 - root - INFO - ThresholdManager initialized with config: ThresholdConfig(threshold=10.0)
+2025-07-14 13:03:31,834 - root - INFO - Settings loaded from brightness_analyzer_settings.json
+2025-07-14 13:03:31,834 - root - INFO - ApplicationController initialized
+2025-07-14 13:03:31,872 - root - INFO - Threshold set to: 5.0
+2025-07-14 13:03:31,872 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:03:31,872 - root - INFO - Threshold settings updated: 5.0
+2025-07-14 13:03:31,928 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:03:31,928 - root - INFO - Main window initialized
+2025-07-14 13:03:31,978 - __main__ - INFO - Main window created and shown
+2025-07-14 13:03:47,663 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4 (781 frames, 30.11 fps)
+2025-07-14 13:03:47,692 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-14 13:03:47,701 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:03:47,702 - root - INFO - Video loaded: /Users/nedcutler/Downloads/Jasper Data Device 1.mp4
+2025-07-14 13:03:52,876 - root - INFO - Added ROI 0: ROI(x=540, y=285, w=200, h=150, label='ROI 1')
+2025-07-14 13:03:52,876 - root - INFO - ROI added: ROI 1 at index 0
+2025-07-14 13:03:56,078 - root - INFO - Added ROI 1: ROI(x=540, y=285, w=200, h=150, label='ROI 2')
+2025-07-14 13:03:56,078 - root - INFO - ROI added: ROI 2 at index 1
+2025-07-14 13:03:58,393 - root - INFO - Background ROI set to index: 1
+2025-07-14 13:03:58,481 - root - INFO - Threshold set to: 1.0494333505630493
+2025-07-14 13:03:58,481 - root - INFO - Threshold set to: 1.05
+2025-07-14 13:03:58,482 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:03:58,482 - root - INFO - Threshold settings updated: 1.05
+2025-07-14 13:04:24,878 - root - INFO - Threshold set to: 0.55
+2025-07-14 13:04:24,880 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:04:24,880 - root - INFO - Threshold settings updated: 0.55
+2025-07-14 13:04:25,098 - root - INFO - Threshold set to: 0.050000000000000044
+2025-07-14 13:04:25,099 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:04:25,099 - root - INFO - Threshold settings updated: 0.050000000000000044
+2025-07-14 13:07:07,883 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:07:07,884 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:07:07,885 - root - INFO - Settings saved to brightness_analyzer_settings.json
+2025-07-14 13:07:07,902 - root - INFO - ApplicationController cleaned up
+2025-07-14 13:07:07,902 - root - INFO - Application closed
+2025-07-14 13:07:07,913 - __main__ - INFO - Cleaning up application resources
+2025-07-14 13:07:07,913 - __main__ - INFO - Cleanup completed

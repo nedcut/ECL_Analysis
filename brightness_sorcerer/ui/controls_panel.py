@@ -16,6 +16,7 @@ class ROIListWidget(QtWidgets.QWidget):
     """Widget for managing ROI list."""
     
     # Signals
+    add_roi_requested = QtCore.pyqtSignal()
     roi_selected = QtCore.pyqtSignal(int)  # roi_index
     roi_deleted = QtCore.pyqtSignal(int)   # roi_index
     background_roi_changed = QtCore.pyqtSignal(int)  # roi_index or -1 for none
@@ -32,6 +33,10 @@ class ROIListWidget(QtWidgets.QWidget):
         self.app_controller.register_ui_callback('roi_selected', self._update_selection)
         self.app_controller.register_ui_callback('roi_renamed', self._update_roi_list)
         self.app_controller.register_ui_callback('background_roi_changed', self._update_roi_list)
+        self.app_controller.register_ui_callback('video_loaded', self._update_roi_list)
+        
+        # Initial update of ROI list
+        self._update_roi_list()
     
     def _setup_ui(self):
         """Setup the widget UI."""
@@ -83,8 +88,16 @@ class ROIListWidget(QtWidgets.QWidget):
         """Update the ROI list display."""
         self.roi_list.clear()
         
+        if not self.app_controller.roi_manager.rois:
+            # Show placeholder when no ROIs exist
+            item = QtWidgets.QListWidgetItem("No ROIs - Click 'Add ROI' or use Ctrl+R")
+            item.setForeground(QtGui.QColor(128, 128, 128))  # Gray text
+            item.setFlags(QtCore.Qt.NoItemFlags)  # Make it non-selectable
+            self.roi_list.addItem(item)
+            return
+        
         for i, roi in enumerate(self.app_controller.roi_manager.rois):
-            item_text = roi.label
+            item_text = roi.label or f"ROI {i + 1}"
             if roi.is_background:
                 item_text += " (Background)"
             
@@ -117,48 +130,59 @@ class ROIListWidget(QtWidgets.QWidget):
     
     def _on_add_roi_clicked(self):
         """Handle add ROI button click."""
-        # Add default ROI in center of frame
-        result = self.app_controller.add_roi(100, 100, 200, 150, "ROI")
-        if result.is_error():
-            logging.error(f"Failed to add ROI: {result.error}")
+        self.add_roi_requested.emit()
     
     def _on_delete_roi_clicked(self):
         """Handle delete ROI button click."""
-        selected_index = self.app_controller.roi_manager.selected_roi_index
-        if selected_index is not None:
-            result = self.app_controller.delete_roi(selected_index)
-            if result.is_success():
-                self.roi_deleted.emit(selected_index)
-            else:
-                logging.error(f"Failed to delete ROI: {result.error}")
+        current_item = self.roi_list.currentItem()
+        if current_item:
+            roi_index = current_item.data(QtCore.Qt.UserRole)
+            self.roi_deleted.emit(roi_index)
     
     def _on_set_background_clicked(self):
-        """Handle set background button click."""
-        selected_index = self.app_controller.roi_manager.selected_roi_index
-        if selected_index is not None:
-            current_bg = self.app_controller.roi_manager.background_roi_index
-            
-            if current_bg == selected_index:
-                # Unset background
-                result = self.app_controller.set_background_roi(None)
-                if result.is_success():
-                    self.background_roi_changed.emit(-1)
-            else:
-                # Set as background
-                result = self.app_controller.set_background_roi(selected_index)
-                if result.is_success():
-                    self.background_roi_changed.emit(selected_index)
-            
-            if result.is_error():
-                logging.error(f"Failed to set background ROI: {result.error}")
+        """Handle set as background button click."""
+        current_item = self.roi_list.currentItem()
+        if current_item:
+            roi_index = current_item.data(QtCore.Qt.UserRole)
+            self.background_roi_changed.emit(roi_index)
+
+    def _rename_roi(self, roi_index):
+        """Handle rename ROI action from context menu."""
+        roi = self.app_controller.roi_manager.get_roi(roi_index)
+        if roi is None:
+            return
+        new_label, ok = QtWidgets.QInputDialog.getText(self, "Rename ROI", "New label:", text=roi.label)
+        if ok and new_label:
+            self.app_controller.rename_roi(roi_index, new_label)
+
+    def _toggle_background(self, roi_index):
+        """Toggle background status for ROI from context menu."""
+        roi = self.app_controller.roi_manager.get_roi(roi_index)
+        if roi is None:
+            return
+        if roi.is_background:
+            self.background_roi_changed.emit(-1)
+        else:
+            self.background_roi_changed.emit(roi_index)
+
+    def _delete_roi(self, roi_index):
+        """Delete ROI from context menu."""
+        self.roi_deleted.emit(roi_index)
+    
+    
+    
+    
     
     def _on_roi_selection_changed(self):
         """Handle ROI selection change in list."""
         current_item = self.roi_list.currentItem()
         if current_item:
             roi_index = current_item.data(QtCore.Qt.UserRole)
-            self.app_controller.select_roi(roi_index)
-            self.roi_selected.emit(roi_index)
+            if roi_index is not None:  # Skip placeholder items
+                self.app_controller.select_roi(roi_index)
+                self.roi_selected.emit(roi_index)
+            else:
+                self.app_controller.select_roi(None)
         else:
             self.app_controller.select_roi(None)
     
@@ -195,46 +219,7 @@ class ROIListWidget(QtWidgets.QWidget):
         
         menu.exec_(self.roi_list.mapToGlobal(position))
     
-    def _rename_roi(self, roi_index: int):
-        """Rename an ROI."""
-        roi = self.app_controller.roi_manager.get_roi(roi_index)
-        if roi is None:
-            return
-        
-        new_name, ok = QtWidgets.QInputDialog.getText(
-            self, "Rename ROI", "Enter new name:", text=roi.label
-        )
-        
-        if ok and new_name.strip():
-            result = self.app_controller.rename_roi(roi_index, new_name.strip())
-            if result.is_error():
-                logging.error(f"Failed to rename ROI: {result.error}")
     
-    def _toggle_background(self, roi_index: int):
-        """Toggle background status of ROI."""
-        roi = self.app_controller.roi_manager.get_roi(roi_index)
-        if roi is None:
-            return
-        
-        if roi.is_background:
-            result = self.app_controller.set_background_roi(None)
-            if result.is_success():
-                self.background_roi_changed.emit(-1)
-        else:
-            result = self.app_controller.set_background_roi(roi_index)
-            if result.is_success():
-                self.background_roi_changed.emit(roi_index)
-        
-        if result.is_error():
-            logging.error(f"Failed to toggle background ROI: {result.error}")
-    
-    def _delete_roi(self, roi_index: int):
-        """Delete an ROI."""
-        result = self.app_controller.delete_roi(roi_index)
-        if result.is_success():
-            self.roi_deleted.emit(roi_index)
-        else:
-            logging.error(f"Failed to delete ROI: {result.error}")
 
 
 class AnalysisControlsWidget(QtWidgets.QWidget):
@@ -257,6 +242,7 @@ class AnalysisControlsWidget(QtWidgets.QWidget):
         self.app_controller.register_ui_callback('analysis_completed', self._on_analysis_completed)
         self.app_controller.register_ui_callback('analysis_failed', self._on_analysis_failed)
         self.app_controller.register_ui_callback('frame_range_detected', self.set_auto_detected_range)
+        self.app_controller.register_ui_callback('threshold_changed', self._on_threshold_changed)
     
     def _setup_ui(self):
         """Setup the widget UI."""
@@ -305,13 +291,7 @@ class AnalysisControlsWidget(QtWidgets.QWidget):
         self.threshold_spin.setRange(0.0, 100.0)
         self.threshold_spin.setSingleStep(0.5)
         self.threshold_spin.setSuffix(" L* units")
-        params_layout.addRow("Manual Threshold:", self.threshold_spin)
-        
-        self.noise_floor_spin = QtWidgets.QDoubleSpinBox()
-        self.noise_floor_spin.setRange(0.0, 50.0)
-        self.noise_floor_spin.setSingleStep(1.0)
-        self.noise_floor_spin.setSuffix(" L* units")
-        params_layout.addRow("Noise Floor:", self.noise_floor_spin)
+        params_layout.addRow("Threshold:", self.threshold_spin)
         
         layout.addWidget(params_group)
         
@@ -356,23 +336,21 @@ class AnalysisControlsWidget(QtWidgets.QWidget):
         self.analyze_btn.clicked.connect(self._start_analysis)
         
         # Parameter changes
-        self.threshold_spin.valueChanged.connect(self._save_settings)
-        self.noise_floor_spin.valueChanged.connect(self._save_settings)
+        self.threshold_spin.valueChanged.connect(self._on_threshold_spin_changed)
     
+    def _on_threshold_spin_changed(self, value: float):
+        """Handle threshold spin box value change."""
+        self.app_controller.update_threshold_settings(value)
+
     def _load_settings(self):
         """Load settings from settings manager."""
         defaults = self.app_controller.get_analysis_defaults()
         self.threshold_spin.setValue(defaults['manual_threshold'])
-        self.noise_floor_spin.setValue(defaults['noise_floor'])
     
     def _save_settings(self):
         """Save current settings."""
-        result = self.app_controller.update_threshold_settings(
-            manual_threshold=self.threshold_spin.value(),
-            noise_floor=self.noise_floor_spin.value()
-        )
-        if result.is_error():
-            logging.error(f"Failed to save threshold settings: {result.error}")
+        # This method is now redundant as changes are saved directly via _on_threshold_spin_changed
+        pass
     
     def _on_video_loaded(self, video_data):
         """Handle video loaded from controller."""
@@ -393,16 +371,7 @@ class AnalysisControlsWidget(QtWidgets.QWidget):
         
         self._update_analyze_button()
     
-    def update_video_loaded(self, loaded: bool):
-        """Update controls when video is loaded/unloaded (legacy method)."""
-        if not loaded:
-            # Disable controls
-            self.start_frame_spin.setEnabled(False)
-            self.end_frame_spin.setEnabled(False)
-            self.set_start_btn.setEnabled(False)
-            self.set_end_btn.setEnabled(False)
-            self.auto_detect_btn.setEnabled(False)
-            self.analyze_btn.setEnabled(False)
+    
     
     def _set_start_frame(self):
         """Set start frame to current frame."""
@@ -416,14 +385,7 @@ class AnalysisControlsWidget(QtWidgets.QWidget):
             current_frame = self.app_controller.video_processor.current_frame_index
             self.end_frame_spin.setValue(current_frame)
     
-    def _auto_detect_range(self):
-        """Request auto-detection of frame range."""
-        result = self.app_controller.auto_detect_frame_range()
-        if result.is_error():
-            QtWidgets.QMessageBox.warning(
-                self, "Auto-Detection Failed",
-                f"Could not auto-detect frame range: {result.error}"
-            )
+    
     
     def _browse_output_directory(self):
         """Browse for output directory."""
@@ -464,13 +426,9 @@ class AnalysisControlsWidget(QtWidgets.QWidget):
             )
             return
         
-        # Start analysis via controller
-        result = self.app_controller.start_analysis(start_frame, end_frame, output_dir)
-        if result.is_error():
-            QtWidgets.QMessageBox.critical(
-                self, "Analysis Failed",
-                f"Could not start analysis: {result.error}"
-            )
+        self.analyze_requested.emit(
+            start_frame, end_frame, output_dir
+        )
     
     def show_progress(self, current: int, total: int, message: str = ""):
         """Show analysis progress."""
@@ -508,6 +466,14 @@ class AnalysisControlsWidget(QtWidgets.QWidget):
             self, "Analysis Failed",
             f"Analysis failed: {error_message}"
         )
+
+    def _on_threshold_changed(self, threshold: float):
+        """Handle threshold changes from the controller."""
+        self.threshold_spin.setValue(threshold)
+
+    def _auto_detect_range(self):
+        """Handle auto-detect range button click."""
+        self.auto_detect_requested.emit()
 
 
 class ControlsPanel(QtWidgets.QWidget):
@@ -547,9 +513,7 @@ class ControlsPanel(QtWidgets.QWidget):
         self.analysis_widget.analyze_requested.connect(self._on_analyze_requested)
         self.analysis_widget.auto_detect_requested.connect(self._on_auto_detect_requested)
     
-    def update_video_loaded(self, loaded: bool):
-        """Update panel when video is loaded/unloaded."""
-        self.analysis_widget.update_video_loaded(loaded)
+    
     
     def _on_roi_selected(self, roi_index: int):
         """Handle ROI selection."""
