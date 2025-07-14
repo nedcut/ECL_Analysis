@@ -9,7 +9,7 @@ from typing import Optional, Tuple, List, Union, Dict
 import matplotlib.pyplot as plt
 from PyQt5 import QtWidgets, QtGui, QtCore
 import logging
-from collections import deque, OrderedDict
+from collections import OrderedDict
 
 # Set up logging
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -39,7 +39,7 @@ ROI_LABEL_THICKNESS = 2
 
 AUTO_DETECT_BASELINE_PERCENTILE = 5
 BRIGHTNESS_NOISE_FLOOR_PERCENTILE = 2
-DEFAULT_MANUAL_THRESHOLD = 5.0           # ← NEW
+DEFAULT_MANUAL_THRESHOLD = 5.0
 
 MOUSE_RESIZE_HANDLE_SENSITIVITY = 10
 
