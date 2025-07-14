@@ -10,6 +10,20 @@ import matplotlib.pyplot as plt
 from PyQt5 import QtWidgets, QtGui, QtCore
 import logging
 from collections import OrderedDict
+try:
+    import pygame
+    PYGAME_AVAILABLE = True
+except ImportError:
+    PYGAME_AVAILABLE = False
+    logging.warning("pygame not available - audio features disabled")
+
+try:
+    import librosa
+    import soundfile as sf
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    LIBROSA_AVAILABLE = False
+    logging.warning("librosa not available - audio analysis disabled")
 
 # Set up logging
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -85,6 +99,269 @@ class FrameCache:
         """Get current cache size."""
         return len(self._cache)
 
+class AudioManager:
+    """Handle all audio feedback in the application."""
+    
+    def __init__(self, enabled: bool = True, volume: float = 0.7):
+        """Initialize audio manager with pygame mixer."""
+        self.enabled = enabled and PYGAME_AVAILABLE
+        self.volume = max(0.0, min(1.0, volume))
+        self._initialized = False
+        
+        if self.enabled:
+            try:
+                pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+                self._initialized = True
+            except Exception as e:
+                logging.warning(f"Failed to initialize audio: {e}")
+                self.enabled = False
+    
+    def play_analysis_start(self):
+        """Play sound when analysis starts."""
+        if not self._can_play():
+            return
+        try:
+            # Generate a simple ascending tone sequence
+            self._play_tone_sequence([440, 554, 659], duration=0.15)
+        except Exception as e:
+            logging.warning(f"Failed to play analysis start sound: {e}")
+    
+    def play_analysis_complete(self):
+        """Play sound when analysis completes."""
+        if not self._can_play():
+            return
+        try:
+            # Generate a completion chord
+            self._play_tone_sequence([523, 659, 783], duration=0.3)
+        except Exception as e:
+            logging.warning(f"Failed to play analysis complete sound: {e}")
+    
+    def play_run_detected(self):
+        """Play sound when a run is detected within expected duration."""
+        if not self._can_play():
+            return
+        try:
+            # Generate a quick notification beep
+            self._play_tone_sequence([880, 1109], duration=0.1)
+        except Exception as e:
+            logging.warning(f"Failed to play run detected sound: {e}")
+    
+    def set_enabled(self, enabled: bool):
+        """Enable or disable audio."""
+        self.enabled = enabled and PYGAME_AVAILABLE and self._initialized
+    
+    def set_volume(self, volume: float):
+        """Set audio volume (0.0 to 1.0)."""
+        self.volume = max(0.0, min(1.0, volume))
+    
+    def _can_play(self) -> bool:
+        """Check if audio can be played."""
+        return self.enabled and self._initialized and PYGAME_AVAILABLE
+    
+    def _play_tone_sequence(self, frequencies: List[float], duration: float = 0.2):
+        """Play a sequence of tones."""
+        if not self._can_play():
+            return
+        
+        try:
+            sample_rate = 22050
+            samples_per_tone = int(sample_rate * duration)
+            
+            for freq in frequencies:
+                # Generate sine wave
+                t = np.linspace(0, duration, samples_per_tone, False)
+                wave = np.sin(2 * np.pi * freq * t)
+                
+                # Apply envelope to avoid clicks
+                envelope = np.exp(-t * 3)  # Exponential decay
+                wave = wave * envelope * self.volume
+                
+                # Convert to 16-bit integers
+                wave = (wave * 32767).astype(np.int16)
+                
+                # Create stereo sound
+                stereo_wave = np.zeros((samples_per_tone, 2), dtype=np.int16)
+                stereo_wave[:, 0] = wave  # Left channel
+                stereo_wave[:, 1] = wave  # Right channel
+                
+                # Play the sound
+                sound = pygame.sndarray.make_sound(stereo_wave)
+                sound.play()
+                
+                # Wait for tone to finish
+                pygame.time.wait(int(duration * 1000))
+        
+        except Exception as e:
+            logging.warning(f"Failed to generate tone sequence: {e}")
+
+class AudioAnalyzer:
+    """Analyze video audio to detect completion beeps and calculate frame ranges."""
+    
+    def __init__(self):
+        """Initialize audio analyzer."""
+        self.available = LIBROSA_AVAILABLE
+        self.sample_rate = 44100
+        self.hop_length = 512
+        
+    def extract_audio_from_video(self, video_path: str) -> Tuple[Optional[np.ndarray], Optional[float]]:
+        """
+        Extract audio from video file.
+        
+        Args:
+            video_path: Path to video file
+            
+        Returns:
+            Tuple of (audio_data, sample_rate) or (None, None) if failed
+        """
+        if not self.available:
+            logging.warning("librosa not available - cannot extract audio")
+            return None, None
+        
+        try:
+            # Use librosa to load audio from video
+            audio_data, sr = librosa.load(video_path, sr=self.sample_rate, mono=True)
+            logging.info(f"Extracted audio: {len(audio_data)/sr:.2f} seconds at {sr} Hz")
+            return audio_data, sr
+        except Exception as e:
+            logging.error(f"Failed to extract audio from video: {e}")
+            return None, None
+    
+    def detect_beeps(self, audio_data: np.ndarray, sample_rate: float, 
+                     min_frequency: float = 800.0, max_frequency: float = 4000.0,
+                     threshold_percentile: float = 95.0, min_duration: float = 0.1) -> List[float]:
+        """
+        Detect beeps/tones in audio data.
+        
+        Args:
+            audio_data: Audio waveform data
+            sample_rate: Sample rate of audio
+            min_frequency: Minimum frequency to detect (Hz)
+            max_frequency: Maximum frequency to detect (Hz)
+            threshold_percentile: Percentile threshold for detection
+            min_duration: Minimum duration of beep (seconds)
+            
+        Returns:
+            List of timestamps (in seconds) where beeps were detected
+        """
+        if not self.available or audio_data is None:
+            return []
+        
+        try:
+            # Compute STFT to get frequency domain representation
+            stft = librosa.stft(audio_data, hop_length=self.hop_length)
+            magnitude = np.abs(stft)
+            
+            # Get frequency bins
+            freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=stft.shape[0]*2-1)
+            
+            # Find frequency bins in our target range
+            freq_mask = (freqs >= min_frequency) & (freqs <= max_frequency)
+            target_magnitude = magnitude[freq_mask, :]
+            
+            # Sum energy in target frequency range for each time frame
+            energy_per_frame = np.sum(target_magnitude, axis=0)
+            
+            # Calculate threshold based on percentile
+            threshold = np.percentile(energy_per_frame, threshold_percentile)
+            
+            # Find frames above threshold
+            above_threshold = energy_per_frame > threshold
+            
+            # Convert frame indices to time stamps
+            times = librosa.frames_to_time(np.arange(len(energy_per_frame)), 
+                                         sr=sample_rate, hop_length=self.hop_length)
+            
+            # Find start and end of continuous regions above threshold
+            beep_times = []
+            in_beep = False
+            beep_start = 0.0
+            
+            for i, (time, is_above) in enumerate(zip(times, above_threshold)):
+                if is_above and not in_beep:
+                    # Start of beep
+                    in_beep = True
+                    beep_start = time
+                elif not is_above and in_beep:
+                    # End of beep
+                    in_beep = False
+                    beep_duration = time - beep_start
+                    if beep_duration >= min_duration:
+                        # Use middle of beep as detection time
+                        beep_times.append(beep_start + beep_duration / 2)
+            
+            # Handle case where beep continues to end of audio
+            if in_beep:
+                beep_duration = times[-1] - beep_start
+                if beep_duration >= min_duration:
+                    beep_times.append(beep_start + beep_duration / 2)
+            
+            logging.info(f"Detected {len(beep_times)} beeps at: {beep_times}")
+            return beep_times
+            
+        except Exception as e:
+            logging.error(f"Failed to detect beeps: {e}")
+            return []
+    
+    def find_completion_beeps(self, video_path: str, expected_run_duration: float = 0.0) -> List[Tuple[float, int]]:
+        """
+        Find completion beeps in video audio and calculate corresponding frame ranges.
+        
+        Args:
+            video_path: Path to video file
+            expected_run_duration: Expected run duration in seconds (0 = no filtering)
+            
+        Returns:
+            List of (beep_time_seconds, frame_number) tuples
+        """
+        if not self.available:
+            return []
+        
+        # Extract audio from video
+        audio_data, sample_rate = self.extract_audio_from_video(video_path)
+        if audio_data is None:
+            return []
+        
+        # Detect beeps
+        beep_times = self.detect_beeps(audio_data, sample_rate)
+        if not beep_times:
+            return []
+        
+        # Get video properties to convert times to frames
+        try:
+            cap = cv2.VideoCapture(video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            
+            if fps <= 0:
+                logging.error("Invalid FPS from video")
+                return []
+            
+            # Convert beep times to frame numbers
+            results = []
+            for beep_time in beep_times:
+                frame_number = int(beep_time * fps)
+                if 0 <= frame_number < total_frames:
+                    results.append((beep_time, frame_number))
+            
+            # Filter by expected run duration if provided
+            if expected_run_duration > 0.0:
+                filtered_results = []
+                for beep_time, frame_number in results:
+                    # Check if there's enough time before this beep for a run of expected duration
+                    if beep_time >= expected_run_duration:
+                        filtered_results.append((beep_time, frame_number))
+                
+                if filtered_results:
+                    logging.info(f"Filtered {len(results)} beeps to {len(filtered_results)} based on run duration")
+                    results = filtered_results
+            
+            return results
+            
+        except Exception as e:
+            logging.error(f"Failed to process video for beep detection: {e}")
+            return []
+
 class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better menu support
     """Main application window for video brightness analysis."""
     
@@ -107,6 +384,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Frame caching
         self.frame_cache = FrameCache(FRAME_CACHE_SIZE)
+        
+        # Audio system
+        self.audio_manager = AudioManager()
+        self.audio_analyzer = AudioAnalyzer()
         
         # Recent files
         self.recent_files = []
@@ -139,6 +420,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Pixel visualization
         self.show_pixel_mask = False
+        
+        # Video playback
+        self.is_playing = False
+        self.playback_timer = QtCore.QTimer()
+        self.playback_fps = 30.0  # Default playback FPS
+        self.playback_speed = 1.0  # Playback speed multiplier
 
     def _load_settings(self):
         """Load application settings from file."""
@@ -147,6 +434,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 with open(DEFAULT_SETTINGS_FILE, 'r') as f:
                     self.settings = json.load(f)
                     self.recent_files = self.settings.get('recent_files', [])
+                    
+                    # Load audio settings
+                    audio_enabled = self.settings.get('audio_enabled', True)
+                    audio_volume = self.settings.get('audio_volume', 0.7)
+                    self.audio_manager.set_enabled(audio_enabled)
+                    self.audio_manager.set_volume(audio_volume)
         except Exception as e:
             logging.warning(f"Could not load settings: {e}")
             self.settings = {}
@@ -156,6 +449,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Save application settings to file."""
         try:
             self.settings['recent_files'] = self.recent_files
+            self.settings['audio_enabled'] = self.audio_manager.enabled
+            self.settings['audio_volume'] = self.audio_manager.volume
             with open(DEFAULT_SETTINGS_FILE, 'w') as f:
                 json.dump(self.settings, f, indent=2)
         except Exception as e:
@@ -223,11 +518,19 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         analyze_action.triggered.connect(self.analyze_video)
         analysis_menu.addAction(analyze_action)
         
-        auto_detect_action = QtWidgets.QAction('&Auto-Detect Range', self)
+        auto_detect_action = QtWidgets.QAction('&Detect from Audio', self)
         auto_detect_action.setShortcut('Ctrl+D')
-        auto_detect_action.setStatusTip('Automatically detect frame range')
+        auto_detect_action.setStatusTip('Detect completion beeps in audio and calculate frame ranges')
         auto_detect_action.triggered.connect(self.auto_detect_range)
         analysis_menu.addAction(auto_detect_action)
+        
+        # Settings menu
+        settings_menu = menubar.addMenu('&Settings')
+        
+        audio_settings_action = QtWidgets.QAction('&Audio Settings...', self)
+        audio_settings_action.setStatusTip('Configure audio feedback settings')
+        audio_settings_action.triggered.connect(self._show_audio_settings_dialog)
+        settings_menu.addAction(audio_settings_action)
         
         # Help menu
         help_menu = menubar.addMenu('&Help')
@@ -273,8 +576,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _setup_shortcuts(self):
         """Setup keyboard shortcuts."""
-        # Frame navigation shortcuts
+        # Playback shortcuts
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Space), self, 
+                          self.toggle_playback)
+        
+        # Frame navigation shortcuts
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left), self, 
+                          lambda: self.step_frames(-1))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right), self, 
                           lambda: self.step_frames(1))
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Backspace), self, 
                           lambda: self.step_frames(-1))
@@ -320,16 +629,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         layout = QtWidgets.QVBoxLayout(dialog)
         
         shortcuts_text = """
+<h3>Playback Shortcuts:</h3>
+<b>Space:</b> Play/Pause video<br>
+
 <h3>Navigation Shortcuts:</h3>
 <b>Left/Right Arrow:</b> Previous/Next frame<br>
-<b>Space:</b> Next frame<br>
 <b>Backspace:</b> Previous frame<br>
 <b>Page Down/Up:</b> Jump 10 frames<br>
 <b>Home/End:</b> Go to first/last frame<br>
 
 <h3>Analysis Shortcuts:</h3>
 <b>F5:</b> Run analysis<br>
-<b>Ctrl+D:</b> Auto-detect range<br>
+<b>Ctrl+D:</b> Detect from audio<br>
 
 <h3>ROI Shortcuts:</h3>
 <b>Delete:</b> Delete selected ROI<br>
@@ -365,6 +676,70 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             <li>High-quality plot generation</li>
             <li>Frame caching for smooth navigation</li>
             </ul>""")
+
+    def _show_audio_settings_dialog(self):
+        """Show audio settings dialog."""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('Audio Settings')
+        dialog.setModal(True)
+        dialog.resize(350, 200)
+        
+        layout = QtWidgets.QVBoxLayout(dialog)
+        
+        # Audio enabled checkbox
+        enabled_checkbox = QtWidgets.QCheckBox("Enable Audio Feedback")
+        enabled_checkbox.setChecked(self.audio_manager.enabled)
+        layout.addWidget(enabled_checkbox)
+        
+        # Volume slider
+        volume_group = QtWidgets.QGroupBox("Volume")
+        volume_layout = QtWidgets.QVBoxLayout(volume_group)
+        
+        volume_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        volume_slider.setRange(0, 100)
+        volume_slider.setValue(int(self.audio_manager.volume * 100))
+        volume_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        volume_slider.setTickInterval(25)
+        
+        volume_label = QtWidgets.QLabel(f"Volume: {int(self.audio_manager.volume * 100)}%")
+        
+        def update_volume_label(value):
+            volume_label.setText(f"Volume: {value}%")
+        
+        volume_slider.valueChanged.connect(update_volume_label)
+        
+        volume_layout.addWidget(volume_label)
+        volume_layout.addWidget(volume_slider)
+        layout.addWidget(volume_group)
+        
+        # Test button
+        test_layout = QtWidgets.QHBoxLayout()
+        test_btn = QtWidgets.QPushButton("Test Audio")
+        test_btn.clicked.connect(lambda: self.audio_manager.play_analysis_start())
+        test_layout.addWidget(test_btn)
+        test_layout.addStretch()
+        layout.addLayout(test_layout)
+        
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        ok_btn = QtWidgets.QPushButton("OK")
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        
+        button_layout.addStretch()
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+        def accept_settings():
+            self.audio_manager.set_enabled(enabled_checkbox.isChecked())
+            self.audio_manager.set_volume(volume_slider.value() / 100.0)
+            self._save_settings()
+            dialog.accept()
+        
+        ok_btn.clicked.connect(accept_settings)
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        dialog.exec_()
 
     def _apply_stylesheet(self):
         """Apply a modern, clean stylesheet to the application."""
@@ -597,52 +972,101 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.image_label.setText("Drag & Drop Video File Here")
         self.left_layout.addWidget(self.image_label, stretch=1)
 
-        # Slider and Frame Label Layout
-        slider_frame_layout = QtWidgets.QHBoxLayout()
+        # Video Controls Groupbox for better organization
+        self.video_controls_groupbox = QtWidgets.QGroupBox("Video Controls")
+        controls_layout = QtWidgets.QVBoxLayout()
+        
+        # Timeline and Frame Info
+        timeline_layout = QtWidgets.QHBoxLayout()
         self.frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.frame_slider.setToolTip("Drag to navigate frames")
-        slider_frame_layout.addWidget(self.frame_slider)
-
+        self.frame_slider.setToolTip("Drag to navigate frames or click to seek")
+        timeline_layout.addWidget(self.frame_slider)
+        
+        # Frame info and input
+        frame_info_layout = QtWidgets.QVBoxLayout()
         self.frame_label = QtWidgets.QLabel("Frame: 0 / 0")
-        self.frame_label.setMinimumWidth(120)
-        slider_frame_layout.addWidget(self.frame_label)
-
+        self.frame_label.setMinimumWidth(100)
+        self.frame_label.setAlignment(QtCore.Qt.AlignCenter)
+        frame_info_layout.addWidget(self.frame_label)
+        
         self.frame_spinbox = QtWidgets.QSpinBox()
         self.frame_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
         self.frame_spinbox.setToolTip("Enter frame number directly")
-        slider_frame_layout.addWidget(self.frame_spinbox)
-        self.left_layout.addLayout(slider_frame_layout)
-
-        # Frame Control Buttons Layout
-        frame_control_layout = QtWidgets.QHBoxLayout()
+        self.frame_spinbox.setAlignment(QtCore.Qt.AlignCenter)
+        frame_info_layout.addWidget(self.frame_spinbox)
+        timeline_layout.addLayout(frame_info_layout)
+        
+        controls_layout.addLayout(timeline_layout)
+        
+        # Playback Controls Row
+        playback_layout = QtWidgets.QHBoxLayout()
+        
+        # Play/Pause button
+        self.play_pause_btn = QtWidgets.QPushButton("▶ Play")
+        self.play_pause_btn.setToolTip("Play/Pause video (Spacebar)")
+        self.play_pause_btn.setMinimumWidth(80)
+        playback_layout.addWidget(self.play_pause_btn)
+        
+        # Speed control
+        speed_label = QtWidgets.QLabel("Speed:")
+        playback_layout.addWidget(speed_label)
+        self.speed_combo = QtWidgets.QComboBox()
+        self.speed_combo.addItems(["0.25x", "0.5x", "1x", "2x", "4x"])
+        self.speed_combo.setCurrentText("1x")
+        self.speed_combo.setToolTip("Playback speed")
+        playback_layout.addWidget(self.speed_combo)
+        
+        playback_layout.addStretch()
+        controls_layout.addLayout(playback_layout)
+        
+        # Navigation Controls Row  
+        navigation_layout = QtWidgets.QHBoxLayout()
+        
         self.prev_frame_btn = QtWidgets.QPushButton("◀")
-        self.prev_frame_btn.setToolTip("Previous Frame (Left Arrow, Backspace)")
-        frame_control_layout.addWidget(self.prev_frame_btn)
-
+        self.prev_frame_btn.setToolTip("Previous Frame (Left Arrow)")
+        self.prev_frame_btn.setFixedSize(35, 30)
+        navigation_layout.addWidget(self.prev_frame_btn)
+        
         self.next_frame_btn = QtWidgets.QPushButton("▶")
-        self.next_frame_btn.setToolTip("Next Frame (Right Arrow, Space)")
-        frame_control_layout.addWidget(self.next_frame_btn)
-
+        self.next_frame_btn.setToolTip("Next Frame (Right Arrow)")
+        self.next_frame_btn.setFixedSize(35, 30)
+        navigation_layout.addWidget(self.next_frame_btn)
+        
+        navigation_layout.addWidget(QtWidgets.QLabel("|"))  # Separator
+        
         self.jump_back_btn = QtWidgets.QPushButton(f"◀◀ {JUMP_FRAMES}")
         self.jump_back_btn.setToolTip(f"Jump back {JUMP_FRAMES} frames (Page Up)")
-        frame_control_layout.addWidget(self.jump_back_btn)
-
+        navigation_layout.addWidget(self.jump_back_btn)
+        
         self.jump_forward_btn = QtWidgets.QPushButton(f"{JUMP_FRAMES} ▶▶")
         self.jump_forward_btn.setToolTip(f"Jump forward {JUMP_FRAMES} frames (Page Down)")
-        frame_control_layout.addWidget(self.jump_forward_btn)
-
+        navigation_layout.addWidget(self.jump_forward_btn)
+        
+        navigation_layout.addStretch()
+        controls_layout.addLayout(navigation_layout)
+        
+        # Analysis Controls Row
+        analysis_layout = QtWidgets.QHBoxLayout()
+        
         self.set_start_btn = QtWidgets.QPushButton("Set Start")
         self.set_start_btn.setToolTip("Set current frame as analysis start")
-        frame_control_layout.addWidget(self.set_start_btn)
-
+        analysis_layout.addWidget(self.set_start_btn)
+        
         self.set_end_btn = QtWidgets.QPushButton("Set End")
         self.set_end_btn.setToolTip("Set current frame as analysis end")
-        frame_control_layout.addWidget(self.set_end_btn)
-
-        self.auto_detect_btn = QtWidgets.QPushButton("Auto-Detect (Ctrl+D)")
-        self.auto_detect_btn.setToolTip("Automatically detect start/end frames based on ROI brightness")
-        frame_control_layout.addWidget(self.auto_detect_btn)
-        self.left_layout.addLayout(frame_control_layout)
+        analysis_layout.addWidget(self.set_end_btn)
+        
+        analysis_layout.addWidget(QtWidgets.QLabel("|"))  # Separator
+        
+        self.auto_detect_btn = QtWidgets.QPushButton("Detect from Audio")
+        self.auto_detect_btn.setToolTip("Detect completion beeps in audio and calculate frame ranges (Ctrl+D)")
+        analysis_layout.addWidget(self.auto_detect_btn)
+        
+        analysis_layout.addStretch()
+        controls_layout.addLayout(analysis_layout)
+        
+        self.video_controls_groupbox.setLayout(controls_layout)
+        self.left_layout.addWidget(self.video_controls_groupbox)
 
         # Analysis Name Layout
         name_layout = QtWidgets.QHBoxLayout()
@@ -677,6 +1101,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         brightness_groupbox_layout.addWidget(self.brightness_display_label)
         self.brightness_groupbox.setLayout(brightness_groupbox_layout)
         self.right_layout.addWidget(self.brightness_groupbox)
+
+        # -- Run Duration Settings
+        self.run_duration_groupbox = QtWidgets.QGroupBox("Run Duration (Optional)")
+        run_duration_layout = QtWidgets.QVBoxLayout()
+        
+        duration_input_layout = QtWidgets.QHBoxLayout()
+        duration_input_layout.addWidget(QtWidgets.QLabel("Expected Duration (sec):"))
+        self.run_duration_spin = QtWidgets.QDoubleSpinBox()
+        self.run_duration_spin.setDecimals(1)
+        self.run_duration_spin.setRange(0.0, 3600.0)  # 0 to 1 hour
+        self.run_duration_spin.setSingleStep(0.5)
+        self.run_duration_spin.setValue(0.0)  # 0 = disabled
+        self.run_duration_spin.setToolTip("Expected run duration for validation (0 = disabled)")
+        duration_input_layout.addWidget(self.run_duration_spin)
+        run_duration_layout.addLayout(duration_input_layout)
+        
+        self.run_duration_groupbox.setLayout(run_duration_layout)
+        self.right_layout.addWidget(self.run_duration_groupbox)
 
         # -- Threshold groupbox
         self.threshold_groupbox = QtWidgets.QGroupBox("Threshold Settings")
@@ -770,6 +1212,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.set_start_btn.clicked.connect(self.set_start_frame)
         self.set_end_btn.clicked.connect(self.set_end_frame)
         self.auto_detect_btn.clicked.connect(self.auto_detect_range)
+        
+        # Playback controls
+        self.play_pause_btn.clicked.connect(self.toggle_playback)
+        self.speed_combo.currentTextChanged.connect(self.on_speed_changed)
+        self.playback_timer.timeout.connect(self.advance_frame)
 
         self.analyze_btn.clicked.connect(self.analyze_video)
 
@@ -797,8 +1244,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.jump_forward_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.set_start_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.set_end_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.auto_detect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        self.auto_detect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.analyze_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        
+        # Playback controls
+        self.play_pause_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.speed_combo.setEnabled(video_loaded and not self._analysis_in_progress)
         self.add_rect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.clear_rect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
@@ -924,6 +1375,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
 
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.playback_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if self.playback_fps <= 0:
+            self.playback_fps = 30.0  # Default fallback
+            
         if self.total_frames <= 0:
              QtWidgets.QMessageBox.warning(self, 'Warning', 'Video file appears to have no frames.')
              self._reset_state()
@@ -988,6 +1443,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.out_paths = []
         self.frame_cache.clear()
         
+        # Stop playback and reset controls
+        self.stop_playback()
+        self.speed_combo.setCurrentText("1x")
+        self.playback_speed = 1.0
+        
         self.image_label.setText("Drag & Drop Video File Here")
         self.image_label.setPixmap(QtGui.QPixmap())
         self.update_frame_label(reset=True)
@@ -1024,6 +1484,64 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         new_idx = max(0, min(self.total_frames - 1, self.current_frame_index + delta))
         if new_idx != self.current_frame_index:
             self.frame_slider.setValue(new_idx) # Let slider signal handle the update
+
+    def toggle_playback(self):
+        """Toggle video playback on/off."""
+        if not self.cap or not self.cap.isOpened() or self.total_frames == 0:
+            return
+            
+        if self.is_playing:
+            self.stop_playback()
+        else:
+            self.start_playback()
+    
+    def start_playback(self):
+        """Start video playback."""
+        if not self.cap or not self.cap.isOpened() or self.total_frames == 0:
+            return
+        
+        self.is_playing = True
+        self.play_pause_btn.setText("⏸ Pause")
+        
+        # Calculate timer interval based on FPS and speed
+        if hasattr(self, 'playback_fps') and self.playback_fps > 0:
+            interval = int(1000 / (self.playback_fps * self.playback_speed))
+        else:
+            interval = int(1000 / (30.0 * self.playback_speed))  # Default 30 FPS
+        
+        self.playback_timer.start(interval)
+    
+    def stop_playback(self):
+        """Stop video playback."""
+        self.is_playing = False
+        self.play_pause_btn.setText("▶ Play")
+        self.playback_timer.stop()
+    
+    def advance_frame(self):
+        """Advance to next frame during playback."""
+        if not self.is_playing or not self.cap or not self.cap.isOpened():
+            return
+        
+        next_frame = self.current_frame_index + 1
+        if next_frame >= self.total_frames:
+            # Reached end of video, stop playback
+            self.stop_playback()
+            return
+        
+        self.frame_slider.setValue(next_frame)
+    
+    def on_speed_changed(self, speed_text: str):
+        """Handle playback speed change."""
+        try:
+            speed_value = float(speed_text.replace('x', ''))
+            self.playback_speed = speed_value
+            
+            # If currently playing, restart timer with new interval
+            if self.is_playing:
+                self.stop_playback()
+                self.start_playback()
+        except ValueError:
+            logging.warning(f"Invalid speed value: {speed_text}")
 
     def _seek_to_frame(self, frame_index: int):
         """Reads and displays the specified frame index with caching."""
@@ -1803,131 +2321,119 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def auto_detect_range(self):
         """
-        Scans the video to automatically find the first and last frames
-        where ROI brightness significantly exceeds a baseline.
+        Analyzes video audio to detect completion beeps and calculates frame ranges 
+        using the expected run duration.
         """
         if not self.video_path:
-             self.results_label.setText("Load a video first.")
-             return
-        if not self.rects:
-            self.results_label.setText("Draw at least one ROI before using Auto-Detect.")
+            self.results_label.setText("Load a video first.")
             return
-
-        # Use a separate capture object for scanning to avoid interfering with main display
-        scan_cap = cv2.VideoCapture(self.video_path)
-        if not scan_cap.isOpened():
-            QtWidgets.QMessageBox.critical(self, "Error", "Could not open video for auto-detection scan.")
+        
+        if not self.audio_analyzer.available:
+            QtWidgets.QMessageBox.warning(self, "Audio Detection", 
+                "Audio analysis not available. Please install librosa:\npip install librosa soundfile")
             return
-
-        total = int(scan_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total <= 0:
-             QtWidgets.QMessageBox.warning(self, "Auto-Detect", "Video appears to have no frames for scanning.")
-             scan_cap.release()
-             return
         
-        brightness_per_frame = np.zeros(total)
-        background_brightness_per_frame = np.zeros(total) if self.background_roi_idx is not None else None
+        # Get expected run duration
+        expected_duration = self.run_duration_spin.value()
+        if expected_duration <= 0.0:
+            QtWidgets.QMessageBox.warning(self, "Audio Detection", 
+                "Please set an expected run duration (> 0 seconds) to calculate start frames from detected completion beeps.")
+            return
         
-        # --- Progress Dialog ---
-        progress = QtWidgets.QProgressDialog("Scanning video for auto-detection...", "Cancel", 0, total, self)
+        # Show progress dialog
+        progress = QtWidgets.QProgressDialog("Analyzing audio for completion beeps...", "Cancel", 0, 0, self)
         progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle("Auto-Detecting Range")
-        progress.setValue(0)
+        progress.setWindowTitle("Audio Detection")
+        progress.setRange(0, 0)  # Indeterminate progress
         progress.show()
-        QtWidgets.QApplication.processEvents() # Ensure dialog shows up
-
-        scan_cancelled = False
-        for idx in range(total):
-            if progress.wasCanceled():
-                scan_cancelled = True
-                break
-
-            ret, frame = scan_cap.read()
-            if not ret:
-                total = idx # Adjust total if read failed early
-                brightness_per_frame = brightness_per_frame[:total] # Trim array
-                if background_brightness_per_frame is not None:
-                    background_brightness_per_frame = background_brightness_per_frame[:total]
-                logging.warning(f"Auto-detect scan stopped early at frame {idx} due to read error.")
-                break
-
-            # Calculate average brightness across ROIs for this frame
-            current_frame_measurement_roi_brightness = []
-            fh, fw = frame.shape[:2]
-            for roi_idx, (pt1, pt2) in enumerate(self.rects):
-                x1, y1 = max(0, pt1[0]), max(0, pt1[1])
-                x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
-                if x2 > x1 and y2 > y1:
-                    roi = frame[y1:y2, x1:x2]
-                    brightness = self._compute_brightness(roi)
-                    
-                    if roi_idx == self.background_roi_idx:
-                        if background_brightness_per_frame is not None:
-                            background_brightness_per_frame[idx] = brightness
-                    else:
-                        current_frame_measurement_roi_brightness.append(brightness)
-
-            # Store the mean brightness of all measurement ROIs for the current frame
-            brightness_per_frame[idx] = np.mean(current_frame_measurement_roi_brightness) if current_frame_measurement_roi_brightness else 0.0
-
-            progress.setValue(idx + 1)
-            if idx % 10 == 0: # Update UI periodically to keep it responsive
-                 QtWidgets.QApplication.processEvents()
-
-        scan_cap.release()
-        progress.close()
-
-        if scan_cancelled:
-            self.results_label.setText("Auto-detect scan cancelled.")
-            return
-
-        if brightness_per_frame.size == 0 and (background_brightness_per_frame is None or background_brightness_per_frame.size == 0):
-            QtWidgets.QMessageBox.warning(self, "Auto-Detect", "Scan completed, but no brightness data was gathered.")
-            return
-
-        # --- Analyze Brightness Data ---
+        QtWidgets.QApplication.processEvents()
+        
         try:
-            if self.background_roi_idx is not None and background_brightness_per_frame is not None:
-                # Threshold = mean brightness of background ROI over scan + manual delta
-                valid_bg_frames = background_brightness_per_frame[background_brightness_per_frame > 0]
-                background_baseline = np.mean(valid_bg_frames) if valid_bg_frames.size > 0 else 0
-                threshold = background_baseline + self.manual_threshold
+            # Find completion beeps in the audio
+            completion_beeps = self.audio_analyzer.find_completion_beeps(self.video_path, expected_duration)
+            
+            progress.close()
+            
+            if not completion_beeps:
+                QtWidgets.QMessageBox.information(self, "Audio Detection", 
+                    "No completion beeps detected in the audio. Try adjusting the audio detection parameters or check if the video has audio.")
+                self.results_label.setText("Audio Detection: No completion beeps found.")
+                return
+            
+            # Show detected beeps to user for selection
+            if len(completion_beeps) == 1:
+                # Only one beep found, use it automatically
+                selected_beep_time, selected_end_frame = completion_beeps[0]
             else:
-                baseline = np.percentile(brightness_per_frame, AUTO_DETECT_BASELINE_PERCENTILE)
-                threshold = baseline + self.manual_threshold
-        except IndexError:
-             QtWidgets.QMessageBox.warning(self, "Auto-Detect", "Not enough frame data to determine brightness baseline.")
-             return
-
-        # Find indices where brightness is above the threshold
-        above_threshold_indices = np.where(brightness_per_frame >= threshold)[0]
-
-        if above_threshold_indices.size == 0:
-            QtWidgets.QMessageBox.information(self, "Auto-Detect",
-                                          f"No frames found significantly brighter than baseline (Threshold={threshold:.1f} L*). Frame range not changed.")
-            self.results_label.setText(f"Auto-Detect: No bright frames found (Threshold={threshold:.1f}).")
-            return
-
-        # Get the first and last frame index that met the criteria
-        detected_start_frame = int(above_threshold_indices[0])
-        detected_end_frame = int(above_threshold_indices[-1])
-
-        # --- Update UI ---
-        self.start_frame = detected_start_frame
-        self.end_frame = detected_end_frame
-
-        # Update slider and spinbox to the new start frame, then seek
-        self.frame_slider.blockSignals(True)
-        self.frame_spinbox.blockSignals(True)
-        self.frame_slider.setValue(self.start_frame)
-        self.frame_spinbox.setValue(self.start_frame)
-        self.frame_slider.blockSignals(False)
-        self.frame_spinbox.blockSignals(False)
-
-        self._seek_to_frame(self.start_frame) # Go to the detected start frame
-        self.update_frame_label() # Update label after seeking
-
-        self.results_label.setText(f"✅ Auto-detected range: Frame {self.start_frame + 1} to {self.end_frame + 1}")
+                # Multiple beeps found, let user choose
+                beep_options = []
+                for i, (beep_time, frame_num) in enumerate(completion_beeps):
+                    beep_options.append(f"Beep {i+1}: {beep_time:.1f}s (Frame {frame_num+1})")
+                
+                selected_option, ok = QtWidgets.QInputDialog.getItem(
+                    self, "Audio Detection", 
+                    f"Found {len(completion_beeps)} completion beeps. Select which one to use:",
+                    beep_options, 0, False)
+                
+                if not ok:
+                    self.results_label.setText("Audio Detection: User cancelled selection.")
+                    return
+                
+                # Get the selected beep
+                selected_index = beep_options.index(selected_option)
+                selected_beep_time, selected_end_frame = completion_beeps[selected_index]
+            
+            # Calculate start frame using run duration and video FPS
+            cap = cv2.VideoCapture(self.video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            
+            if fps <= 0:
+                QtWidgets.QMessageBox.critical(self, "Error", "Could not determine video frame rate.")
+                return
+            
+            # Calculate start frame (work backwards from completion beep)
+            start_time = selected_beep_time - expected_duration
+            calculated_start_frame = max(0, int(start_time * fps))
+            
+            # Ensure we don't go beyond video bounds
+            calculated_end_frame = min(selected_end_frame, total_frames - 1)
+            calculated_start_frame = min(calculated_start_frame, calculated_end_frame)
+            
+            # Update UI with detected range
+            self.start_frame = calculated_start_frame
+            self.end_frame = calculated_end_frame
+            
+            # Update slider and spinbox to the new start frame, then seek
+            self.frame_slider.blockSignals(True)
+            self.frame_spinbox.blockSignals(True)
+            self.frame_slider.setValue(self.start_frame)
+            self.frame_spinbox.setValue(self.start_frame)
+            self.frame_slider.blockSignals(False)
+            self.frame_spinbox.blockSignals(False)
+            
+            self._seek_to_frame(self.start_frame)
+            self.update_frame_label()
+            
+            # Calculate actual duration for verification
+            actual_duration = (self.end_frame - self.start_frame + 1) / fps
+            
+            self.results_label.setText(
+                f"✅ Audio-detected range: Frame {self.start_frame + 1} to {self.end_frame + 1} "
+                f"(Duration: {actual_duration:.1f}s, Expected: {expected_duration:.1f}s)")
+            
+            # Play success sound if duration is close to expected
+            duration_difference = abs(actual_duration - expected_duration)
+            if duration_difference <= expected_duration * 0.1:  # Within 10%
+                self.audio_manager.play_run_detected()
+                
+        except Exception as e:
+            progress.close()
+            QtWidgets.QMessageBox.critical(self, "Audio Detection Error", 
+                f"An error occurred during audio analysis:\n{str(e)}")
+            self.results_label.setText(f"Audio Detection failed: {str(e)}")
+            logging.error(f"Audio detection error: {e}")
 
 
     # --- Analysis and Plotting ---
@@ -1947,6 +2453,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         # Set analysis state
         self._analysis_in_progress = True
+        self.stop_playback()  # Stop playback during analysis
         self._update_widget_states(video_loaded=True, rois_exist=True)
         
         # --- Get Save Directory ---
@@ -1962,6 +2469,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # --- Setup ---
         self.results_label.setText("Starting analysis...")
         self.brightness_display_label.setText("Analyzing...")
+        
+        # Play analysis start sound
+        self.audio_manager.play_analysis_start()
         self.statusBar().showMessage("Running brightness analysis...")
         QtWidgets.QApplication.processEvents()
 
@@ -2082,6 +2592,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._analysis_in_progress = False
             self._update_widget_states(video_loaded=True, rois_exist=True)
             self.statusBar().showMessage("Analysis complete")
+            
+            # Play analysis completion sound
+            self.audio_manager.play_analysis_complete()
+            
+            # Check run duration if specified
+            expected_duration = self.run_duration_spin.value()
+            if expected_duration > 0.0 and self.start_frame is not None and self.end_frame is not None:
+                confidence = self._validate_run_duration(self.start_frame, self.end_frame, expected_duration)
+                if confidence >= 0.8:  # High confidence threshold
+                    self.audio_manager.play_run_detected()
 
     def _save_analysis_results(self, brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame):
         """Save analysis results and generate plots."""
@@ -2317,6 +2837,40 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             raise
 
     # --- Utility Methods ---
+
+    def _validate_run_duration(self, start_frame: int, end_frame: int, expected_duration: float) -> float:
+        """
+        Calculate confidence score for detected run vs expected duration.
+        
+        Args:
+            start_frame: Start frame of detected run
+            end_frame: End frame of detected run
+            expected_duration: Expected duration in seconds
+            
+        Returns:
+            Confidence score from 0.0 to 1.0 (1.0 = perfect match)
+        """
+        if expected_duration <= 0.0 or not self.cap:
+            return 1.0  # No validation if duration not set or video not loaded
+        
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            return 1.0  # No validation if fps unknown
+        
+        actual_duration = (end_frame - start_frame + 1) / fps
+        duration_difference = abs(actual_duration - expected_duration)
+        
+        # Calculate confidence - perfect match = 1.0, large difference = 0.0
+        # Allow 20% tolerance before confidence starts dropping
+        tolerance = expected_duration * 0.2
+        if duration_difference <= tolerance:
+            confidence = 1.0
+        else:
+            # Linear decay from 1.0 to 0.0 over the next 80% of expected duration
+            max_difference = expected_duration * 0.8
+            confidence = max(0.0, 1.0 - (duration_difference - tolerance) / max_difference)
+        
+        return confidence
 
     def _compute_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
         """

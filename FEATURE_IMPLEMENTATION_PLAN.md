@@ -69,46 +69,47 @@ Background: L* 15.3 | Blue: 110
 
 ## 🔄 REMAINING FEATURES (OPTIONAL)
 
-### Feature 4: Sound Implementation with Run Duration
-**Lower Priority - Consider User Need**
+### Feature 4: Audio-Based Endpoint Detection ✅ DONE
+**Implementation Status**: Fully implemented and replaces auto-detect functionality
 
-#### Current State
-- pygame added to requirements.txt but no audio implementation
-- No run duration tracking or audio feedback
+#### Implementation Completed
+- AudioAnalyzer class for detecting completion beeps in video audio
+- Audio loading from video files using librosa
+- Beep detection algorithm with configurable frequency range and thresholds
+- Run duration calculation working backwards from detected completion beeps
+- Replaced brightness-based auto-detect with audio-based detection
+- AudioManager class for application feedback sounds
+- Audio settings system with persistent preferences
 
-#### Implementation Plan
-
-##### Audio System
-1. **Create AudioManager class**: Handle cross-platform audio with pygame
-2. **Add audio preferences**: Enable/disable, volume control in settings
-3. **Audio triggers**: Analysis start, completion, and run detection beeps
-
-##### Run Duration Integration  
-1. **Add input field**: "Expected Run Duration (seconds)" in analysis controls
-2. **Enhanced auto-detection**: Use expected duration to validate detected ranges
-3. **Audio feedback**: Beep when runs detected within expected duration range
-
-##### New Components
+#### Core Features ✅ Complete
 ```python
+class AudioAnalyzer:
+    """Analyze video audio to detect completion beeps"""
+    def extract_audio_from_video(self, video_path: str): ...
+    def detect_beeps(self, audio_data: np.ndarray, sample_rate: float): ...
+    def find_completion_beeps(self, video_path: str, expected_run_duration: float): ...
+
 class AudioManager:
     """Handle all audio feedback in the application"""
-    def __init__(self, enabled: bool = True, volume: float = 0.7): ...
     def play_analysis_start(self): ...
     def play_analysis_complete(self): ...
     def play_run_detected(self): ...
-    def set_enabled(self, enabled: bool): ...
-    def set_volume(self, volume: float): ...
-
-def _validate_run_duration(self, start_frame: int, end_frame: int, expected_duration: float) -> float:
-    """Calculate confidence score for detected run vs expected duration"""
 ```
 
-##### UI Additions
-- Expected run duration input (QDoubleSpinBox) in analysis controls
-- Audio enable/disable checkbox in settings
-- Volume slider in settings
+#### UI Changes ✅ Complete
+- "Auto-Detect" button renamed to "Detect from Audio"
+- Expected run duration input field for calculating start frames
+- Audio settings dialog with enable/disable and volume controls
+- Automatic beep selection or user choice when multiple beeps detected
 
-**Estimated Effort**: 4-5 hours (reduced from 6-8 hours)
+#### Audio Analysis Pipeline ✅ Complete
+1. **Extract audio** from video using librosa
+2. **Detect beeps** using STFT frequency analysis (800-4000 Hz range)
+3. **Filter beeps** by minimum duration and percentile thresholds
+4. **Calculate start frame** by working backwards from completion beep using run duration
+5. **Update UI** with detected frame range and duration verification
+
+**Status**: Fully implemented and tested
 
 ---
 
@@ -212,9 +213,16 @@ Plot Files: Enhanced dual-panel with L* and blue channel subplots
 
 ## Summary
 
-**Major Progress**: 4 of 6 original features complete, plus bonus blue channel analysis
-**Core Functionality**: All essential analysis and UI features working
-**Remaining Work**: Only optional audio enhancements
-**Status**: Feature-complete and production-ready
+**Major Progress**: 5 of 6 original features complete, plus bonus blue channel analysis
+**Core Functionality**: All essential analysis, UI, and audio features working
+**Remaining Work**: No essential features remain (all optional enhancements)
+**Status**: Feature-complete and production-ready with audio-based endpoint detection
 
-The application has evolved significantly beyond the original plan with the addition of comprehensive blue channel analysis and enhanced real-time brightness display, making it a complete and powerful tool for brightness and blue light analysis.
+The application has evolved significantly beyond the original plan with:
+- Comprehensive blue channel analysis alongside L* brightness measurements
+- Enhanced real-time brightness display showing all calculated values
+- Revolutionary audio-based endpoint detection that analyzes video audio to find completion beeps
+- Intelligent start frame calculation using run duration working backwards from detected endpoints
+- Complete audio feedback system for analysis events
+
+This makes it a cutting-edge tool for brightness analysis with advanced audio processing capabilities that eliminate the need for manual frame range selection.
