@@ -1,15 +1,16 @@
-import sys
-import pandas as pd
-import numpy as np
-import cv2
-import os
 import json
-import time
-from typing import Optional, Tuple, List, Union, Dict
-import matplotlib.pyplot as plt
-from PyQt5 import QtWidgets, QtGui, QtCore
 import logging
+import os
+import sys
+import time
 from collections import OrderedDict
+from typing import Dict, List, Optional, Tuple, Union
+
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from PyQt5 import QtCore, QtGui, QtWidgets
 try:
     import pygame
     PYGAME_AVAILABLE = True
@@ -1605,8 +1606,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def show_frame(self):
         """Displays the current self.frame in the image_label, drawing ROIs."""
         if self.frame is None:
-            # Keep the placeholder text if no frame is loaded
-            # self.image_label.setText("No video loaded")
             return
 
         frame_copy = self.frame.copy()
@@ -1758,9 +1757,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.image_label.setCursor(QtCore.Qt.CrossCursor) # Change cursor
             self.results_label.setText("Click and drag on the frame to draw a new ROI.")
         else:
-            self.image_label.unsetCursor() # Restore default cursor
-            # Optionally clear the results label or set it back
-            # self.results_label.setText("...")
+            self.image_label.unsetCursor()
         self.show_frame() # Redraw to potentially remove selection highlight
 
     def select_rectangle_from_list(self, row: int):
