@@ -113,7 +113,7 @@ class AudioManager:
             try:
                 pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
                 self._initialized = True
-            except Exception as e:
+            except (ImportError, OSError, RuntimeError) as e:
                 logging.warning(f"Failed to initialize audio: {e}")
                 self.enabled = False
     
@@ -124,7 +124,7 @@ class AudioManager:
         try:
             # Generate a simple ascending tone sequence
             self._play_tone_sequence([440, 554, 659], duration=0.15)
-        except Exception as e:
+        except (RuntimeError, OSError) as e:
             logging.warning(f"Failed to play analysis start sound: {e}")
     
     def play_analysis_complete(self):
@@ -134,7 +134,7 @@ class AudioManager:
         try:
             # Generate a completion chord
             self._play_tone_sequence([523, 659, 783], duration=0.3)
-        except Exception as e:
+        except (RuntimeError, OSError) as e:
             logging.warning(f"Failed to play analysis complete sound: {e}")
     
     def play_run_detected(self):
@@ -144,7 +144,7 @@ class AudioManager:
         try:
             # Generate a quick notification beep
             self._play_tone_sequence([880, 1109], duration=0.1)
-        except Exception as e:
+        except (RuntimeError, OSError) as e:
             logging.warning(f"Failed to play run detected sound: {e}")
     
     def set_enabled(self, enabled: bool):
@@ -192,7 +192,7 @@ class AudioManager:
                 # Wait for tone to finish
                 pygame.time.wait(int(duration * 1000))
         
-        except Exception as e:
+        except (RuntimeError, OSError, AttributeError) as e:
             logging.warning(f"Failed to generate tone sequence: {e}")
 
 class AudioAnalyzer:
@@ -575,7 +575,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if os.path.exists(file_path):
                 action = QtWidgets.QAction(os.path.basename(file_path), self)
                 action.setStatusTip(file_path)
-                action.triggered.connect(lambda checked, path=file_path: self._open_recent_file(path))
+                action.triggered.connect(lambda _checked, path=file_path: self._open_recent_file(path))
                 self.recent_files_menu.addAction(action)
 
     def _open_recent_file(self, file_path: str):
@@ -1642,7 +1642,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             cv2.rectangle(frame_to_draw_on, pt1, pt2, color, thickness)
             # Draw index label near the top-left corner
             label = f"{idx+1}"
-            (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, ROI_LABEL_FONT_SCALE, ROI_LABEL_THICKNESS)
+            (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, ROI_LABEL_FONT_SCALE, ROI_LABEL_THICKNESS)
             label_pos = (pt1[0] + 5, pt1[1] + text_height + 5)
             # Simple background for label visibility
             cv2.rectangle(frame_to_draw_on, (pt1[0], pt1[1]), (pt1[0] + text_width + 10, pt1[1] + text_height + 10), (0,0,0), cv2.FILLED)
@@ -1682,7 +1682,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             if x2 > x1 and y2 > y1: # Check for valid ROI area
                 roi = self.frame[y1:y2, x1:x2]
-                l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(roi, background_brightness)
+                brightness_stats = self._compute_brightness_stats(roi, background_brightness)
+                l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median = brightness_stats[:6]
                 roi_data.append((idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median))
             else:
                 roi_data.append((idx, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)) # Append zeros if ROI is invalid/empty
@@ -2095,8 +2096,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.frame is None or event.button() != QtCore.Qt.LeftButton:
             return
 
-        pos_in_label = event.pos()
-        self.image_label.unsetCursor() # Reset cursor after action
+        self.image_label.unsetCursor()  # Reset cursor after action
 
         if self.drawing and self.start_point and self.end_point:
             # Finalize drawing a new rectangle
@@ -2286,12 +2286,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         # If not hovering over a resize handle, check if hovering over any rectangle
         if not cursor_set:
-            hovering_over_rect = False
             for idx, (pt1, pt2) in enumerate(self.rects):
                 rect_x1, rect_y1 = min(pt1[0], pt2[0]), min(pt1[1], pt2[1])
                 rect_x2, rect_y2 = max(pt1[0], pt2[0]), max(pt1[1], pt2[1])
                 if rect_x1 <= frame_x <= rect_x2 and rect_y1 <= frame_y <= rect_y2:
-                    hovering_over_rect = True
                     if idx == self.selected_rect_idx:
                         # Hovering over the selected rectangle (not on a handle) -> Move cursor
                         self.image_label.setCursor(QtCore.Qt.SizeAllCursor)
@@ -2617,7 +2615,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _save_analysis_results(self, brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame):
         """Save analysis results and generate plots."""
         self.out_paths = []
-        plot_paths = []
+        if self.video_path is None:
+            return
         base_video_name = os.path.splitext(os.path.basename(self.video_path))[0]
         analysis_name = self.analysis_name_input.text().strip() or "DefaultAnalysis"
         analysis_name = "".join(c for c in analysis_name if c.isalnum() or c in ('_', '-')).rstrip()
