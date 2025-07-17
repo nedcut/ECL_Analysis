@@ -1,0 +1,26 @@
+# Development requirements for Brightness Sorcerer
+# Install with: pip install -r requirements.txt -r requirements-dev.txt
+
+# Testing
+pytest>=6.0.0
+pytest-qt>=4.0.0
+pytest-cov>=2.12.0
+
+# Code quality
+black>=21.0.0
+flake8>=3.9.0
+mypy>=0.910
+isort>=5.9.0
+
+# Documentation
+sphinx>=4.0.0
+sphinx-rtd-theme>=0.5.0
+
+# Development tools
+pre-commit>=2.13.0
+twine>=3.4.0  # For package publishing
+wheel>=0.36.0
+
+# Optional but recommended
+bandit>=1.7.0  # Security linting
+pylint>=2.9.0  # Additional linting

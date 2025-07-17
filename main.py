@@ -3,14 +3,23 @@ import logging
 import os
 import sys
 import time
+import traceback
 from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple, Union
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+# Version information
+__version__ = "2.0.0"
+__author__ = "Brightness Sorcerer Development Team"
+__description__ = "Professional Video Brightness Analysis Tool"
+
+# Optional dependencies with graceful fallbacks
 try:
     import pygame
     PYGAME_AVAILABLE = True
@@ -26,8 +35,41 @@ except ImportError:
     LIBROSA_AVAILABLE = False
     logging.warning("librosa not available - audio analysis disabled")
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Enhanced logging configuration
+def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> logging.Logger:
+    """Setup enhanced logging with file output and better formatting."""
+    logger = logging.getLogger('BrightnessSorcerer')
+    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    
+    # Clear existing handlers
+    logger.handlers.clear()
+    
+    # Console handler with enhanced formatting
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler if specified
+    if log_file:
+        try:
+            file_handler = logging.FileHandler(log_file)
+            file_formatter = logging.Formatter(
+                '%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            file_handler.setFormatter(file_formatter)
+            logger.addHandler(file_handler)
+        except Exception as e:
+            logger.warning(f"Could not setup file logging: {e}")
+    
+    return logger
+
+# Setup logging
+logger = setup_logging(log_file="brightness_analyzer.log")
 
 # --- Constants ---
 DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif"
@@ -59,11 +101,500 @@ MORPHOLOGICAL_KERNEL_SIZE = 3
 
 MOUSE_RESIZE_HANDLE_SENSITIVITY = 10
 
-# New constants for improvements
+# Application configuration constants
+APP_NAME = "Brightness Sorcerer"
+APP_VERSION = __version__
 DEFAULT_SETTINGS_FILE = "brightness_analyzer_settings.json"
+BACKUP_SETTINGS_FILE = "brightness_analyzer_settings.backup.json"
 MAX_RECENT_FILES = 10
 FRAME_CACHE_SIZE = 100
 JUMP_FRAMES = 10  # Number of frames to jump with Page Up/Down
+
+# Validation constants
+MIN_VIDEO_DURATION = 0.1  # seconds
+MAX_VIDEO_DURATION = 7200  # 2 hours
+MIN_FRAME_SIZE = (32, 32)  # minimum video resolution
+MAX_FRAME_SIZE = (7680, 4320)  # 8K maximum
+SUPPORTED_VIDEO_FORMATS = ('.mp4', '.mov', '.avi', '.mkv', '.wmv', '.m4v', '.flv')
+MAX_ROI_SIZE_RATIO = 0.8  # ROI can't exceed 80% of frame size
+MIN_ROI_SIZE = (10, 10)  # minimum ROI size in pixels
+
+# Low-light enhancement and signal processing
+class LowLightEnhancer:
+    """Advanced signal processing for low-light brightness analysis."""
+    
+    def __init__(self):
+        self.enabled = True
+        self.l_star_boost = 1.0
+        self.blue_boost = 1.0
+        self.noise_reduction = 0.5
+        self.adaptive_gain = True
+        self.histogram_equalization = False
+        self.gaussian_blur_sigma = 0.5
+        self.bilateral_filter = True
+        self.morphological_cleanup = True
+        self.signal_amplification = 1.0
+        self.dynamic_range_compression = False
+        
+    def enhance_roi(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> np.ndarray:
+        """Apply comprehensive low-light enhancement to ROI."""
+        if roi_bgr is None or roi_bgr.size == 0:
+            return roi_bgr
+            
+        try:
+            enhanced_roi = roi_bgr.copy().astype(np.float32)
+            
+            # Step 1: Noise reduction using bilateral filter
+            if self.bilateral_filter and self.noise_reduction > 0:
+                enhanced_roi = self._apply_bilateral_filter(enhanced_roi, self.noise_reduction)
+            
+            # Step 2: Adaptive histogram equalization for better contrast
+            if self.histogram_equalization:
+                enhanced_roi = self._apply_adaptive_histogram_equalization(enhanced_roi)
+            
+            # Step 3: Channel-specific boosting
+            enhanced_roi = self._apply_channel_boost(enhanced_roi)
+            
+            # Step 4: Dynamic range compression for better SNR
+            if self.dynamic_range_compression:
+                enhanced_roi = self._apply_dynamic_range_compression(enhanced_roi)
+            
+            # Step 5: Signal amplification with noise suppression
+            if self.signal_amplification > 1.0:
+                enhanced_roi = self._apply_signal_amplification(enhanced_roi, background_brightness)
+            
+            return np.clip(enhanced_roi, 0, 255).astype(np.uint8)
+            
+        except Exception as e:
+            logger.warning(f"Low-light enhancement failed: {e}")
+            return roi_bgr
+    
+    def _apply_bilateral_filter(self, roi: np.ndarray, strength: float) -> np.ndarray:
+        """Apply bilateral filter for edge-preserving noise reduction."""
+        d = int(9 * strength)  # Neighborhood diameter
+        sigma_color = 75 * strength  # Color sigma
+        sigma_space = 75 * strength  # Space sigma
+        
+        # Apply bilateral filter to each channel
+        for i in range(3):
+            roi[:, :, i] = cv2.bilateralFilter(roi[:, :, i].astype(np.uint8), d, sigma_color, sigma_space)
+        
+        return roi
+    
+    def _apply_adaptive_histogram_equalization(self, roi: np.ndarray) -> np.ndarray:
+        """Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)."""
+        # Convert to LAB for better perceptual results
+        lab = cv2.cvtColor(roi.astype(np.uint8), cv2.COLOR_BGR2LAB)
+        
+        # Apply CLAHE to L channel
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        
+        # Convert back to BGR
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        return enhanced.astype(np.float32)
+    
+    def _apply_channel_boost(self, roi: np.ndarray) -> np.ndarray:
+        """Apply channel-specific boost to L* and blue channels."""
+        # Convert to LAB for L* boost
+        lab = cv2.cvtColor(roi.astype(np.uint8), cv2.COLOR_BGR2LAB)
+        
+        # Boost L* channel with gamma correction for better low-light performance
+        if self.l_star_boost != 1.0:
+            l_channel = lab[:, :, 0].astype(np.float32) / 255.0
+            # Apply gamma correction: output = input^(1/gamma)
+            gamma = 1.0 / self.l_star_boost
+            l_channel = np.power(l_channel, gamma)
+            lab[:, :, 0] = np.clip(l_channel * 255.0, 0, 255).astype(np.uint8)
+        
+        # Convert back to BGR
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR).astype(np.float32)
+        
+        # Boost blue channel directly
+        if self.blue_boost != 1.0:
+            blue_channel = enhanced[:, :, 0]  # Blue is index 0 in BGR
+            # Apply power law transformation
+            blue_normalized = blue_channel / 255.0
+            blue_enhanced = np.power(blue_normalized, 1.0 / self.blue_boost)
+            enhanced[:, :, 0] = np.clip(blue_enhanced * 255.0, 0, 255)
+        
+        return enhanced
+    
+    def _apply_dynamic_range_compression(self, roi: np.ndarray) -> np.ndarray:
+        """Apply logarithmic compression to expand low-light dynamic range."""
+        # Convert to LAB for perceptual processing
+        lab = cv2.cvtColor(roi.astype(np.uint8), cv2.COLOR_BGR2LAB)
+        
+        # Apply logarithmic compression to L* channel
+        l_channel = lab[:, :, 0].astype(np.float32)
+        l_normalized = l_channel / 255.0
+        
+        # Logarithmic compression: log(1 + c * x) / log(1 + c)
+        c = 10.0  # Compression factor
+        l_compressed = np.log(1 + c * l_normalized) / np.log(1 + c)
+        
+        lab[:, :, 0] = np.clip(l_compressed * 255.0, 0, 255).astype(np.uint8)
+        
+        # Convert back to BGR
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR).astype(np.float32)
+    
+    def _apply_signal_amplification(self, roi: np.ndarray, background_brightness: Optional[float]) -> np.ndarray:
+        """Apply intelligent signal amplification with noise suppression."""
+        if background_brightness is None:
+            return roi * self.signal_amplification
+        
+        # Convert to LAB for processing
+        lab = cv2.cvtColor(roi.astype(np.uint8), cv2.COLOR_BGR2LAB)
+        l_channel = lab[:, :, 0].astype(np.float32) * 100.0 / 255.0
+        
+        # Create adaptive amplification mask
+        signal_strength = np.maximum(l_channel - background_brightness, 0)
+        max_signal = np.max(signal_strength)
+        
+        if max_signal > 0:
+            # Normalize signal strength
+            signal_norm = signal_strength / max_signal
+            
+            # Apply adaptive amplification (stronger for weaker signals)
+            amplification_factor = 1.0 + (self.signal_amplification - 1.0) * (1.0 - signal_norm)
+            
+            # Apply amplification to all channels
+            for i in range(3):
+                channel = roi[:, :, i]
+                roi[:, :, i] = channel * amplification_factor
+        
+        return roi
+    
+    def compute_enhanced_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
+        """Compute brightness statistics with low-light enhancement."""
+        if not self.enabled:
+            return self._compute_standard_brightness_stats(roi_bgr, background_brightness)
+        
+        # Apply enhancement
+        enhanced_roi = self.enhance_roi(roi_bgr, background_brightness)
+        
+        # Compute statistics on enhanced ROI
+        return self._compute_standard_brightness_stats(enhanced_roi, background_brightness)
+    
+    def _compute_standard_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
+        """Standard brightness calculation (matches original implementation)."""
+        if roi_bgr is None or roi_bgr.size == 0:
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        
+        try:
+            # Convert BGR to LAB
+            lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+            l_chan = lab[:, :, 0].astype(np.float32)
+            l_star = l_chan * 100.0 / 255.0
+            
+            # Extract blue channel
+            blue_chan = roi_bgr[:, :, 0].astype(np.float32)
+            
+            # Calculate raw statistics
+            l_raw_mean = float(np.mean(l_star))
+            l_raw_median = float(np.median(l_star))
+            b_raw_mean = float(np.mean(blue_chan))
+            b_raw_median = float(np.median(blue_chan))
+            
+            # Calculate background-subtracted statistics
+            if background_brightness is not None:
+                above_background_mask = l_star > background_brightness
+                
+                # Apply morphological cleanup if enabled
+                if self.morphological_cleanup and np.any(above_background_mask):
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                    mask_uint8 = above_background_mask.astype(np.uint8) * 255
+                    cleaned_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+                    above_background_mask = cleaned_mask > 0
+                
+                if np.any(above_background_mask):
+                    filtered_l_pixels = l_star[above_background_mask]
+                    filtered_b_pixels = blue_chan[above_background_mask]
+                    
+                    # Apply additional noise filtering to extracted pixels
+                    if self.gaussian_blur_sigma > 0 and len(filtered_l_pixels) > 10:
+                        # Use robust statistics for noisy signals
+                        l_bg_sub_mean = float(np.mean(filtered_l_pixels) - background_brightness)
+                        l_bg_sub_median = float(np.median(filtered_l_pixels) - background_brightness)
+                        
+                        # Apply Gaussian smoothing to reduce noise in statistics
+                        l_values = filtered_l_pixels - background_brightness
+                        if len(l_values) > 5:
+                            # Use trimmed mean for better noise resistance
+                            l_trimmed = np.sort(l_values)[int(len(l_values)*0.1):int(len(l_values)*0.9)]
+                            if len(l_trimmed) > 0:
+                                l_bg_sub_mean = float(np.mean(l_trimmed))
+                    else:
+                        l_bg_sub_mean = float(np.mean(filtered_l_pixels) - background_brightness)
+                        l_bg_sub_median = float(np.median(filtered_l_pixels) - background_brightness)
+                    
+                    b_bg_sub_mean = float(np.mean(filtered_b_pixels))
+                    b_bg_sub_median = float(np.median(filtered_b_pixels))
+                else:
+                    l_bg_sub_mean = l_bg_sub_median = b_bg_sub_mean = b_bg_sub_median = 0.0
+            else:
+                l_bg_sub_mean = l_raw_mean
+                l_bg_sub_median = l_raw_median
+                b_bg_sub_mean = b_raw_mean
+                b_bg_sub_median = b_raw_median
+            
+            return (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median,
+                   b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median)
+            
+        except Exception as e:
+            logger.error(f"Error computing brightness statistics: {e}")
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+# Error handling and validation utilities
+class BrightnessSorcererError(Exception):
+    """Base exception class for Brightness Sorcerer application."""
+    pass
+
+class VideoLoadError(BrightnessSorcererError):
+    """Raised when video cannot be loaded or is invalid."""
+    pass
+
+class AnalysisError(BrightnessSorcererError):
+    """Raised when analysis fails."""
+    pass
+
+class ConfigurationError(BrightnessSorcererError):
+    """Raised when configuration is invalid."""
+    pass
+
+class ValidationError(BrightnessSorcererError):
+    """Raised when input validation fails."""
+    pass
+
+def validate_video_file(file_path: str) -> bool:
+    """Validate that the video file exists and is readable."""
+    if not file_path:
+        raise ValidationError("Video file path cannot be empty")
+    
+    from pathlib import Path
+    path = Path(file_path)
+    if not path.exists():
+        raise ValidationError(f"Video file does not exist: {file_path}")
+    
+    if not path.is_file():
+        raise ValidationError(f"Path is not a file: {file_path}")
+    
+    if path.suffix.lower() not in SUPPORTED_VIDEO_FORMATS:
+        raise ValidationError(f"Unsupported video format: {path.suffix}. Supported formats: {', '.join(SUPPORTED_VIDEO_FORMATS)}")
+    
+    if path.stat().st_size == 0:
+        raise ValidationError(f"Video file is empty: {file_path}")
+    
+    return True
+
+def validate_roi_coordinates(x1: int, y1: int, x2: int, y2: int, frame_width: int, frame_height: int) -> bool:
+    """Validate ROI coordinates are within frame bounds and meet size requirements."""
+    # Ensure coordinates are in correct order
+    if x1 > x2:
+        x1, x2 = x2, x1
+    if y1 > y2:
+        y1, y2 = y2, y1
+    
+    # Check bounds
+    if x1 < 0 or y1 < 0 or x2 > frame_width or y2 > frame_height:
+        raise ValidationError(f"ROI coordinates ({x1}, {y1}, {x2}, {y2}) are outside frame bounds ({frame_width}x{frame_height})")
+    
+    # Check minimum size
+    roi_width = x2 - x1
+    roi_height = y2 - y1
+    if roi_width < MIN_ROI_SIZE[0] or roi_height < MIN_ROI_SIZE[1]:
+        raise ValidationError(f"ROI size ({roi_width}x{roi_height}) is below minimum size {MIN_ROI_SIZE}")
+    
+    # Check maximum size ratio
+    max_width = int(frame_width * MAX_ROI_SIZE_RATIO)
+    max_height = int(frame_height * MAX_ROI_SIZE_RATIO)
+    if roi_width > max_width or roi_height > max_height:
+        raise ValidationError(f"ROI size ({roi_width}x{roi_height}) exceeds maximum allowed size ({max_width}x{max_height})")
+    
+    return True
+
+def validate_frame_range(start_frame: int, end_frame: int, total_frames: int) -> bool:
+    """Validate frame range parameters."""
+    if start_frame < 0:
+        raise ValidationError(f"Start frame cannot be negative: {start_frame}")
+    
+    if end_frame < start_frame:
+        raise ValidationError(f"End frame ({end_frame}) cannot be less than start frame ({start_frame})")
+    
+    if start_frame >= total_frames:
+        raise ValidationError(f"Start frame ({start_frame}) must be less than total frames ({total_frames})")
+    
+    if end_frame >= total_frames:
+        raise ValidationError(f"End frame ({end_frame}) must be less than total frames ({total_frames})")
+    
+    return True
+
+def safe_float_conversion(value, default: float = 0.0, min_val: Optional[float] = None, max_val: Optional[float] = None) -> float:
+    """Safely convert value to float with bounds checking."""
+    try:
+        result = float(value)
+        if min_val is not None and result < min_val:
+            logger.warning(f"Value {result} below minimum {min_val}, using minimum")
+            return min_val
+        if max_val is not None and result > max_val:
+            logger.warning(f"Value {result} above maximum {max_val}, using maximum")
+            return max_val
+        return result
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Could not convert {value} to float: {e}, using default {default}")
+        return default
+
+def safe_int_conversion(value, default: int = 0, min_val: Optional[int] = None, max_val: Optional[int] = None) -> int:
+    """Safely convert value to int with bounds checking."""
+    try:
+        result = int(value)
+        if min_val is not None and result < min_val:
+            logger.warning(f"Value {result} below minimum {min_val}, using minimum")
+            return min_val
+        if max_val is not None and result > max_val:
+            logger.warning(f"Value {result} above maximum {max_val}, using maximum")
+            return max_val
+        return result
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Could not convert {value} to int: {e}, using default {default}")
+        return default
+
+class ProgressDialog(QtWidgets.QProgressDialog):
+    """Enhanced progress dialog with better user experience."""
+    
+    def __init__(self, title: str, label_text: str, minimum: int = 0, maximum: int = 100, parent=None):
+        super().__init__(label_text, "Cancel", minimum, maximum, parent)
+        self.setWindowTitle(title)
+        self.setWindowModality(QtCore.Qt.WindowModal)
+        self.setMinimumDuration(500)  # Show after 500ms
+        self.setAutoClose(True)
+        self.setAutoReset(True)
+        
+        # Enhanced styling
+        self.setStyleSheet("""
+            QProgressDialog {
+                background-color: #3d3d3d;
+                color: #ffffff;
+                border: 1px solid #555555;
+            }
+            QProgressBar {
+                border: 1px solid #555555;
+                border-radius: 3px;
+                background-color: #2d2d2d;
+                text-align: center;
+                color: #ffffff;
+            }
+            QProgressBar::chunk {
+                background-color: #5a9bd5;
+                border-radius: 2px;
+            }
+            QPushButton {
+                background-color: #555555;
+                border: 1px solid #777777;
+                border-radius: 3px;
+                padding: 5px 15px;
+                color: #ffffff;
+            }
+            QPushButton:hover {
+                background-color: #666666;
+            }
+            QPushButton:pressed {
+                background-color: #444444;
+            }
+        """)
+        
+        self._start_time = time.time()
+        self._last_update = 0
+        
+    def update_progress(self, current: int, status_text: str = None, eta_text: str = None):
+        """Update progress with optional status and ETA."""
+        self.setValue(current)
+        
+        if status_text or eta_text:
+            label_parts = []
+            if status_text:
+                label_parts.append(status_text)
+            if eta_text:
+                label_parts.append(eta_text)
+            self.setLabelText(" | ".join(label_parts))
+        
+        # Force GUI update every 100ms to prevent freezing
+        current_time = time.time()
+        if current_time - self._last_update > 0.1:
+            QtWidgets.QApplication.processEvents()
+            self._last_update = current_time
+    
+    def calculate_eta(self, current: int, total: int) -> str:
+        """Calculate and format estimated time remaining."""
+        if current <= 0 or total <= 0:
+            return "ETA: Calculating..."
+            
+        elapsed = time.time() - self._start_time
+        if elapsed < 1.0:  # Don't calculate ETA for first second
+            return "ETA: Calculating..."
+            
+        progress_ratio = current / total
+        if progress_ratio <= 0:
+            return "ETA: Calculating..."
+            
+        estimated_total_time = elapsed / progress_ratio
+        remaining_time = estimated_total_time - elapsed
+        
+        if remaining_time < 60:
+            return f"ETA: {remaining_time:.0f}s"
+        elif remaining_time < 3600:
+            minutes = remaining_time // 60
+            seconds = remaining_time % 60
+            return f"ETA: {minutes:.0f}m {seconds:.0f}s"
+        else:
+            hours = remaining_time // 3600
+            minutes = (remaining_time % 3600) // 60
+            return f"ETA: {hours:.0f}h {minutes:.0f}m"
+
+class StatusBar(QtWidgets.QStatusBar):
+    """Enhanced status bar with multiple information zones."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # Main status label
+        self.status_label = QtWidgets.QLabel("Ready")
+        self.addWidget(self.status_label)
+        
+        # Video info label
+        self.video_info_label = QtWidgets.QLabel("No video loaded")
+        self.addPermanentWidget(self.video_info_label)
+        
+        # Memory usage label
+        self.memory_label = QtWidgets.QLabel("Memory: 0 MB")
+        self.addPermanentWidget(self.memory_label)
+        
+        # Set up timer for periodic updates
+        self.update_timer = QtCore.QTimer()
+        self.update_timer.timeout.connect(self.update_memory_usage)
+        self.update_timer.start(5000)  # Update every 5 seconds
+        
+    def set_status(self, message: str, timeout: int = 0):
+        """Set main status message."""
+        self.status_label.setText(message)
+        if timeout > 0:
+            QtCore.QTimer.singleShot(timeout, lambda: self.status_label.setText("Ready"))
+            
+    def set_video_info(self, info: str):
+        """Set video information display."""
+        self.video_info_label.setText(info)
+        
+    def update_memory_usage(self):
+        """Update memory usage display."""
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            self.memory_label.setText(f"Memory: {memory_mb:.0f} MB")
+        except ImportError:
+            self.memory_label.setText("Memory: N/A")
+        except Exception as e:
+            logger.debug(f"Could not update memory usage: {e}")
 
 class FrameCache:
     """Efficient frame caching system for better performance."""
@@ -404,6 +935,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.audio_manager = AudioManager()
         self.audio_analyzer = AudioAnalyzer()
         
+        # Low-light enhancement system
+        self.low_light_enhancer = LowLightEnhancer()
+        
         # Recent files
         self.recent_files = []
         
@@ -443,33 +977,139 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.playback_speed = 1.0  # Playback speed multiplier
 
     def _load_settings(self):
-        """Load application settings from file."""
+        """Load application settings from file with robust error handling."""
+        # Initialize default settings
+        default_settings = {
+            'recent_files': [],
+            'audio_enabled': True,
+            'audio_volume': 0.7,
+            'window_geometry': None,
+            'window_state': None,
+            'last_directory': os.path.expanduser('~'),
+            'auto_save_results': True,
+            'default_analysis_name': 'analysis',
+            'frame_cache_size': FRAME_CACHE_SIZE,
+            'log_level': 'INFO'
+        }
+        
+        self.settings = default_settings.copy()
+        self.recent_files = []
+        
+        # Try to load existing settings
         try:
             if os.path.exists(DEFAULT_SETTINGS_FILE):
-                with open(DEFAULT_SETTINGS_FILE, 'r') as f:
-                    self.settings = json.load(f)
-                    self.recent_files = self.settings.get('recent_files', [])
+                logger.debug(f"Loading settings from {DEFAULT_SETTINGS_FILE}")
+                with open(DEFAULT_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                    loaded_settings = json.load(f)
                     
-                    # Load audio settings
-                    audio_enabled = self.settings.get('audio_enabled', True)
-                    audio_volume = self.settings.get('audio_volume', 0.7)
-                    self.audio_manager.set_enabled(audio_enabled)
-                    self.audio_manager.set_volume(audio_volume)
+                # Validate and merge settings
+                if isinstance(loaded_settings, dict):
+                    # Validate recent files
+                    recent_files = loaded_settings.get('recent_files', [])
+                    if isinstance(recent_files, list):
+                        # Filter out invalid file paths
+                        valid_recent_files = []
+                        for file_path in recent_files:
+                            if isinstance(file_path, str) and os.path.exists(file_path):
+                                valid_recent_files.append(file_path)
+                        self.recent_files = valid_recent_files[:MAX_RECENT_FILES]
+                        loaded_settings['recent_files'] = self.recent_files
+                    
+                    # Validate numeric settings
+                    audio_volume = safe_float_conversion(
+                        loaded_settings.get('audio_volume', 0.7), 
+                        default=0.7, min_val=0.0, max_val=1.0
+                    )
+                    loaded_settings['audio_volume'] = audio_volume
+                    
+                    cache_size = safe_int_conversion(
+                        loaded_settings.get('frame_cache_size', FRAME_CACHE_SIZE),
+                        default=FRAME_CACHE_SIZE, min_val=10, max_val=1000
+                    )
+                    loaded_settings['frame_cache_size'] = cache_size
+                    
+                    # Merge with defaults
+                    self.settings.update(loaded_settings)
+                    
+                    logger.info(f"Loaded settings with {len(self.recent_files)} recent files")
+                else:
+                    logger.warning("Settings file contains invalid data, using defaults")
+                    
+        except FileNotFoundError:
+            logger.info("No existing settings file found, using defaults")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Settings file contains invalid JSON: {e}, using defaults")
+            # Try to create backup before overwriting
+            try:
+                import shutil
+                shutil.copy2(DEFAULT_SETTINGS_FILE, BACKUP_SETTINGS_FILE)
+                logger.info(f"Backed up corrupted settings to {BACKUP_SETTINGS_FILE}")
+            except Exception as backup_error:
+                logger.warning(f"Could not backup corrupted settings: {backup_error}")
         except Exception as e:
-            logging.warning(f"Could not load settings: {e}")
-            self.settings = {}
-            self.recent_files = []
+            logger.error(f"Unexpected error loading settings: {e}", exc_info=True)
+        
+        # Apply audio settings
+        try:
+            audio_enabled = self.settings.get('audio_enabled', True)
+            audio_volume = self.settings.get('audio_volume', 0.7)
+            self.audio_manager.set_enabled(audio_enabled)
+            self.audio_manager.set_volume(audio_volume)
+        except Exception as e:
+            logger.warning(f"Could not apply audio settings: {e}")
+        
+        # Update frame cache size if changed
+        try:
+            cache_size = self.settings.get('frame_cache_size', FRAME_CACHE_SIZE)
+            self.frame_cache = FrameCache(cache_size)
+        except Exception as e:
+            logger.warning(f"Could not update frame cache size: {e}")
 
     def _save_settings(self):
-        """Save application settings to file."""
+        """Save application settings to file with error handling."""
         try:
+            # Update current settings
             self.settings['recent_files'] = self.recent_files
             self.settings['audio_enabled'] = self.audio_manager.enabled
             self.settings['audio_volume'] = self.audio_manager.volume
-            with open(DEFAULT_SETTINGS_FILE, 'w') as f:
-                json.dump(self.settings, f, indent=2)
+            
+            # Save window geometry and state
+            try:
+                geometry = self.saveGeometry()
+                state = self.saveState()
+                self.settings['window_geometry'] = geometry.toBase64().data().decode('utf-8')
+                self.settings['window_state'] = state.toBase64().data().decode('utf-8')
+            except Exception as e:
+                logger.debug(f"Could not save window state: {e}")
+            
+            # Atomic write to prevent corruption
+            temp_file = DEFAULT_SETTINGS_FILE + '.tmp'
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(self.settings, f, indent=2, ensure_ascii=False)
+            
+            # Replace original file
+            if os.path.exists(DEFAULT_SETTINGS_FILE):
+                import shutil
+                shutil.copy2(DEFAULT_SETTINGS_FILE, BACKUP_SETTINGS_FILE)
+            
+            os.replace(temp_file, DEFAULT_SETTINGS_FILE)
+            logger.debug(f"Settings saved to {DEFAULT_SETTINGS_FILE}")
+            
+        except PermissionError:
+            logger.error(f"Permission denied writing to {DEFAULT_SETTINGS_FILE}")
+            QtWidgets.QMessageBox.warning(
+                self, "Settings Error", 
+                f"Could not save settings to {DEFAULT_SETTINGS_FILE}\n\nPermission denied."
+            )
         except Exception as e:
-            logging.warning(f"Could not save settings: {e}")
+            logger.error(f"Could not save settings: {e}", exc_info=True)
+            # Clean up temp file if it exists
+            temp_file = DEFAULT_SETTINGS_FILE + '.tmp'
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
 
     def _add_recent_file(self, file_path: str):
         """Add file to recent files list."""
@@ -1117,6 +1757,102 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.brightness_groupbox.setLayout(brightness_groupbox_layout)
         self.right_layout.addWidget(self.brightness_groupbox)
 
+        # -- Low-Light Enhancement Settings
+        self.lowlight_groupbox = QtWidgets.QGroupBox("Low-Light Enhancement")
+        lowlight_layout = QtWidgets.QVBoxLayout()
+        
+        # Enable/disable checkbox
+        self.lowlight_enabled_cb = QtWidgets.QCheckBox("Enable Low-Light Enhancement")
+        self.lowlight_enabled_cb.setChecked(True)
+        self.lowlight_enabled_cb.setToolTip("Enable advanced signal processing for low-light conditions")
+        lowlight_layout.addWidget(self.lowlight_enabled_cb)
+        
+        # L* Channel Boost
+        l_boost_layout = QtWidgets.QHBoxLayout()
+        l_boost_layout.addWidget(QtWidgets.QLabel("L* Boost:"))
+        self.l_boost_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.l_boost_slider.setRange(50, 300)  # 0.5x to 3.0x
+        self.l_boost_slider.setValue(100)  # 1.0x default
+        self.l_boost_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.l_boost_slider.setTickInterval(50)
+        self.l_boost_slider.setToolTip("Boost L* channel for better low-light detection (0.5x - 3.0x)")
+        l_boost_layout.addWidget(self.l_boost_slider)
+        self.l_boost_label = QtWidgets.QLabel("1.0x")
+        self.l_boost_label.setMinimumWidth(40)
+        l_boost_layout.addWidget(self.l_boost_label)
+        lowlight_layout.addLayout(l_boost_layout)
+        
+        # Blue Channel Boost
+        blue_boost_layout = QtWidgets.QHBoxLayout()
+        blue_boost_layout.addWidget(QtWidgets.QLabel("Blue Boost:"))
+        self.blue_boost_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.blue_boost_slider.setRange(50, 300)  # 0.5x to 3.0x
+        self.blue_boost_slider.setValue(100)  # 1.0x default
+        self.blue_boost_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.blue_boost_slider.setTickInterval(50)
+        self.blue_boost_slider.setToolTip("Boost blue channel for better blue light detection (0.5x - 3.0x)")
+        blue_boost_layout.addWidget(self.blue_boost_slider)
+        self.blue_boost_label = QtWidgets.QLabel("1.0x")
+        self.blue_boost_label.setMinimumWidth(40)
+        blue_boost_layout.addWidget(self.blue_boost_label)
+        lowlight_layout.addLayout(blue_boost_layout)
+        
+        # Noise Reduction
+        noise_layout = QtWidgets.QHBoxLayout()
+        noise_layout.addWidget(QtWidgets.QLabel("Noise Reduction:"))
+        self.noise_reduction_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.noise_reduction_slider.setRange(0, 100)
+        self.noise_reduction_slider.setValue(50)
+        self.noise_reduction_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.noise_reduction_slider.setTickInterval(25)
+        self.noise_reduction_slider.setToolTip("Noise reduction strength (0% - 100%)")
+        noise_layout.addWidget(self.noise_reduction_slider)
+        self.noise_reduction_label = QtWidgets.QLabel("50%")
+        self.noise_reduction_label.setMinimumWidth(40)
+        noise_layout.addWidget(self.noise_reduction_label)
+        lowlight_layout.addLayout(noise_layout)
+        
+        # Signal Amplification
+        signal_amp_layout = QtWidgets.QHBoxLayout()
+        signal_amp_layout.addWidget(QtWidgets.QLabel("Signal Amplification:"))
+        self.signal_amp_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.signal_amp_slider.setRange(100, 500)  # 1.0x to 5.0x
+        self.signal_amp_slider.setValue(100)  # 1.0x default
+        self.signal_amp_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.signal_amp_slider.setTickInterval(100)
+        self.signal_amp_slider.setToolTip("Amplify weak signals for better detection (1.0x - 5.0x)")
+        signal_amp_layout.addWidget(self.signal_amp_slider)
+        self.signal_amp_label = QtWidgets.QLabel("1.0x")
+        self.signal_amp_label.setMinimumWidth(40)
+        signal_amp_layout.addWidget(self.signal_amp_label)
+        lowlight_layout.addLayout(signal_amp_layout)
+        
+        # Advanced Options
+        advanced_layout = QtWidgets.QHBoxLayout()
+        self.histogram_eq_cb = QtWidgets.QCheckBox("Histogram Equalization")
+        self.histogram_eq_cb.setToolTip("Apply adaptive histogram equalization for better contrast")
+        advanced_layout.addWidget(self.histogram_eq_cb)
+        
+        self.dynamic_range_cb = QtWidgets.QCheckBox("Dynamic Range Compression")
+        self.dynamic_range_cb.setToolTip("Apply logarithmic compression for better low-light dynamic range")
+        advanced_layout.addWidget(self.dynamic_range_cb)
+        lowlight_layout.addLayout(advanced_layout)
+        
+        # Preview Options
+        preview_layout = QtWidgets.QHBoxLayout()
+        self.show_enhanced_preview_cb = QtWidgets.QCheckBox("Show Enhanced Preview")
+        self.show_enhanced_preview_cb.setToolTip("Show enhanced video preview (affects display only, not analysis)")
+        preview_layout.addWidget(self.show_enhanced_preview_cb)
+        lowlight_layout.addLayout(preview_layout)
+        
+        # Reset button
+        reset_btn = QtWidgets.QPushButton("Reset to Defaults")
+        reset_btn.setToolTip("Reset all low-light enhancement settings to default values")
+        lowlight_layout.addWidget(reset_btn)
+        
+        self.lowlight_groupbox.setLayout(lowlight_layout)
+        self.right_layout.addWidget(self.lowlight_groupbox)
+
         # -- Run Duration Settings
         self.run_duration_groupbox = QtWidgets.QGroupBox("Run Duration (Optional)")
         run_duration_layout = QtWidgets.QVBoxLayout()
@@ -1248,6 +1984,22 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.threshold_spin.valueChanged.connect(self._on_threshold_changed)
         self.set_bg_btn.clicked.connect(self._set_background_roi)
         self.show_mask_checkbox.toggled.connect(self._on_mask_checkbox_toggled)
+        
+        # Low-light enhancement connections
+        self.lowlight_enabled_cb.stateChanged.connect(self._on_lowlight_enabled_changed)
+        self.l_boost_slider.valueChanged.connect(self._on_l_boost_changed)
+        self.blue_boost_slider.valueChanged.connect(self._on_blue_boost_changed)
+        self.noise_reduction_slider.valueChanged.connect(self._on_noise_reduction_changed)
+        self.signal_amp_slider.valueChanged.connect(self._on_signal_amp_changed)
+        self.histogram_eq_cb.stateChanged.connect(self._on_histogram_eq_changed)
+        self.dynamic_range_cb.stateChanged.connect(self._on_dynamic_range_changed)
+        self.show_enhanced_preview_cb.stateChanged.connect(self._on_preview_mode_changed)
+        
+        # Find and connect reset button
+        for child in self.lowlight_groupbox.findChildren(QtWidgets.QPushButton):
+            if "Reset" in child.text():
+                child.clicked.connect(self.reset_lowlight_settings)
+                break
 
     def _update_widget_states(self, video_loaded=False, rois_exist=False):
         """Enable/disable widgets based on application state."""
@@ -1373,26 +2125,91 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     # --- Video Loading and Frame Display ---
 
     def load_video(self):
-        """Loads the video specified by self.video_path."""
+        """Loads the video specified by self.video_path with comprehensive validation."""
+        # Clean up existing video capture
         if self.cap:
             self.cap.release()
             self.cap = None
-
-        if not self.video_path or not os.path.exists(self.video_path):
-            QtWidgets.QMessageBox.critical(self, 'Error', 'Video path is invalid or file does not exist.')
+            
+        # Clear frame cache
+        self.frame_cache.clear()
+        
+        # Validate video file path
+        try:
+            if not self.video_path:
+                raise ValidationError("No video file selected")
+                
+            validate_video_file(self.video_path)
+            logger.info(f"Loading video: {os.path.basename(self.video_path)}")
+            
+        except ValidationError as e:
+            error_msg = f"Video validation failed: {e}"
+            logger.error(error_msg)
+            QtWidgets.QMessageBox.critical(self, 'Video Validation Error', str(e))
+            self._reset_state()
+            return
+        except Exception as e:
+            error_msg = f"Unexpected error during video validation: {e}"
+            logger.error(error_msg, exc_info=True)
+            QtWidgets.QMessageBox.critical(self, 'Error', error_msg)
             self._reset_state()
             return
 
-        self.cap = cv2.VideoCapture(self.video_path)
-        if not self.cap.isOpened():
-            QtWidgets.QMessageBox.critical(self, 'Error', f'Could not open video file: {os.path.basename(self.video_path)}')
+        # Attempt to open video file
+        try:
+            self.cap = cv2.VideoCapture(self.video_path)
+            if not self.cap.isOpened():
+                raise VideoLoadError(f"OpenCV could not open video file: {os.path.basename(self.video_path)}")
+            
+            # Get video properties
+            self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.playback_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # Validate video properties
+            if self.total_frames <= 0:
+                raise VideoLoadError("Video has no frames or invalid frame count")
+                
+            if self.playback_fps <= 0:
+                logger.warning("Invalid FPS detected, using fallback")
+                self.playback_fps = 30.0  # Default fallback
+                
+            if frame_width < MIN_FRAME_SIZE[0] or frame_height < MIN_FRAME_SIZE[1]:
+                raise VideoLoadError(f"Video resolution ({frame_width}x{frame_height}) is below minimum {MIN_FRAME_SIZE}")
+                
+            if frame_width > MAX_FRAME_SIZE[0] or frame_height > MAX_FRAME_SIZE[1]:
+                raise VideoLoadError(f"Video resolution ({frame_width}x{frame_height}) exceeds maximum {MAX_FRAME_SIZE}")
+            
+            # Calculate duration and validate
+            duration = self.total_frames / self.playback_fps
+            if duration < MIN_VIDEO_DURATION:
+                raise VideoLoadError(f"Video duration ({duration:.2f}s) is below minimum {MIN_VIDEO_DURATION}s")
+                
+            if duration > MAX_VIDEO_DURATION:
+                logger.warning(f"Video duration ({duration:.2f}s) is very long, performance may be affected")
+            
+            # Test read first frame to ensure video is readable
+            ret, test_frame = self.cap.read()
+            if not ret or test_frame is None:
+                raise VideoLoadError("Could not read first frame from video")
+                
+            # Reset to beginning
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            
+            logger.info(f"Video loaded successfully: {frame_width}x{frame_height}, {self.total_frames} frames, {self.playback_fps:.2f} FPS, {duration:.2f}s")
+            
+        except VideoLoadError as e:
+            logger.error(f"Video load error: {e}")
+            QtWidgets.QMessageBox.critical(self, 'Video Load Error', str(e))
             self._reset_state()
             return
-
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.playback_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if self.playback_fps <= 0:
-            self.playback_fps = 30.0  # Default fallback
+        except Exception as e:
+            error_msg = f"Unexpected error loading video: {e}"
+            logger.error(error_msg, exc_info=True)
+            QtWidgets.QMessageBox.critical(self, 'Error', error_msg)
+            self._reset_state()
+            return
             
         if self.total_frames <= 0:
              QtWidgets.QMessageBox.warning(self, 'Warning', 'Video file appears to have no frames.')
@@ -1444,24 +2261,48 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _reset_state(self):
         """Resets the application state when a video fails to load or is closed."""
+        logger.debug("Resetting application state")
+        
+        # Stop any ongoing operations
+        if hasattr(self, 'is_playing') and self.is_playing:
+            self.stop_playback()
+            
+        # Release video capture resources
         if self.cap:
             self.cap.release()
+            self.cap = None
+            logger.debug("Video capture resources released")
+        
+        # Reset video-related variables
         self.video_path = None
         self.frame = None
         self.current_frame_index = 0
         self.total_frames = 0
-        self.cap = None
         self.rects = []
         self.selected_rect_idx = None
+        self.background_roi_idx = None
         self.start_frame = 0
         self.end_frame = None
         self.out_paths = []
+        self.playback_fps = 30.0
+        
+        # Clear frame cache and force memory cleanup
         self.frame_cache.clear()
         
-        # Stop playback and reset controls
-        self.stop_playback()
+        # Reset playback controls
         self.speed_combo.setCurrentText("1x")
         self.playback_speed = 1.0
+        
+        # Reset UI elements
+        self.video_label.clear()
+        self.video_label.setText("No video loaded")
+        self.results_label.setText("")
+        
+        # Force garbage collection to free memory
+        import gc
+        gc.collect()
+        
+        logger.debug("Application state reset complete")
         
         self.image_label.setText("Drag & Drop Video File Here")
         self.image_label.setPixmap(QtGui.QPixmap())
@@ -1609,6 +2450,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
 
         frame_copy = self.frame.copy()
+        
+        # Apply low-light enhancement preview if enabled
+        if (hasattr(self, 'show_enhanced_preview_cb') and 
+            self.show_enhanced_preview_cb.isChecked() and 
+            hasattr(self, 'low_light_enhancer') and 
+            self.low_light_enhancer.enabled):
+            try:
+                frame_copy = self.low_light_enhancer.enhance_roi(frame_copy)
+            except Exception as e:
+                logger.warning(f"Failed to apply enhancement preview: {e}")
         
         # Apply pixel mask visualization if enabled
         if self.show_pixel_mask and len(self.rects) > 0:
@@ -1871,6 +2722,125 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _on_mask_checkbox_toggled(self, checked: bool):
         """Handle pixel mask visualization checkbox toggle."""
         self.show_pixel_mask = checked
+        if self.frame is not None:
+            self.show_frame()
+    
+    # Low-light enhancement handlers
+    def _on_lowlight_enabled_changed(self, state: int):
+        """Handle low-light enhancement enable/disable."""
+        enabled = state == QtCore.Qt.Checked
+        self.low_light_enhancer.enabled = enabled
+        
+        # Enable/disable related controls
+        self.l_boost_slider.setEnabled(enabled)
+        self.blue_boost_slider.setEnabled(enabled)
+        self.noise_reduction_slider.setEnabled(enabled)
+        self.signal_amp_slider.setEnabled(enabled)
+        self.histogram_eq_cb.setEnabled(enabled)
+        self.dynamic_range_cb.setEnabled(enabled)
+        
+        # Update current frame display
+        if self.frame is not None:
+            self.show_frame()
+        self._update_current_brightness_display()
+    
+    def _on_l_boost_changed(self, value: int):
+        """Handle L* boost slider change."""
+        boost_value = value / 100.0  # Convert to 0.5-3.0 range
+        self.low_light_enhancer.l_star_boost = boost_value
+        self.l_boost_label.setText(f"{boost_value:.1f}x")
+        
+        # Update current frame display
+        if self.frame is not None:
+            self.show_frame()
+        self._update_current_brightness_display()
+    
+    def _on_blue_boost_changed(self, value: int):
+        """Handle blue boost slider change."""
+        boost_value = value / 100.0  # Convert to 0.5-3.0 range
+        self.low_light_enhancer.blue_boost = boost_value
+        self.blue_boost_label.setText(f"{boost_value:.1f}x")
+        
+        # Update current frame display
+        if self.frame is not None:
+            self.show_frame()
+        self._update_current_brightness_display()
+    
+    def _on_noise_reduction_changed(self, value: int):
+        """Handle noise reduction slider change."""
+        noise_value = value / 100.0  # Convert to 0.0-1.0 range
+        self.low_light_enhancer.noise_reduction = noise_value
+        self.noise_reduction_label.setText(f"{value}%")
+        
+        # Update current frame display
+        if self.frame is not None:
+            self.show_frame()
+        self._update_current_brightness_display()
+    
+    def _on_signal_amp_changed(self, value: int):
+        """Handle signal amplification slider change."""
+        amp_value = value / 100.0  # Convert to 1.0-5.0 range
+        self.low_light_enhancer.signal_amplification = amp_value
+        self.signal_amp_label.setText(f"{amp_value:.1f}x")
+        
+        # Update current frame display
+        if self.frame is not None:
+            self.show_frame()
+        self._update_current_brightness_display()
+    
+    def _on_histogram_eq_changed(self, state: int):
+        """Handle histogram equalization checkbox change."""
+        enabled = state == QtCore.Qt.Checked
+        self.low_light_enhancer.histogram_equalization = enabled
+        
+        # Update current frame display
+        if self.frame is not None:
+            self.show_frame()
+        self._update_current_brightness_display()
+    
+    def _on_dynamic_range_changed(self, state: int):
+        """Handle dynamic range compression checkbox change."""
+        enabled = state == QtCore.Qt.Checked
+        self.low_light_enhancer.dynamic_range_compression = enabled
+        
+        # Update current frame display
+        if self.frame is not None:
+            self.show_frame()
+        self._update_current_brightness_display()
+    
+    def reset_lowlight_settings(self):
+        """Reset all low-light enhancement settings to defaults."""
+        # Reset sliders
+        self.l_boost_slider.setValue(100)
+        self.blue_boost_slider.setValue(100)
+        self.noise_reduction_slider.setValue(50)
+        self.signal_amp_slider.setValue(100)
+        
+        # Reset checkboxes
+        self.lowlight_enabled_cb.setChecked(True)
+        self.histogram_eq_cb.setChecked(False)
+        self.dynamic_range_cb.setChecked(False)
+        self.show_enhanced_preview_cb.setChecked(False)
+        
+        # Reset enhancer values
+        self.low_light_enhancer.enabled = True
+        self.low_light_enhancer.l_star_boost = 1.0
+        self.low_light_enhancer.blue_boost = 1.0
+        self.low_light_enhancer.noise_reduction = 0.5
+        self.low_light_enhancer.signal_amplification = 1.0
+        self.low_light_enhancer.histogram_equalization = False
+        self.low_light_enhancer.dynamic_range_compression = False
+        
+        # Update displays
+        if self.frame is not None:
+            self.show_frame()
+        self._update_current_brightness_display()
+        
+        logger.info("Low-light enhancement settings reset to defaults")
+    
+    def _on_preview_mode_changed(self, state: int):
+        """Handle enhanced preview mode checkbox change."""
+        # Update current frame display
         if self.frame is not None:
             self.show_frame()
 
@@ -2885,6 +3855,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
     def _compute_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
         """
         Calculates brightness statistics for an ROI with optional background subtraction.
+        Uses low-light enhancement if enabled for better results in low-light conditions.
 
         Converts BGR to CIE LAB color space and uses the L* channel.
         Also extracts blue channel statistics for blue light analysis.
@@ -2898,6 +3869,32 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                      b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median)
             L* values in 0-100 range, Blue values in 0-255 range
             or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) if the ROI is invalid or calculation fails.
+        """
+        if roi_bgr is None or roi_bgr.size == 0:
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+        try:
+            # Use low-light enhancement if enabled
+            if hasattr(self, 'low_light_enhancer') and self.low_light_enhancer.enabled:
+                return self.low_light_enhancer.compute_enhanced_brightness_stats(roi_bgr, background_brightness)
+            else:
+                # Fall back to standard calculation
+                return self._compute_standard_brightness_stats(roi_bgr, background_brightness)
+            
+        except Exception as e:
+            logger.error(f"Error computing brightness statistics: {e}")
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    
+    def _compute_standard_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
+        """
+        Standard brightness calculation without enhancement.
+        
+        Args:
+            roi_bgr: The region of interest as a NumPy array (BGR format).
+            background_brightness: Optional background L* value to subtract from all pixels.
+
+        Returns:
+            Tuple of brightness statistics.
         """
         if roi_bgr is None or roi_bgr.size == 0:
             return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -3015,14 +4012,81 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
         l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi_bgr)
         return l_raw_mean
     
-if __name__ == '__main__':
+def main():
+    """Main application entry point with comprehensive error handling."""
+    # Initialize application
     app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    app.setApplicationDisplayName(f"{APP_NAME} v{APP_VERSION}")
+    app.setOrganizationName("Brightness Sorcerer Development Team")
+    app.setOrganizationDomain("brightnesssorcerer.dev")
     
-    # Set up logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    # Set application icon (if available)
+    try:
+        from pathlib import Path
+        icon_path = Path("icon.ico")
+        if icon_path.exists():
+            app.setWindowIcon(QtGui.QIcon(str(icon_path)))
+    except Exception as e:
+        logger.debug(f"Could not load application icon: {e}")
+    
+    # Global exception handler
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        """Handle uncaught exceptions."""
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        
+        error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        logger.critical(f"Uncaught exception: {error_msg}")
+        
+        # Show error dialog
+        error_dialog = QtWidgets.QMessageBox()
+        error_dialog.setIcon(QtWidgets.QMessageBox.Critical)
+        error_dialog.setWindowTitle("Critical Error")
+        error_dialog.setText("An unexpected error occurred.")
+        error_dialog.setDetailedText(error_msg)
+        error_dialog.setInformativeText("The application will now close. Please check the log file for details.")
+        error_dialog.exec_()
+    
+    # Install exception handler
+    sys.excepthook = handle_exception
+    
+    try:
+        # Create and show the main window
+        logger.info(f"Starting {APP_NAME} v{APP_VERSION}")
+        win = VideoAnalyzer()
+        
+        # Center window on screen
+        screen = app.desktop().screenGeometry()
+        window = win.geometry()
+        win.move((screen.width() - window.width()) // 2, 
+                 (screen.height() - window.height()) // 2)
+        
+        win.show()
+        logger.info("Application startup complete")
+        
+        # Run application
+        exit_code = app.exec_()
+        logger.info(f"Application exiting with code {exit_code}")
+        return exit_code
+        
+    except Exception as e:
+        logger.critical(f"Failed to start application: {e}", exc_info=True)
+        
+        # Show startup error dialog
+        error_dialog = QtWidgets.QMessageBox()
+        error_dialog.setIcon(QtWidgets.QMessageBox.Critical)
+        error_dialog.setWindowTitle("Startup Error")
+        error_dialog.setText(f"Failed to start {APP_NAME}")
+        error_dialog.setInformativeText(str(e))
+        error_dialog.exec_()
+        
+        return 1
+    
+    finally:
+        logger.info("Application cleanup complete")
 
-    # Create and show the main window
-    win = VideoAnalyzer()
-    win.show()
-
-    sys.exit(app.exec_())
+if __name__ == '__main__':
+    sys.exit(main())

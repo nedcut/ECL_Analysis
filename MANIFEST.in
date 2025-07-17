@@ -1,0 +1,61 @@
+# MANIFEST.in for Brightness Sorcerer
+# Include important files in the distribution
+
+# Core files
+include *.py
+include *.md
+include *.txt
+include *.json
+include requirements.txt
+include setup.py
+include MANIFEST.in
+
+# Documentation
+include README.md
+include CLAUDE.md
+include FEATURE_IMPLEMENTATION_PLAN.md
+
+# Configuration files
+include *.json
+include *.ini
+include *.cfg
+
+# Assets (if any)
+include *.ico
+include *.png
+include *.jpg
+include *.svg
+
+# License and legal
+include LICENSE*
+include COPYRIGHT*
+include NOTICE*
+
+# Exclude development and temporary files
+exclude .git*
+exclude .pytest_cache/*
+exclude __pycache__/*
+exclude *.pyc
+exclude *.pyo
+exclude *.egg-info/*
+exclude build/*
+exclude dist/*
+exclude .DS_Store
+exclude Thumbs.db
+exclude *.tmp
+exclude *.log
+exclude brightness_analyzer_settings*.json
+exclude *.backup.json
+
+# Recursive excludes
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * .DS_Store
+recursive-exclude * Thumbs.db
+recursive-exclude * *.tmp
+recursive-exclude * *.log
+
+# Include only specific directories if they exist
+recursive-include docs *.md *.rst *.txt
+recursive-include examples *.py *.md
+recursive-include tests *.py
