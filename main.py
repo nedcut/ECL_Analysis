@@ -3,18 +3,36 @@ import logging
 import os
 import sys
 import time
-from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple, Union
+import traceback
+from typing import List, Optional, Tuple
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+# Import from new modular structure
+from brightness_sorcerer.core.exceptions import (
+    BrightnessSorcererError, VideoLoadError, ValidationError
+)
+from brightness_sorcerer.utils.constants import *
+from brightness_sorcerer.utils.validation import (
+    validate_video_file, validate_frame_range,
+    safe_float_conversion, safe_int_conversion
+)
+
+# Version information
+__version__ = "2.0.0"
+__author__ = "Brightness Sorcerer Development Team"
+__description__ = "Professional Video Brightness Analysis Tool"
+
+# Optional dependencies with graceful fallbacks
 try:
     import pygame
     PYGAME_AVAILABLE = True
 except ImportError:
+    pygame = None
     PYGAME_AVAILABLE = False
     logging.warning("pygame not available - audio features disabled")
 
@@ -23,47 +41,420 @@ try:
     import soundfile as sf
     LIBROSA_AVAILABLE = True
 except ImportError:
+    librosa = None
     LIBROSA_AVAILABLE = False
     logging.warning("librosa not available - audio analysis disabled")
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logging.warning("psutil not available - memory monitoring disabled")
 
-# --- Constants ---
-DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif"
-COLOR_BACKGROUND = "#2d2d2d"
-COLOR_FOREGROUND = "#cccccc"
-COLOR_ACCENT = "#5a9bd5"
-COLOR_ACCENT_HOVER = "#7ab3e0"
-COLOR_SECONDARY = "#404040"
-COLOR_SECONDARY_LIGHT = "#555555"
-COLOR_SUCCESS = "#70ad47"
-COLOR_WARNING = "#ed7d31"
-COLOR_ERROR = "#ff0000"
-COLOR_INFO = "#ffc000"
-COLOR_BRIGHTNESS_LABEL = "#ffeb3b"
+# Enhanced logging configuration
+def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None) -> logging.Logger:
+    """Setup enhanced logging with file output and better formatting."""
+    logger = logging.getLogger('BrightnessSorcerer')
+    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    
+    # Clear existing handlers
+    logger.handlers.clear()
+    
+    # Console handler with enhanced formatting
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler if specified
+    if log_file:
+        try:
+            file_handler = logging.FileHandler(log_file)
+            file_formatter = logging.Formatter(
+                '%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            file_handler.setFormatter(file_formatter)
+            logger.addHandler(file_handler)
+        except (OSError, IOError, PermissionError) as e:
+            logger.warning(f"Could not setup file logging: {e}")
+    
+    return logger
 
-ROI_COLORS = [
-    (255, 50, 50), (50, 200, 50), (50, 150, 255), (255, 150, 50),
-    (255, 50, 255), (50, 200, 200), (150, 50, 255), (255, 255, 50)
-]
-ROI_THICKNESS_DEFAULT = 2
-ROI_THICKNESS_SELECTED = 4
-ROI_LABEL_FONT_SCALE = 0.8
-ROI_LABEL_THICKNESS = 2
+# Setup logging
+logger = setup_logging(log_file="brightness_analyzer.log")
 
-AUTO_DETECT_BASELINE_PERCENTILE = 5
-BRIGHTNESS_NOISE_FLOOR_PERCENTILE = 2
-DEFAULT_MANUAL_THRESHOLD = 5.0
-MORPHOLOGICAL_KERNEL_SIZE = 3
+# Constants imported from brightness_sorcerer.utils.constants
 
-MOUSE_RESIZE_HANDLE_SENSITIVITY = 10
+# Low-light enhancement and signal processing
+class LowLightEnhancer:
+    """Advanced signal processing for low-light brightness analysis."""
+    
+    def __init__(self):
+        self.enabled = True
+        self.l_star_boost = 1.0
+        self.blue_boost = 1.0
+        self.noise_reduction = 0.5
+        self.adaptive_gain = True
+        self.histogram_equalization = False
+        self.gaussian_blur_sigma = 0.5
+        self.bilateral_filter = True
+        self.morphological_cleanup = True
+        self.signal_amplification = 1.0
+        self.dynamic_range_compression = False
+        
+    def enhance_roi(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> np.ndarray:
+        """Apply comprehensive low-light enhancement to ROI."""
+        if roi_bgr is None or roi_bgr.size == 0:
+            return roi_bgr
+            
+        try:
+            enhanced_roi = roi_bgr.copy().astype(np.float32)
+            
+            # Step 1: Noise reduction using bilateral filter
+            if self.bilateral_filter and self.noise_reduction > 0:
+                enhanced_roi = self._apply_bilateral_filter(enhanced_roi, self.noise_reduction)
+            
+            # Step 2: Adaptive histogram equalization for better contrast
+            if self.histogram_equalization:
+                enhanced_roi = self._apply_adaptive_histogram_equalization(enhanced_roi)
+            
+            # Step 3: Channel-specific boosting
+            enhanced_roi = self._apply_channel_boost(enhanced_roi)
+            
+            # Step 4: Dynamic range compression for better SNR
+            if self.dynamic_range_compression:
+                enhanced_roi = self._apply_dynamic_range_compression(enhanced_roi)
+            
+            # Step 5: Signal amplification with noise suppression
+            if self.signal_amplification > 1.0:
+                enhanced_roi = self._apply_signal_amplification(enhanced_roi, background_brightness)
+            
+            return np.clip(enhanced_roi, 0, 255).astype(np.uint8)
+            
+        except Exception as e:
+            logger.warning(f"Low-light enhancement failed: {e}")
+            return roi_bgr
+    
+    def _apply_bilateral_filter(self, roi: np.ndarray, strength: float) -> np.ndarray:
+        """Apply bilateral filter for edge-preserving noise reduction."""
+        d = int(9 * strength)  # Neighborhood diameter
+        sigma_color = 75 * strength  # Color sigma
+        sigma_space = 75 * strength  # Space sigma
+        
+        # Apply bilateral filter to each channel
+        for i in range(3):
+            roi[:, :, i] = cv2.bilateralFilter(roi[:, :, i].astype(np.uint8), d, sigma_color, sigma_space)
+        
+        return roi
+    
+    def _apply_adaptive_histogram_equalization(self, roi: np.ndarray) -> np.ndarray:
+        """Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)."""
+        # Convert to LAB for better perceptual results
+        lab = cv2.cvtColor(roi.astype(np.uint8), cv2.COLOR_BGR2LAB)
+        
+        # Apply CLAHE to L channel
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        
+        # Convert back to BGR
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        return enhanced.astype(np.float32)
+    
+    def _apply_channel_boost(self, roi: np.ndarray) -> np.ndarray:
+        """Apply channel-specific boost to L* and blue channels."""
+        # Convert to LAB for L* boost
+        lab = cv2.cvtColor(roi.astype(np.uint8), cv2.COLOR_BGR2LAB)
+        
+        # Boost L* channel with gamma correction for better low-light performance
+        if self.l_star_boost != 1.0:
+            l_channel = lab[:, :, 0].astype(np.float32) / 255.0
+            # Apply gamma correction: output = input^(1/gamma)
+            gamma = 1.0 / self.l_star_boost
+            l_channel = np.power(l_channel, gamma)
+            lab[:, :, 0] = np.clip(l_channel * 255.0, 0, 255).astype(np.uint8)
+        
+        # Convert back to BGR
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR).astype(np.float32)
+        
+        # Boost blue channel directly
+        if self.blue_boost != 1.0:
+            blue_channel = enhanced[:, :, 0]  # Blue is index 0 in BGR
+            # Apply power law transformation
+            blue_normalized = blue_channel / 255.0
+            blue_enhanced = np.power(blue_normalized, 1.0 / self.blue_boost)
+            enhanced[:, :, 0] = np.clip(blue_enhanced * 255.0, 0, 255)
+        
+        return enhanced
+    
+    def _apply_dynamic_range_compression(self, roi: np.ndarray) -> np.ndarray:
+        """Apply logarithmic compression to expand low-light dynamic range."""
+        # Convert to LAB for perceptual processing
+        lab = cv2.cvtColor(roi.astype(np.uint8), cv2.COLOR_BGR2LAB)
+        
+        # Apply logarithmic compression to L* channel
+        l_channel = lab[:, :, 0].astype(np.float32)
+        l_normalized = l_channel / 255.0
+        
+        # Logarithmic compression: log(1 + c * x) / log(1 + c)
+        c = 10.0  # Compression factor
+        l_compressed = np.log(1 + c * l_normalized) / np.log(1 + c)
+        
+        lab[:, :, 0] = np.clip(l_compressed * 255.0, 0, 255).astype(np.uint8)
+        
+        # Convert back to BGR
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR).astype(np.float32)
+    
+    def _apply_signal_amplification(self, roi: np.ndarray, background_brightness: Optional[float]) -> np.ndarray:
+        """Apply intelligent signal amplification with noise suppression."""
+        if background_brightness is None:
+            return roi * self.signal_amplification
+        
+        # Convert to LAB for processing
+        lab = cv2.cvtColor(roi.astype(np.uint8), cv2.COLOR_BGR2LAB)
+        l_channel = lab[:, :, 0].astype(np.float32) * 100.0 / 255.0
+        
+        # Create adaptive amplification mask
+        signal_strength = np.maximum(l_channel - background_brightness, 0)
+        max_signal = np.max(signal_strength)
+        
+        if max_signal > 0:
+            # Normalize signal strength
+            signal_norm = signal_strength / max_signal
+            
+            # Apply adaptive amplification (stronger for weaker signals)
+            amplification_factor = 1.0 + (self.signal_amplification - 1.0) * (1.0 - signal_norm)
+            
+            # Apply amplification to all channels
+            for i in range(3):
+                channel = roi[:, :, i]
+                roi[:, :, i] = channel * amplification_factor
+        
+        return roi
+    
+    def compute_enhanced_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
+        """Compute brightness statistics with low-light enhancement."""
+        if not self.enabled:
+            return self._compute_standard_brightness_stats(roi_bgr, background_brightness)
+        
+        # Apply enhancement
+        enhanced_roi = self.enhance_roi(roi_bgr, background_brightness)
+        
+        # Compute statistics on enhanced ROI
+        return self._compute_standard_brightness_stats(enhanced_roi, background_brightness)
+    
+    def _compute_standard_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
+        """Standard brightness calculation (matches original implementation)."""
+        if roi_bgr is None or roi_bgr.size == 0:
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        
+        try:
+            # Convert BGR to LAB
+            lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+            l_chan = lab[:, :, 0].astype(np.float32)
+            l_star = l_chan * 100.0 / 255.0
+            
+            # Extract blue channel
+            blue_chan = roi_bgr[:, :, 0].astype(np.float32)
+            
+            # Calculate raw statistics
+            l_raw_mean = float(np.mean(l_star))
+            l_raw_median = float(np.median(l_star))
+            b_raw_mean = float(np.mean(blue_chan))
+            b_raw_median = float(np.median(blue_chan))
+            
+            # Calculate background-subtracted statistics
+            if background_brightness is not None:
+                above_background_mask = l_star > background_brightness
+                
+                # Apply morphological cleanup if enabled
+                if self.morphological_cleanup and np.any(above_background_mask):
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                    mask_uint8 = above_background_mask.astype(np.uint8) * 255
+                    cleaned_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+                    above_background_mask = cleaned_mask > 0
+                
+                if np.any(above_background_mask):
+                    filtered_l_pixels = l_star[above_background_mask]
+                    filtered_b_pixels = blue_chan[above_background_mask]
+                    
+                    # Apply additional noise filtering to extracted pixels
+                    if self.gaussian_blur_sigma > 0 and len(filtered_l_pixels) > 10:
+                        # Use robust statistics for noisy signals
+                        l_bg_sub_mean = float(np.mean(filtered_l_pixels) - background_brightness)
+                        l_bg_sub_median = float(np.median(filtered_l_pixels) - background_brightness)
+                        
+                        # Apply Gaussian smoothing to reduce noise in statistics
+                        l_values = filtered_l_pixels - background_brightness
+                        if len(l_values) > 5:
+                            # Use trimmed mean for better noise resistance
+                            l_trimmed = np.sort(l_values)[int(len(l_values)*0.1):int(len(l_values)*0.9)]
+                            if len(l_trimmed) > 0:
+                                l_bg_sub_mean = float(np.mean(l_trimmed))
+                    else:
+                        l_bg_sub_mean = float(np.mean(filtered_l_pixels) - background_brightness)
+                        l_bg_sub_median = float(np.median(filtered_l_pixels) - background_brightness)
+                    
+                    b_bg_sub_mean = float(np.mean(filtered_b_pixels))
+                    b_bg_sub_median = float(np.median(filtered_b_pixels))
+                else:
+                    l_bg_sub_mean = l_bg_sub_median = b_bg_sub_mean = b_bg_sub_median = 0.0
+            else:
+                l_bg_sub_mean = l_raw_mean
+                l_bg_sub_median = l_raw_median
+                b_bg_sub_mean = b_raw_mean
+                b_bg_sub_median = b_raw_median
+            
+            return (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median,
+                   b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median)
+            
+        except Exception as e:
+            logger.error(f"Error computing brightness statistics: {e}")
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
-# New constants for improvements
-DEFAULT_SETTINGS_FILE = "brightness_analyzer_settings.json"
-MAX_RECENT_FILES = 10
-FRAME_CACHE_SIZE = 100
-JUMP_FRAMES = 10  # Number of frames to jump with Page Up/Down
+# Enhanced progress dialogs and UI components
+
+class ProgressDialog(QtWidgets.QProgressDialog):
+    """Enhanced progress dialog with better user experience."""
+    
+    def __init__(self, title: str, label_text: str, minimum: int = 0, maximum: int = 100, parent=None):
+        super().__init__(label_text, "Cancel", minimum, maximum, parent)
+        self.setWindowTitle(title)
+        self.setWindowModality(QtCore.Qt.WindowModal)
+        self.setMinimumDuration(500)  # Show after 500ms
+        self.setAutoClose(True)
+        self.setAutoReset(True)
+        
+        # Enhanced styling
+        self.setStyleSheet("""
+            QProgressDialog {
+                background-color: #3d3d3d;
+                color: #ffffff;
+                border: 1px solid #555555;
+            }
+            QProgressBar {
+                border: 1px solid #555555;
+                border-radius: 3px;
+                background-color: #2d2d2d;
+                text-align: center;
+                color: #ffffff;
+            }
+            QProgressBar::chunk {
+                background-color: #5a9bd5;
+                border-radius: 2px;
+            }
+            QPushButton {
+                background-color: #555555;
+                border: 1px solid #777777;
+                border-radius: 3px;
+                padding: 5px 15px;
+                color: #ffffff;
+            }
+            QPushButton:hover {
+                background-color: #666666;
+            }
+            QPushButton:pressed {
+                background-color: #444444;
+            }
+        """)
+        
+        self._start_time = time.time()
+        self._last_update = 0
+        
+    def update_progress(self, current: int, status_text: str = None, eta_text: str = None):
+        """Update progress with optional status and ETA."""
+        self.setValue(current)
+        label_parts = []
+        if status_text is not None:
+            label_parts.append(str(status_text))
+        if eta_text is not None:
+            label_parts.append(str(eta_text))
+        label = " | ".join(label_parts) if label_parts else ""
+        if label is None:
+            self.setLabelText("")
+        else:
+            self.setLabelText(label)
+        # Force GUI update every 100ms to prevent freezing
+        current_time = time.time()
+        if current_time - self._last_update > 0.1:
+            QtWidgets.QApplication.processEvents()
+            self._last_update = current_time
+    
+    def calculate_eta(self, current: int, total: int) -> str:
+        """Calculate and format estimated time remaining."""
+        if current <= 0 or total <= 0:
+            return "ETA: Calculating..."
+            
+        elapsed = time.time() - self._start_time
+        if elapsed < 1.0:  # Don't calculate ETA for first second
+            return "ETA: Calculating..."
+            
+        progress_ratio = current / total
+        if progress_ratio <= 0:
+            return "ETA: Calculating..."
+            
+        estimated_total_time = elapsed / progress_ratio
+        remaining_time = estimated_total_time - elapsed
+        
+        if remaining_time < 60:
+            return f"ETA: {remaining_time:.0f}s"
+        elif remaining_time < 3600:
+            minutes = remaining_time // 60
+            seconds = remaining_time % 60
+            return f"ETA: {minutes:.0f}m {seconds:.0f}s"
+        else:
+            hours = remaining_time // 3600
+            minutes = (remaining_time % 3600) // 60
+            return f"ETA: {hours:.0f}h {minutes:.0f}m"
+
+class StatusBar(QtWidgets.QStatusBar):
+    """Enhanced status bar with multiple information zones."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # Main status label
+        self.status_label = QtWidgets.QLabel("Ready")
+        self.addWidget(self.status_label)
+        
+        # Video info label
+        self.video_info_label = QtWidgets.QLabel("No video loaded")
+        self.addPermanentWidget(self.video_info_label)
+        
+        # Memory usage label
+        self.memory_label = QtWidgets.QLabel("Memory: 0 MB")
+        self.addPermanentWidget(self.memory_label)
+        
+        # Set up timer for periodic updates
+        self.update_timer = QtCore.QTimer()
+        self.update_timer.timeout.connect(self.update_memory_usage)
+        self.update_timer.start(5000)  # Update every 5 seconds
+        
+    def set_status(self, message: str, timeout: int = 0):
+        """Set main status message."""
+        self.status_label.setText(message)
+        if timeout > 0:
+            QtCore.QTimer.singleShot(timeout, lambda: self.status_label.setText("Ready"))
+            
+    def set_video_info(self, info: str):
+        """Set video information display."""
+        self.video_info_label.setText(info)
+        
+    def update_memory_usage(self):
+        """Update memory usage display."""
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            self.memory_label.setText(f"Memory: {memory_mb:.0f} MB")
+        except ImportError:
+            self.memory_label.setText("Memory: N/A")
+        except Exception as e:
+            logger.debug(f"Could not update memory usage: {e}")
 
 class FrameCache:
     """Efficient frame caching system for better performance."""
@@ -109,12 +500,12 @@ class AudioManager:
         self.volume = max(0.0, min(1.0, volume))
         self._initialized = False
         
-        if self.enabled:
+        if self.enabled and pygame is not None:
             try:
                 pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
                 self._initialized = True
             except (ImportError, OSError, RuntimeError) as e:
-                logging.warning(f"Failed to initialize audio: {e}")
+                logger.warning(f"Failed to initialize audio: {e}")
                 self.enabled = False
     
     def play_analysis_start(self):
@@ -125,7 +516,7 @@ class AudioManager:
             # Generate a simple ascending tone sequence
             self._play_tone_sequence([440, 554, 659], duration=0.15)
         except (RuntimeError, OSError) as e:
-            logging.warning(f"Failed to play analysis start sound: {e}")
+            logger.warning(f"Failed to play analysis start sound: {e}")
     
     def play_analysis_complete(self):
         """Play sound when analysis completes."""
@@ -135,7 +526,7 @@ class AudioManager:
             # Generate a completion chord
             self._play_tone_sequence([523, 659, 783], duration=0.3)
         except (RuntimeError, OSError) as e:
-            logging.warning(f"Failed to play analysis complete sound: {e}")
+            logger.warning(f"Failed to play analysis complete sound: {e}")
     
     def play_run_detected(self):
         """Play sound when a run is detected within expected duration."""
@@ -145,7 +536,7 @@ class AudioManager:
             # Generate a quick notification beep
             self._play_tone_sequence([880, 1109], duration=0.1)
         except (RuntimeError, OSError) as e:
-            logging.warning(f"Failed to play run detected sound: {e}")
+            logger.warning(f"Failed to play run detected sound: {e}")
     
     def set_enabled(self, enabled: bool):
         """Enable or disable audio."""
@@ -157,50 +548,44 @@ class AudioManager:
     
     def _can_play(self) -> bool:
         """Check if audio can be played."""
-        return self.enabled and self._initialized and PYGAME_AVAILABLE
+        return self.enabled and self._initialized and PYGAME_AVAILABLE and pygame is not None
     
     def _play_tone_sequence(self, frequencies: List[float], duration: float = 0.2):
         """Play a sequence of tones."""
         if not self._can_play():
             return
-        
+        if pygame is None:
+            return
         try:
             sample_rate = 22050
             samples_per_tone = int(sample_rate * duration)
-            
             for freq in frequencies:
                 # Generate sine wave
                 t = np.linspace(0, duration, samples_per_tone, False)
                 wave = np.sin(2 * np.pi * freq * t)
-                
                 # Apply envelope to avoid clicks
                 envelope = np.exp(-t * 3)  # Exponential decay
                 wave = wave * envelope * self.volume
-                
                 # Convert to 16-bit integers
                 wave = (wave * 32767).astype(np.int16)
-                
                 # Create stereo sound
                 stereo_wave = np.zeros((samples_per_tone, 2), dtype=np.int16)
                 stereo_wave[:, 0] = wave  # Left channel
                 stereo_wave[:, 1] = wave  # Right channel
-                
                 # Play the sound
                 sound = pygame.sndarray.make_sound(stereo_wave)
                 sound.play()
-                
                 # Wait for tone to finish
                 pygame.time.wait(int(duration * 1000))
-        
         except (RuntimeError, OSError, AttributeError) as e:
-            logging.warning(f"Failed to generate tone sequence: {e}")
+            logger.warning(f"Failed to generate tone sequence: {e}")
 
 class AudioAnalyzer:
     """Analyze video audio to detect completion beeps and calculate frame ranges."""
     
     def __init__(self):
         """Initialize audio analyzer."""
-        self.available = LIBROSA_AVAILABLE
+        self.available = LIBROSA_AVAILABLE and librosa is not None
         self.sample_rate = 44100
         self.hop_length = 512
         self.n_fft = 2048  # Larger FFT window for better frequency resolution
@@ -215,17 +600,17 @@ class AudioAnalyzer:
         Returns:
             Tuple of (audio_data, sample_rate) or (None, None) if failed
         """
-        if not self.available:
-            logging.warning("librosa not available - cannot extract audio")
+        if not self.available or librosa is None:
+            logger.warning("librosa not available - cannot extract audio")
             return None, None
         
         try:
             # Use librosa to load audio from video
             audio_data, sr = librosa.load(video_path, sr=self.sample_rate, mono=True)
-            logging.info(f"Extracted audio: {len(audio_data)/sr:.2f} seconds at {sr} Hz")
+            logger.info(f"Extracted audio: {len(audio_data)/sr:.2f} seconds at {sr} Hz")
             return audio_data, sr
         except Exception as e:
-            logging.error(f"Failed to extract audio from video: {e}")
+            logger.error(f"Failed to extract audio from video: {e}")
             return None, None
     
     def detect_beeps(self, audio_data: np.ndarray, sample_rate: float, 
@@ -245,7 +630,7 @@ class AudioAnalyzer:
         Returns:
             List of timestamps (in seconds) where beeps were detected
         """
-        if not self.available or audio_data is None:
+        if not self.available or audio_data is None or librosa is None:
             return []
         
         try:
@@ -263,8 +648,8 @@ class AudioAnalyzer:
             freq_mask = (freqs >= min_frequency) & (freqs <= max_frequency)
             target_magnitude = magnitude[freq_mask, :]
             
-            logging.info(f"Targeting {target_frequency}Hz ±{frequency_tolerance}Hz ({min_frequency:.1f}-{max_frequency:.1f}Hz)")
-            logging.info(f"Frequency resolution: {freq_resolution:.1f}Hz, {np.sum(freq_mask)} bins selected")
+            logger.info(f"Targeting {target_frequency}Hz ±{frequency_tolerance}Hz ({min_frequency:.1f}-{max_frequency:.1f}Hz)")
+            logger.info(f"Frequency resolution: {freq_resolution:.1f}Hz, {np.sum(freq_mask)} bins selected")
             
             # Use maximum energy instead of sum to focus on the strongest signal in our frequency range
             # This helps when the beep is very pure tone at 7000Hz
@@ -277,7 +662,7 @@ class AudioAnalyzer:
             mean_energy = np.mean(energy_per_frame)
             max_energy = np.max(energy_per_frame)
             
-            logging.info(f"Energy stats: mean={mean_energy:.2f}, max={max_energy:.2f}, threshold={threshold:.2f}")
+            logger.info(f"Energy stats: mean={mean_energy:.2f}, max={max_energy:.2f}, threshold={threshold:.2f}")
             
             # Find frames above threshold
             above_threshold = energy_per_frame > threshold
@@ -310,11 +695,11 @@ class AudioAnalyzer:
                 if beep_duration >= min_duration:
                     beep_times.append(beep_start + beep_duration / 2)
             
-            logging.info(f"Detected {len(beep_times)} beeps at: {beep_times}")
+            logger.info(f"Detected {len(beep_times)} beeps at: {beep_times}")
             return beep_times
             
         except Exception as e:
-            logging.error(f"Failed to detect beeps: {e}")
+            logger.error(f"Failed to detect beeps: {e}")
             return []
     
     def find_completion_beeps(self, video_path: str, expected_run_duration: float = 0.0) -> List[Tuple[float, int]]:
@@ -324,7 +709,7 @@ class AudioAnalyzer:
         Args:
             video_path: Path to video file
             expected_run_duration: Expected run duration in seconds (0 = no filtering)
-            
+        
         Returns:
             List of (beep_time_seconds, frame_number) tuples
         """
@@ -333,11 +718,11 @@ class AudioAnalyzer:
         
         # Extract audio from video
         audio_data, sample_rate = self.extract_audio_from_video(video_path)
-        if audio_data is None:
+        if audio_data is None or sample_rate is None:
             return []
         
         # Detect beeps
-        beep_times = self.detect_beeps(audio_data, sample_rate)
+        beep_times = self.detect_beeps(audio_data, float(sample_rate))
         if not beep_times:
             return []
         
@@ -349,7 +734,7 @@ class AudioAnalyzer:
             cap.release()
             
             if fps <= 0:
-                logging.error("Invalid FPS from video")
+                logger.error("Invalid FPS from video")
                 return []
             
             # Convert beep times to frame numbers
@@ -368,13 +753,13 @@ class AudioAnalyzer:
                         filtered_results.append((beep_time, frame_number))
                 
                 if filtered_results:
-                    logging.info(f"Filtered {len(results)} beeps to {len(filtered_results)} based on run duration")
+                    logger.info(f"Filtered {len(results)} beeps to {len(filtered_results)} based on run duration")
                     results = filtered_results
             
             return results
             
         except Exception as e:
-            logging.error(f"Failed to process video for beep detection: {e}")
+            logger.error(f"Failed to process video for beep detection: {e}")
             return []
 
 class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better menu support
@@ -387,6 +772,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._load_settings()
         self._init_ui()
         self._create_menus()
+
+    def __del__(self):
+        """Destructor to ensure video capture resources are released."""
+        try:
+            if hasattr(self, 'cap') and self.cap:
+                self.cap.release()
+        except (AttributeError, RuntimeError) as e:
+            logger.debug(f"Error during VideoAnalyzer destruction: {e}")
 
     def _init_vars(self):
         """Initialize instance variables."""
@@ -403,6 +796,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Audio system
         self.audio_manager = AudioManager()
         self.audio_analyzer = AudioAnalyzer()
+        
+        # Low-light enhancement system
+        self.low_light_enhancer = LowLightEnhancer()
         
         # Recent files
         self.recent_files = []
@@ -441,35 +837,144 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.playback_timer = QtCore.QTimer()
         self.playback_fps = 30.0  # Default playback FPS
         self.playback_speed = 1.0  # Playback speed multiplier
+        
+        # Locked ROI for best-fit analysis
+        self.locked_roi = None
 
     def _load_settings(self):
-        """Load application settings from file."""
+        """Load application settings from file with robust error handling."""
+        # Initialize default settings
+        default_settings = {
+            'recent_files': [],
+            'audio_enabled': True,
+            'audio_volume': 0.7,
+            'window_geometry': None,
+            'window_state': None,
+            'last_directory': os.path.expanduser('~'),
+            'auto_save_results': True,
+            'default_analysis_name': 'analysis',
+            'frame_cache_size': FRAME_CACHE_SIZE,
+            'log_level': 'INFO'
+        }
+        
+        self.settings = default_settings.copy()
+        self.recent_files = []
+        
+        # Try to load existing settings
         try:
             if os.path.exists(DEFAULT_SETTINGS_FILE):
-                with open(DEFAULT_SETTINGS_FILE, 'r') as f:
-                    self.settings = json.load(f)
-                    self.recent_files = self.settings.get('recent_files', [])
+                logger.debug(f"Loading settings from {DEFAULT_SETTINGS_FILE}")
+                with open(DEFAULT_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                    loaded_settings = json.load(f)
                     
-                    # Load audio settings
-                    audio_enabled = self.settings.get('audio_enabled', True)
-                    audio_volume = self.settings.get('audio_volume', 0.7)
-                    self.audio_manager.set_enabled(audio_enabled)
-                    self.audio_manager.set_volume(audio_volume)
+                # Validate and merge settings
+                if isinstance(loaded_settings, dict):
+                    # Validate recent files
+                    recent_files = loaded_settings.get('recent_files', [])
+                    if isinstance(recent_files, list):
+                        # Filter out invalid file paths
+                        valid_recent_files = []
+                        for file_path in recent_files:
+                            if isinstance(file_path, str) and os.path.exists(file_path):
+                                valid_recent_files.append(file_path)
+                        self.recent_files = valid_recent_files[:MAX_RECENT_FILES]
+                        loaded_settings['recent_files'] = self.recent_files
+                    
+                    # Validate numeric settings
+                    audio_volume = safe_float_conversion(
+                        loaded_settings.get('audio_volume', 0.7), 
+                        default=0.7, min_val=0.0, max_val=1.0
+                    )
+                    loaded_settings['audio_volume'] = audio_volume
+                    
+                    cache_size = safe_int_conversion(
+                        loaded_settings.get('frame_cache_size', FRAME_CACHE_SIZE),
+                        default=FRAME_CACHE_SIZE, min_val=10, max_val=1000
+                    )
+                    loaded_settings['frame_cache_size'] = cache_size
+                    
+                    # Merge with defaults
+                    self.settings.update(loaded_settings)
+                    
+                    logger.info(f"Loaded settings with {len(self.recent_files)} recent files")
+                else:
+                    logger.warning("Settings file contains invalid data, using defaults")
+                    
+        except FileNotFoundError:
+            logger.info("No existing settings file found, using defaults")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Settings file contains invalid JSON: {e}, using defaults")
+            # Try to create backup before overwriting
+            try:
+                import shutil
+                shutil.copy2(DEFAULT_SETTINGS_FILE, BACKUP_SETTINGS_FILE)
+                logger.info(f"Backed up corrupted settings to {BACKUP_SETTINGS_FILE}")
+            except Exception as backup_error:
+                logger.warning(f"Could not backup corrupted settings: {backup_error}")
         except Exception as e:
-            logging.warning(f"Could not load settings: {e}")
-            self.settings = {}
-            self.recent_files = []
+            logger.error(f"Unexpected error loading settings: {e}", exc_info=True)
+        
+        # Apply audio settings
+        try:
+            audio_enabled = self.settings.get('audio_enabled', True)
+            audio_volume = self.settings.get('audio_volume', 0.7)
+            self.audio_manager.set_enabled(audio_enabled)
+            self.audio_manager.set_volume(audio_volume)
+        except Exception as e:
+            logger.warning(f"Could not apply audio settings: {e}")
+        
+        # Update frame cache size if changed
+        try:
+            cache_size = self.settings.get('frame_cache_size', FRAME_CACHE_SIZE)
+            self.frame_cache = FrameCache(cache_size)
+        except Exception as e:
+            logger.warning(f"Could not update frame cache size: {e}")
 
     def _save_settings(self):
-        """Save application settings to file."""
+        """Save application settings to file with error handling."""
         try:
+            # Update current settings
             self.settings['recent_files'] = self.recent_files
             self.settings['audio_enabled'] = self.audio_manager.enabled
             self.settings['audio_volume'] = self.audio_manager.volume
-            with open(DEFAULT_SETTINGS_FILE, 'w') as f:
-                json.dump(self.settings, f, indent=2)
+            
+            # Save window geometry and state
+            try:
+                geometry = self.saveGeometry()
+                state = self.saveState()
+                self.settings['window_geometry'] = geometry.toBase64().data().decode('utf-8')
+                self.settings['window_state'] = state.toBase64().data().decode('utf-8')
+            except Exception as e:
+                logger.debug(f"Could not save window state: {e}")
+            
+            # Atomic write to prevent corruption
+            temp_file = DEFAULT_SETTINGS_FILE + '.tmp'
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(self.settings, f, indent=2, ensure_ascii=False)
+            
+            # Replace original file
+            if os.path.exists(DEFAULT_SETTINGS_FILE):
+                import shutil
+                shutil.copy2(DEFAULT_SETTINGS_FILE, BACKUP_SETTINGS_FILE)
+            
+            os.replace(temp_file, DEFAULT_SETTINGS_FILE)
+            logger.debug(f"Settings saved to {DEFAULT_SETTINGS_FILE}")
+            
+        except PermissionError:
+            logger.error(f"Permission denied writing to {DEFAULT_SETTINGS_FILE}")
+            QtWidgets.QMessageBox.warning(
+                self, "Settings Error", 
+                f"Could not save settings to {DEFAULT_SETTINGS_FILE}\n\nPermission denied."
+            )
         except Exception as e:
-            logging.warning(f"Could not save settings: {e}")
+            logger.error(f"Could not save settings: {e}", exc_info=True)
+            # Clean up temp file if it exists
+            temp_file = DEFAULT_SETTINGS_FILE + '.tmp'
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
 
     def _add_recent_file(self, file_path: str):
         """Add file to recent files list."""
@@ -728,9 +1233,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         layout.addWidget(volume_group)
         
         # Test button
-        test_layout = QtWidgets.QHBoxLayout()
         test_btn = QtWidgets.QPushButton("Test Audio")
         test_btn.clicked.connect(lambda: self.audio_manager.play_analysis_start())
+        test_layout = QtWidgets.QHBoxLayout()
         test_layout.addWidget(test_btn)
         test_layout.addStretch()
         layout.addLayout(test_layout)
@@ -954,7 +1459,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 background-color: {COLOR_SUCCESS};
                 border-radius: 3px;
             }}
-        """)
+        """
+        )
 
     def _create_layouts(self):
         """Create the main horizontal and vertical layouts."""
@@ -1189,6 +1695,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.add_rect_btn.setToolTip("Click then draw a rectangle on the video frame")
         rect_btn_layout.addWidget(self.add_rect_btn)
 
+        self.find_lock_btn = QtWidgets.QPushButton("Find & Lock Best ROI")
+        self.find_lock_btn.setToolTip("Find the brightest frame for the selected ROI and lock it for analysis")
+        rect_btn_layout.addWidget(self.find_lock_btn)
+
         self.del_rect_btn = QtWidgets.QPushButton("Delete ROI")
         self.del_rect_btn.setToolTip("Delete the selected ROI from the list (Delete key)")
         rect_btn_layout.addWidget(self.del_rect_btn)
@@ -1239,11 +1749,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.add_rect_btn.clicked.connect(self.toggle_add_rectangle_mode)
         self.del_rect_btn.clicked.connect(self.delete_selected_rectangle)
         self.clear_rect_btn.clicked.connect(self.clear_all_rectangles)
+        self.find_lock_btn.clicked.connect(self.find_and_lock_best_roi)
 
-        # Connect mouse events directly
-        self.image_label.mousePressEvent = self.image_mouse_press
-        self.image_label.mouseMoveEvent = self.image_mouse_move
-        self.image_label.mouseReleaseEvent = self.image_mouse_release
+        # Connect mouse events directly with correct parameter names
+        def mousePressEvent(ev):
+            return self.image_mouse_press(ev)
+        def mouseMoveEvent(ev):
+            return self.image_mouse_move(ev)
+        def mouseReleaseEvent(ev):
+            return self.image_mouse_release(ev)
+        self.image_label.mousePressEvent = mousePressEvent
+        self.image_label.mouseMoveEvent = mouseMoveEvent
+        self.image_label.mouseReleaseEvent = mouseReleaseEvent
 
         self.threshold_spin.valueChanged.connect(self._on_threshold_changed)
         self.set_bg_btn.clicked.connect(self._set_background_roi)
@@ -1355,7 +1872,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """
         Update cached label size *without* immediately redrawing the frame.
         Calling show_frame() synchronously inside resizeEvent can create
-        a feedback loop: the freshly scaled pixmap changes the label’s
+        a feedback loop: the freshly scaled pixmap changes the label's
         sizeHint, Qt recalculates the layout, and another resizeEvent fires.
         By deferring the redraw with QTimer.singleShot(0, …) we let the
         resize settle first and repaint exactly once.
@@ -1373,26 +1890,91 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     # --- Video Loading and Frame Display ---
 
     def load_video(self):
-        """Loads the video specified by self.video_path."""
+        """Loads the video specified by self.video_path with comprehensive validation."""
+        # Clean up existing video capture
         if self.cap:
             self.cap.release()
             self.cap = None
-
-        if not self.video_path or not os.path.exists(self.video_path):
-            QtWidgets.QMessageBox.critical(self, 'Error', 'Video path is invalid or file does not exist.')
+            
+        # Clear frame cache
+        self.frame_cache.clear()
+        
+        # Validate video file path
+        try:
+            if not self.video_path:
+                raise ValidationError("No video file selected")
+                
+            validate_video_file(self.video_path)
+            logger.info(f"Loading video: {os.path.basename(self.video_path)}")
+            
+        except ValidationError as e:
+            error_msg = f"Video validation failed: {e}"
+            logger.error(error_msg)
+            QtWidgets.QMessageBox.critical(self, 'Video Validation Error', str(e))
+            self._reset_state()
+            return
+        except Exception as e:
+            error_msg = f"Unexpected error during video validation: {e}"
+            logger.error(error_msg, exc_info=True)
+            QtWidgets.QMessageBox.critical(self, 'Error', error_msg)
             self._reset_state()
             return
 
-        self.cap = cv2.VideoCapture(self.video_path)
-        if not self.cap.isOpened():
-            QtWidgets.QMessageBox.critical(self, 'Error', f'Could not open video file: {os.path.basename(self.video_path)}')
+        # Attempt to open video file
+        try:
+            self.cap = cv2.VideoCapture(self.video_path)
+            if not self.cap.isOpened():
+                raise VideoLoadError(f"OpenCV could not open video file: {os.path.basename(self.video_path)}")
+            
+            # Get video properties
+            self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.playback_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # Validate video properties
+            if self.total_frames <= 0:
+                raise VideoLoadError("Video has no frames or invalid frame count")
+                
+            if self.playback_fps <= 0:
+                logger.warning("Invalid FPS detected, using fallback")
+                self.playback_fps = 30.0  # Default fallback
+                
+            if frame_width < MIN_FRAME_SIZE[0] or frame_height < MIN_FRAME_SIZE[1]:
+                raise VideoLoadError(f"Video resolution ({frame_width}x{frame_height}) is below minimum {MIN_FRAME_SIZE}")
+                
+            if frame_width > MAX_FRAME_SIZE[0] or frame_height > MAX_FRAME_SIZE[1]:
+                raise VideoLoadError(f"Video resolution ({frame_width}x{frame_height}) exceeds maximum {MAX_FRAME_SIZE}")
+            
+            # Calculate duration and validate
+            duration = self.total_frames / self.playback_fps
+            if duration < MIN_VIDEO_DURATION:
+                raise VideoLoadError(f"Video duration ({duration:.2f}s) is below minimum {MIN_VIDEO_DURATION}s")
+                
+            if duration > MAX_VIDEO_DURATION:
+                logger.warning(f"Video duration ({duration:.2f}s) is very long, performance may be affected")
+            
+            # Test read first frame to ensure video is readable
+            ret, test_frame = self.cap.read()
+            if not ret or test_frame is None:
+                raise VideoLoadError("Could not read first frame from video")
+                
+            # Reset to beginning
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            
+            logger.info(f"Video loaded successfully: {frame_width}x{frame_height}, {self.total_frames} frames, {self.playback_fps:.2f} FPS, {duration:.2f}s")
+            
+        except VideoLoadError as e:
+            logger.error(f"Video load error: {e}")
+            QtWidgets.QMessageBox.critical(self, 'Video Load Error', str(e))
             self._reset_state()
             return
-
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.playback_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if self.playback_fps <= 0:
-            self.playback_fps = 30.0  # Default fallback
+        except Exception as e:
+            error_msg = f"Unexpected error loading video: {e}"
+            logger.error(error_msg, exc_info=True)
+            QtWidgets.QMessageBox.critical(self, 'Error', error_msg)
+            self._reset_state()
+            return
             
         if self.total_frames <= 0:
              QtWidgets.QMessageBox.warning(self, 'Warning', 'Video file appears to have no frames.')
@@ -1412,7 +1994,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.frame = frame
             self.frame_cache.put(0, frame)  # Cache first frame
 
-            # Ensure the pixmap scales to the label’s current size the first time we draw it
+            # Ensure the pixmap scales to the label's current size the first time we draw it
             self._current_image_size = self.image_label.size()
             
             # Update UI elements for the loaded video
@@ -1444,8 +2026,19 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _reset_state(self):
         """Resets the application state when a video fails to load or is closed."""
+        logger.debug("Resetting application state")
+        
+        # Stop any ongoing operations
+        if hasattr(self, 'is_playing') and self.is_playing:
+            self.stop_playback()
+            
+        # Release video capture resources
         if self.cap:
             self.cap.release()
+            self.cap = None
+            logger.debug("Video capture resources released")
+        
+        # Reset video-related variables
         self.video_path = None
         self.frame = None
         self.current_frame_index = 0
@@ -1453,15 +2046,32 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.cap = None
         self.rects = []
         self.selected_rect_idx = None
+        self.background_roi_idx = None
+        self.locked_roi = None # Clear locked ROI
         self.start_frame = 0
         self.end_frame = None
         self.out_paths = []
+        self.playback_fps = 30.0
+        
+        # Clear frame cache and force memory cleanup
         self.frame_cache.clear()
         
-        # Stop playback and reset controls
-        self.stop_playback()
+        # Reset playback controls
         self.speed_combo.setCurrentText("1x")
         self.playback_speed = 1.0
+        
+        # Reset UI elements
+        self.image_label.clear()
+        self.image_label.setText("Drag & Drop Video File Here")
+        self.image_label.setPixmap(QtGui.QPixmap())
+        self.update_frame_label(reset=True)
+        self.results_label.setText("")
+        
+        # Force garbage collection to free memory
+        import gc
+        gc.collect()
+        
+        logger.debug("Application state reset complete")
         
         self.image_label.setText("Drag & Drop Video File Here")
         self.image_label.setPixmap(QtGui.QPixmap())
@@ -1556,14 +2166,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 self.stop_playback()
                 self.start_playback()
         except ValueError:
-            logging.warning(f"Invalid speed value: {speed_text}")
+            logger.warning(f"Invalid speed value: {speed_text}")
 
     def _seek_to_frame(self, frame_index: int):
         """Reads and displays the specified frame index with caching."""
         if not self.cap or not self.cap.isOpened():
             return
         if frame_index < 0 or frame_index >= self.total_frames:
-            logging.warning(f"Attempted to seek to invalid frame index {frame_index}")
+            logger.warning(f"Attempted to seek to invalid frame index {frame_index}")
             return
 
         # Check cache first
@@ -1593,7 +2203,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             self._update_threshold_display()
         else:
-            logging.warning(f"Failed to read frame at index {frame_index}")
+            logger.warning(f"Failed to read frame at index {frame_index}")
 
     def update_frame_label(self, reset=False):
         """Updates the frame counter label (e.g., "Frame: 10 / 100")."""
@@ -1610,6 +2220,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         frame_copy = self.frame.copy()
         
+        # Apply low-light enhancement preview if enabled
+        if (hasattr(self, 'show_enhanced_preview_cb') and 
+            self.show_enhanced_preview_cb.isChecked() and 
+            hasattr(self, 'low_light_enhancer') and 
+            self.low_light_enhancer.enabled):
+            try:
+                frame_copy = self.low_light_enhancer.enhance_roi(frame_copy)
+            except Exception as e:
+                logger.warning(f"Failed to apply enhancement preview: {e}")
+        
         # Apply pixel mask visualization if enabled
         if self.show_pixel_mask and len(self.rects) > 0:
             frame_copy = self._apply_pixel_mask_overlay(frame_copy)
@@ -1624,8 +2244,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         pixmap = QtGui.QPixmap.fromImage(qt_image)
 
         # Scale pixmap to fit label while maintaining aspect ratio
-        target_size = self._current_image_size if self._current_image_size and self._current_image_size.isValid() else self.image_label.size()
-        if target_size.isValid() and not target_size.isEmpty():
+        target_size = self._current_image_size if (self._current_image_size is not None and self._current_image_size.isValid()) else self.image_label.size()
+        if target_size is not None and target_size.isValid() and not target_size.isEmpty():
             scaled_pixmap = pixmap.scaled(target_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
             self.image_label.setPixmap(scaled_pixmap)
         else:
@@ -1649,10 +2269,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             cv2.putText(frame_to_draw_on, label, label_pos, cv2.FONT_HERSHEY_SIMPLEX, ROI_LABEL_FONT_SCALE, color, ROI_LABEL_THICKNESS, cv2.LINE_AA)
 
         # Draw rectangle currently being drawn
-        if self.drawing and self.start_point and self.end_point:
+        if self.drawing and self.start_point is not None and self.end_point is not None:
             # Map points from label coordinates to frame coordinates
-            pt1_frame, pt2_frame = self._map_label_to_frame_rect(self.start_point, self.end_point)
-            if pt1_frame and pt2_frame:
+            mapped = self._map_label_to_frame_rect(self.start_point, self.end_point)
+            if mapped is not None:
+                pt1_frame, pt2_frame = mapped
                 cv2.rectangle(frame_to_draw_on, pt1_frame, pt2_frame, (0, 255, 255), ROI_THICKNESS_DEFAULT) # Use a distinct color (cyan)
 
     def _update_current_brightness_display(self):
@@ -1733,7 +2354,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             disp_x1, disp_y1 = min(x1, x2), min(y1, y2)
             disp_x2, disp_y2 = max(x1, x2), max(y1, y2)
             prefix = "* " if idx == self.background_roi_idx else ""
-            self.rect_list.addItem(f"{prefix}ROI {idx+1}: ({disp_x1},{disp_y1})-({disp_x2},{disp_y2})")
+            locked_indicator = "(Locked) " if self.locked_roi and self.locked_roi['frame_index'] == self.current_frame_index and idx == self.selected_rect_idx else ""
+            self.rect_list.addItem(f"{prefix}{locked_indicator}ROI {idx+1}: ({disp_x1},{disp_y1})-({disp_x2},{disp_y2})")
 
         # Restore selection if possible
         if 0 <= current_row < len(self.rects):
@@ -1804,8 +2426,56 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.rects.clear()
             self.selected_rect_idx = None
             self.background_roi_idx = None
+            self.locked_roi = None  # Clear locked ROI
             self.update_rect_list()
             self.show_frame()
+
+    def find_and_lock_best_roi(self):
+        """Finds the best frame for the selected ROI and locks it for analysis."""
+        if self.selected_rect_idx is None:
+            QtWidgets.QMessageBox.information(self, "Find & Lock ROI", "Select an ROI first.")
+            return
+
+        if self.start_frame is None or self.end_frame is None:
+            QtWidgets.QMessageBox.information(self, "Find & Lock ROI", "Set the analysis range first.")
+            return
+
+        best_frame_index = -1
+        max_brightness = -1.0
+        locked_roi_rect = None
+
+        progress = QtWidgets.QProgressDialog("Finding best frame...", "Cancel", self.start_frame, self.end_frame, self)
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+
+        for i in range(self.start_frame, self.end_frame + 1):
+            progress.setValue(i)
+            if progress.wasCanceled():
+                break
+
+            frame = self._get_frame(i)
+            if frame is None:
+                continue
+
+            pt1, pt2 = self.rects[self.selected_rect_idx]
+            roi = frame[pt1[1]:pt2[1], pt1[0]:pt2[0]]
+            brightness, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
+
+            if brightness > max_brightness:
+                max_brightness = brightness
+                best_frame_index = i
+                locked_roi_rect = (pt1, pt2)
+
+        progress.setValue(self.end_frame)
+
+        if best_frame_index != -1:
+            self.locked_roi = {
+                'rect': locked_roi_rect,
+                'frame_index': best_frame_index
+            }
+            self.results_label.setText(f"ROI locked from frame {best_frame_index + 1}.")
+            self.update_rect_list()
+        else:
+            QtWidgets.QMessageBox.warning(self, "Find & Lock ROI", "Could not find a suitable frame to lock the ROI.")
 
     def _set_background_roi(self):
         """Mark current ROI as background reference for auto-detect."""
@@ -1886,8 +2556,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """
         overlay = frame.copy()
         
-        # Get background brightness for current frame
-        background_brightness = self._compute_background_brightness(frame)
+        # Get the active threshold for the current frame
+        active_threshold = self._calculate_background_threshold()
+        if active_threshold is None:
+            active_threshold = self.manual_threshold
         
         for roi_idx, (pt1, pt2) in enumerate(self.rects):
             # Skip background ROI
@@ -1909,13 +2581,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     l_chan = lab[:, :, 0].astype(np.float32)
                     l_star = l_chan * 100.0 / 255.0
                     
-                    # Create mask for analyzed pixels
-                    if background_brightness is not None:
-                        # Show only pixels above background threshold
-                        mask = l_star > background_brightness
-                    else:
-                        # Show all pixels (unthresholded analysis)
-                        mask = np.ones_like(l_star, dtype=bool)
+                    # Create mask for analyzed pixels based on the active threshold
+                    mask = l_star > active_threshold
                     
                     # Apply red overlay to analyzed pixels
                     roi_overlay = roi.copy()
@@ -1934,6 +2601,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Handle changes to the manual threshold spinbox."""
         self.manual_threshold = value
         self._update_threshold_display()
+        if self.frame is not None:
+            self.show_frame()
 
     # --- Mouse Interaction on Image Label ---
 
@@ -1946,12 +2615,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         # Check if the click is within the actual displayed pixmap area
         pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect or not pixmap_rect.contains(pos_in_label):
+        if pixmap_rect is None or not pixmap_rect.contains(pos_in_label):
              return # Click was outside the image area (in borders/empty space)
 
         # Convert click position to frame coordinates
-        frame_x, frame_y = self._map_label_to_frame_point(pos_in_label)
-        if frame_x is None: return # Mapping failed
+        mapped_point = self._map_label_to_frame_point(pos_in_label)
+        if mapped_point is None:
+            return # Mapping failed
+        frame_x, frame_y = mapped_point
 
         if self.drawing:
             # Start drawing a new rectangle
@@ -2001,903 +2672,526 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # check if it hit any *other* rectangle to select it.
         clicked_on_rect_idx = -1
         for idx, (pt1, pt2) in enumerate(self.rects):
-             rect_x1, rect_y1 = min(pt1[0], pt2[0]), min(pt1[1], pt2[1])
-             rect_x2, rect_y2 = max(pt1[0], pt2[0]), max(pt1[1], pt2[1])
-             if rect_x1 <= frame_x <= rect_x2 and rect_y1 <= frame_y <= rect_y2:
-                  clicked_on_rect_idx = idx
-                  break # Found a rect, stop checking
+            rect_x1, rect_y1 = min(pt1[0], pt2[0]), min(pt1[1], pt2[1])
+            rect_x2, rect_y2 = max(pt1[0], pt2[0]), max(pt1[1], pt2[1])
+            if rect_x1 <= frame_x <= rect_x2 and rect_y1 <= frame_y <= rect_y2:
+                clicked_on_rect_idx = idx
+                break
 
-        if clicked_on_rect_idx != -1 and clicked_on_rect_idx != self.selected_rect_idx:
-             # Clicked on a different rectangle, select it
-             self.selected_rect_idx = clicked_on_rect_idx
-             self.drawing = False # Ensure not in drawing mode
-             self.add_rect_btn.setChecked(False)
-             self.image_label.unsetCursor()
-             self.update_rect_list() # Update list selection
-             self.show_frame() # Redraw to highlight new selection
-        elif clicked_on_rect_idx == -1 and not self.drawing:
-             # Clicked outside any rectangle and not drawing, deselect
-             self.selected_rect_idx = None
-             self.update_rect_list()
-             self.show_frame()
-
-
-    def image_mouse_move(self, event: QtGui.QMouseEvent):
-        """Handles mouse movement over the video display area."""
-        if self.frame is None: return
-
-        pos_in_label = event.pos()
-        frame_h, frame_w = self.frame.shape[:2]
-
-        if self.drawing and self.start_point:
-            # Update the end point for drawing feedback
-            # Clamp position to within the label bounds
-            clamped_x = max(0, min(pos_in_label.x(), self.image_label.width() - 1))
-            clamped_y = max(0, min(pos_in_label.y(), self.image_label.height() - 1))
-            self.end_point = QtCore.QPoint(clamped_x, clamped_y)
-            self.show_frame() # Redraw to show the rectangle being drawn
-
-        elif self.moving and self.selected_rect_idx is not None and self.start_point:
-            # Move the selected rectangle
-            frame_x, frame_y = self._map_label_to_frame_point(pos_in_label)
-            if frame_x is None or frame_y is None: 
-                return # Mapping failed
-
-            pt1, pt2 = self.rects[self.selected_rect_idx]
-            orig_w = abs(pt2[0] - pt1[0])
-            orig_h = abs(pt2[1] - pt1[1])
-
-            # Calculate new top-left based on mouse position and initial offset
-            new_x1 = frame_x - self.move_offset[0]
-            new_y1 = frame_y - self.move_offset[1]
-
-            # Clamp new position to stay within frame boundaries
-            new_x1 = max(0, min(new_x1, frame_w - orig_w))
-            new_y1 = max(0, min(new_y1, frame_h - orig_h))
-            new_x2 = new_x1 + orig_w
-            new_y2 = new_y1 + orig_h
-
-            self.rects[self.selected_rect_idx] = ((new_x1, new_y1), (new_x2, new_y2))
-            self.update_rect_list() # Update coordinates in the list
+        if clicked_on_rect_idx != -1:
+            self.selected_rect_idx = clicked_on_rect_idx
+            self.update_rect_list()
+            self.show_frame()
+        else:
+            # If click was on empty space, deselect current ROI
+            self.selected_rect_idx = None
+            self.update_rect_list()
             self.show_frame()
 
-        elif self.resizing and self.selected_rect_idx is not None and self.start_point:
-            # Resize the selected rectangle
-            frame_x, frame_y = self._map_label_to_frame_point(pos_in_label)
-            if frame_x is None or frame_y is None: 
-                return # Mapping failed
+    def image_mouse_move(self, event: QtGui.QMouseEvent):
+        """Handles mouse movements on the video display area."""
+        if self.frame is None:
+            return
 
-            # Clamp mouse position to frame boundaries before calculating new rect
-            frame_x = max(0, min(frame_x, frame_w - 1))
-            frame_y = max(0, min(frame_y, frame_h - 1))
+        pos_in_label = event.pos()
+        mapped_point = self._map_label_to_frame_point(pos_in_label)
+        if mapped_point is None:
+            return
+        frame_x, frame_y = mapped_point
 
-            fixed_corner_frame = self._map_label_to_frame_point(self.start_point)
-            if fixed_corner_frame[0] is None or fixed_corner_frame[1] is None: 
-                return # Mapping failed
+        if self.drawing and self.start_point is not None:
+            self.end_point = pos_in_label
+            self.show_frame() # Redraw to show the rubber band rectangle
+        elif self.moving and self.selected_rect_idx is not None:
+            # Calculate new position based on mouse movement and initial offset
+            pt1_orig, pt2_orig = self.rects[self.selected_rect_idx]
+            rect_width = abs(pt2_orig[0] - pt1_orig[0])
+            rect_height = abs(pt2_orig[1] - pt1_orig[1])
 
-            # New rectangle is defined by the fixed corner and the current mouse pos
-            new_x1 = min(fixed_corner_frame[0], frame_x)
-            new_y1 = min(fixed_corner_frame[1], frame_y)
-            new_x2 = max(fixed_corner_frame[0], frame_x)
-            new_y2 = max(fixed_corner_frame[1], frame_y)
+            if self.move_offset is not None:
+                new_x1 = frame_x - self.move_offset[0]
+                new_y1 = frame_y - self.move_offset[1]
+                new_x2 = new_x1 + rect_width
+                new_y2 = new_y1 + rect_height
 
-            # Prevent zero-size rectangles (optional, but good practice)
-            if new_x1 < new_x2 and new_y1 < new_y2:
+                # Clamp to frame boundaries
+                new_x1 = max(0, min(new_x1, self.frame.shape[1] - rect_width))
+                new_y1 = max(0, min(new_y1, self.frame.shape[0] - rect_height))
+                new_x2 = new_x1 + rect_width
+                new_y2 = new_y1 + rect_height
+
                 self.rects[self.selected_rect_idx] = ((new_x1, new_y1), (new_x2, new_y2))
                 self.update_rect_list()
                 self.show_frame()
-        else:
-            # Update cursor if hovering over a resize handle or a selectable rectangle
-            self._update_hover_cursor(pos_in_label)
+        elif self.resizing and self.selected_rect_idx is not None and self.start_point is not None:
+            pt1_fixed_label, pt2_moving_label = self.start_point, pos_in_label
+            mapped = self._map_label_to_frame_rect(pt1_fixed_label, pt2_moving_label)
+            if mapped is not None:
+                pt1_frame, pt2_frame = mapped
+                # Ensure minimum size during resize
+                min_w, min_h = MIN_ROI_SIZE
+                current_w = abs(pt2_frame[0] - pt1_frame[0])
+                current_h = abs(pt2_frame[1] - pt1_frame[1])
 
+                if current_w < min_w:
+                    pt2_frame = (pt1_frame[0] + min_w if pt2_frame[0] > pt1_frame[0] else pt1_frame[0] - min_w, pt2_frame[1])
+                if current_h < min_h:
+                    pt2_frame = (pt2_frame[0], pt1_frame[1] + min_h if pt2_frame[1] > pt1_frame[1] else pt1_frame[1] - min_h)
 
-    def image_mouse_release(self, event: QtGui.QMouseEvent):
-        """Handles mouse button releases on the video display area."""
-        if self.frame is None or event.button() != QtCore.Qt.LeftButton:
-            return
+                self.rects[self.selected_rect_idx] = (pt1_frame, pt2_frame)
+                self.update_rect_list()
+                self.show_frame()
 
-        self.image_label.unsetCursor()  # Reset cursor after action
-
-        if self.drawing and self.start_point and self.end_point:
-            # Finalize drawing a new rectangle
-            pt1_frame, pt2_frame = self._map_label_to_frame_rect(self.start_point, self.end_point)
-
-            # Add rectangle only if it has a valid size
-            if pt1_frame and pt2_frame and abs(pt1_frame[0] - pt2_frame[0]) > 1 and abs(pt1_frame[1] - pt2_frame[1]) > 1:
-                # Ensure pt1 is top-left and pt2 is bottom-right
-                final_x1 = min(pt1_frame[0], pt2_frame[0])
-                final_y1 = min(pt1_frame[1], pt2_frame[1])
-                final_x2 = max(pt1_frame[0], pt2_frame[0])
-                final_y2 = max(pt1_frame[1], pt2_frame[1])
-                self.rects.append(((final_x1, final_y1), (final_x2, final_y2)))
-                self.selected_rect_idx = len(self.rects) - 1 # Select the new rectangle
-                self.update_rect_list() # Update list and selection
-
-            # Reset drawing state
-            self.drawing = False
-            self.start_point = None
-            self.end_point = None
-            self.add_rect_btn.setChecked(False) # Uncheck button
-            self.show_frame() # Redraw
-
-        elif self.moving:
-            # Finalize moving
-            self.moving = False
-            self.move_offset = None
-            self.start_point = None
-            # Optional: Recalculate brightness display for the final position
-            self._update_current_brightness_display()
-            self.show_frame() # Redraw in final state
-
-        elif self.resizing:
-            # Finalize resizing
-            self.resizing = False
-            self.resize_corner = None
-            self.start_point = None
-            self.end_point = None
-            # Optional: Recalculate brightness display for the final size
-            self._update_current_brightness_display()
-            self.show_frame() # Redraw in final state
-
-    def _get_pixmap_rect_in_label(self) -> Optional[QtCore.QRect]:
-        """Calculates the QRect occupied by the scaled pixmap within the image label."""
-        if not hasattr(self, 'image_label') or self.frame is None:
-            return None
-
-        label_size = self.image_label.size()
-        pixmap = self.image_label.pixmap() # Get the currently displayed pixmap
-
-        if not pixmap or pixmap.isNull() or not label_size.isValid() or label_size.isEmpty():
-            return None # No pixmap or invalid label size
-
-        pixmap_size = pixmap.size() # Size of the scaled pixmap
-
-        # Calculate top-left corner of the pixmap within the label (centered)
-        offset_x = (label_size.width() - pixmap_size.width()) / 2
-        offset_y = (label_size.height() - pixmap_size.height()) / 2
-
-        return QtCore.QRect(int(offset_x), int(offset_y), pixmap_size.width(), pixmap_size.height())
-
-    def _map_label_to_frame_point(self, label_pos: QtCore.QPoint) -> Tuple[Optional[int], Optional[int]]:
-        """Maps a point from image label coordinates to original frame coordinates."""
-        if self.frame is None: 
-            return None, None
-
-        pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect: 
-            return None, None
-
-        # Check if the point is actually within the pixmap area
-        if not pixmap_rect.contains(label_pos):
-            return None, None
-
-        # Point relative to the top-left of the pixmap
-        relative_x = label_pos.x() - pixmap_rect.left()
-        relative_y = label_pos.y() - pixmap_rect.top()
-
-        # Scale factors from pixmap size to original frame size
-        frame_h, frame_w = self.frame.shape[:2]
-        pixmap_w = pixmap_rect.width()
-        pixmap_h = pixmap_rect.height()
-
-        if pixmap_w == 0 or pixmap_h == 0: 
-            return None, None  # Avoid division by zero
-
-        scale_w = frame_w / pixmap_w
-        scale_h = frame_h / pixmap_h
-
-        # Calculate corresponding point in the original frame
-        frame_x = int(relative_x * scale_w)
-        frame_y = int(relative_y * scale_h)
-
-        # Clamp to frame boundaries (shouldn't be necessary if logic is correct, but safe)
-        frame_x = max(0, min(frame_x, frame_w - 1))
-        frame_y = max(0, min(frame_y, frame_h - 1))
-
-        return frame_x, frame_y
-
-    def _map_label_to_frame_rect(self, label_pt1: QtCore.QPoint, label_pt2: QtCore.QPoint) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
-         """Maps a rectangle defined by two points in label coordinates to frame coordinates."""
-         frame_pt1 = self._map_label_to_frame_point(label_pt1)
-         frame_pt2 = self._map_label_to_frame_point(label_pt2)
-
-         if frame_pt1[0] is None or frame_pt2[0] is None:
-              return None, None
-         
-         # Convert the tuples to the expected format
-         pt1 = (frame_pt1[0], frame_pt1[1])
-         pt2 = (frame_pt2[0], frame_pt2[1]) 
-         return pt1, pt2
-
-    def _map_frame_to_label_point(self, frame_pos: Tuple[int, int]) -> Optional[QtCore.QPoint]:
-        """Maps a point from original frame coordinates back to image label coordinates."""
-        if self.frame is None: 
-            return None
-
-        pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect: 
-            return None
-
-        frame_h, frame_w = self.frame.shape[:2]
-        pixmap_w = pixmap_rect.width()
-        pixmap_h = pixmap_rect.height()
-
-        if frame_w == 0 or frame_h == 0: 
-            return None  # Avoid division by zero
-
-        # Scale factors from frame size to pixmap size
-        scale_w = pixmap_w / frame_w
-        scale_h = pixmap_h / frame_h
-
-        # Calculate position relative to pixmap top-left
-        relative_x = frame_pos[0] * scale_w
-        relative_y = frame_pos[1] * scale_h
-
-        # Calculate position within the label widget
-        label_x = int(pixmap_rect.left() + relative_x)
-        label_y = int(pixmap_rect.top() + relative_y)
-
-        return QtCore.QPoint(label_x, label_y)
-
-    def _scale_value_for_pixmap(self, value_in_frame_coords: float) -> float:
-        """Scales a value (like a distance) from frame coordinates to pixmap coordinates."""
-        if self.frame is None: return value_in_frame_coords # No scaling if no frame
-
-        pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect or pixmap_rect.width() == 0: return value_in_frame_coords
-
-        frame_w = self.frame.shape[1]
-        scale_w = pixmap_rect.width() / frame_w
-        return value_in_frame_coords * scale_w # Assume uniform scaling for simplicity
-
-    def _get_resize_cursor(self, corner_index: int) -> QtGui.QCursor:
-        """Returns the appropriate resize cursor based on the corner index."""
-        if corner_index == 0 or corner_index == 3: # Top-left or Bottom-right
-            return QtGui.QCursor(QtCore.Qt.SizeFDiagCursor)
-        elif corner_index == 1 or corner_index == 2: # Top-right or Bottom-left
-            return QtGui.QCursor(QtCore.Qt.SizeBDiagCursor)
-        else:
-            return QtGui.QCursor(QtCore.Qt.ArrowCursor) # Default
-
-    def _update_hover_cursor(self, pos_in_label: QtCore.QPoint):
-        """Sets the cursor shape based on what the mouse is hovering over."""
-        if self.frame is None or self.drawing or self.moving or self.resizing:
-            # Don't change cursor if an action is in progress or no video
-            return
-
-        frame_x, frame_y = self._map_label_to_frame_point(pos_in_label)
-        if frame_x is None:
-            self.image_label.unsetCursor()
-            return # Outside pixmap
-
-        cursor_set = False
-
-        # Check for resize handles on the selected rectangle first
-        if self.selected_rect_idx is not None:
+        # Update cursor based on proximity to ROI handles
+        if not self.drawing and not self.moving and not self.resizing and self.selected_rect_idx is not None:
             pt1, pt2 = self.rects[self.selected_rect_idx]
-            corners = [(pt1[0], pt1[1]), (pt2[0], pt1[1]), (pt1[0], pt2[1]), (pt2[0], pt2[1])]
+            corners = [
+                (pt1[0], pt1[1]), (pt2[0], pt1[1]), # Top-left, Top-right
+                (pt1[0], pt2[1]), (pt2[0], pt2[1])  # Bottom-left, Bottom-right
+            ]
             resize_margin = self._scale_value_for_pixmap(MOUSE_RESIZE_HANDLE_SENSITIVITY)
 
+            cursor_set = False
             for i, (cx, cy) in enumerate(corners):
                 if abs(frame_x - cx) < resize_margin and abs(frame_y - cy) < resize_margin:
                     self.image_label.setCursor(self._get_resize_cursor(i))
                     cursor_set = True
                     break
+            if not cursor_set:
+                self.image_label.unsetCursor()
 
-        # If not hovering over a resize handle, check if hovering over any rectangle
-        if not cursor_set:
-            for idx, (pt1, pt2) in enumerate(self.rects):
-                rect_x1, rect_y1 = min(pt1[0], pt2[0]), min(pt1[1], pt2[1])
-                rect_x2, rect_y2 = max(pt1[0], pt2[0]), max(pt1[1], pt2[1])
-                if rect_x1 <= frame_x <= rect_x2 and rect_y1 <= frame_y <= rect_y2:
-                    if idx == self.selected_rect_idx:
-                        # Hovering over the selected rectangle (not on a handle) -> Move cursor
-                        self.image_label.setCursor(QtCore.Qt.SizeAllCursor)
-                    else:
-                        # Hovering over a non-selected rectangle -> Pointer cursor
-                        self.image_label.setCursor(QtCore.Qt.PointingHandCursor)
-                    cursor_set = True
-                    break
+    def image_mouse_release(self, event: QtGui.QMouseEvent):
+        """Handles mouse release events on the video display area."""
+        if self.frame is None or event.button() != QtCore.Qt.LeftButton:
+            return
 
-        # If not hovering over anything specific, reset to default
-        if not cursor_set:
+        if self.drawing:
+            self.drawing = False
+            self.add_rect_btn.setChecked(False) # Uncheck the button
+            self.image_label.unsetCursor() # Reset cursor
+            
+            # Map final points to frame coordinates
+            pt1_frame, pt2_frame = self._map_label_to_frame_rect(self.start_point, event.pos())
+            if pt1_frame and pt2_frame:
+                # Ensure valid rectangle (min size)
+                x1, y1 = pt1_frame
+                x2, y2 = pt2_frame
+                
+                # Ensure x1 < x2 and y1 < y2
+                x1, x2 = min(x1, x2), max(x1, x2)
+                y1, y2 = min(y1, y2), max(y1, y2)
+
+                # Apply minimum size constraint
+                if (x2 - x1) < MIN_ROI_SIZE[0]:
+                    x2 = x1 + MIN_ROI_SIZE[0]
+                if (y2 - y1) < MIN_ROI_SIZE[1]:
+                    y2 = y1 + MIN_ROI_SIZE[1]
+
+                # Clamp to frame boundaries
+                x2 = min(x2, self.frame.shape[1])
+                y2 = min(y2, self.frame.shape[0])
+                x1 = max(0, x2 - (x2 - x1)) # Adjust x1 if x2 was clamped
+                y1 = max(0, y2 - (y2 - y1)) # Adjust y1 if y2 was clamped
+
+                if (x2 - x1) >= MIN_ROI_SIZE[0] and (y2 - y1) >= MIN_ROI_SIZE[1]:
+                    self.rects.append(((x1, y1), (x2, y2)))
+                    self.selected_rect_idx = len(self.rects) - 1 # Select the newly added ROI
+                    self.update_rect_list()
+                    self.show_frame()
+                else:
+                    QtWidgets.QMessageBox.warning(self, "Invalid ROI", "The drawn ROI is too small.")
+            self.start_point = None
+            self.end_point = None
+        elif self.moving or self.resizing:
+            self.moving = False
+            self.resizing = False
+            self.start_point = None
+            self.end_point = None
+            self.move_offset = None
+            self.resize_corner = None
             self.image_label.unsetCursor()
+            self.show_frame() # Redraw to ensure final state is correct
 
+    def _get_pixmap_rect_in_label(self) -> Optional[QtCore.QRect]:
+        """Returns the QRect of the actual pixmap displayed within the QLabel, accounting for aspect ratio."""
+        if not self.image_label.pixmap():
+            return None
 
-    # --- Frame Range Selection ---
+        pixmap_size = self.image_label.pixmap().size()
+        label_size = self.image_label.size()
 
-    def set_start_frame(self):
-        """Sets the current frame as the start frame for analysis."""
-        if self.cap and self.cap.isOpened():
-            self.start_frame = self.current_frame_index
-            self.results_label.setText(f"Start frame set to {self.start_frame + 1}") # Display 1-based index
-            # Ensure end frame is not before start frame
-            if self.end_frame is not None and self.end_frame < self.start_frame:
-                self.end_frame = self.start_frame
-                self.results_label.setText(f"Start frame set to {self.start_frame + 1}. End frame adjusted.")
-        self._update_threshold_display() # Update threshold display after setting frames
+        if pixmap_size.isEmpty() or label_size.isEmpty():
+            return None
 
-    def set_end_frame(self):
-        """Sets the current frame as the end frame for analysis."""
-        if self.cap and self.cap.isOpened():
-            self.end_frame = self.current_frame_index
-            self.results_label.setText(f"End frame set to {self.end_frame + 1}") # Display 1-based index
-            # Ensure start frame is not after end frame
-            if self.start_frame > self.end_frame:
-                self.start_frame = self.end_frame
-                self.results_label.setText(f"End frame set to {self.end_frame + 1}. Start frame adjusted.")
-        self._update_threshold_display() # Update threshold display after setting frames
+        # Calculate scaled pixmap size maintaining aspect ratio
+        scaled_size = pixmap_size.scaled(label_size, QtCore.Qt.KeepAspectRatio)
 
-    def auto_detect_range(self):
-        """
-        Analyzes video audio to detect completion beeps and calculates frame ranges 
-        using the expected run duration.
-        """
-        if not self.video_path:
-            self.results_label.setText("Load a video first.")
-            return
+        # Calculate top-left corner to center the pixmap
+        x_offset = (label_size.width() - scaled_size.width()) // 2
+        y_offset = (label_size.height() - scaled_size.height()) // 2
+
+        return QtCore.QRect(x_offset, y_offset, scaled_size.width(), scaled_size.height())
+
+    def _map_label_to_frame_point(self, label_point: QtCore.QPoint) -> Optional[Tuple[int, int]]:
+        """Maps a point from QLabel coordinates to original frame coordinates."""
+        pixmap_rect = self._get_pixmap_rect_in_label()
+        if not pixmap_rect or not self.frame is None:
+            return None
+
+        # Adjust point relative to the pixmap within the label
+        x_in_pixmap = label_point.x() - pixmap_rect.x()
+        y_in_pixmap = label_point.y() - pixmap_rect.y()
+
+        # Scale to original frame dimensions
+        frame_width = self.frame.shape[1]
+        frame_height = self.frame.shape[0]
+
+        scaled_x = int(x_in_pixmap * (frame_width / pixmap_rect.width()))
+        scaled_y = int(y_in_pixmap * (frame_height / pixmap_rect.height()))
+
+        # Clamp to frame boundaries
+        scaled_x = max(0, min(scaled_x, frame_width - 1))
+        scaled_y = max(0, min(scaled_y, frame_height - 1))
+
+        return scaled_x, scaled_y
+
+    def _map_frame_to_label_point(self, frame_point: Tuple[int, int]) -> Optional[QtCore.QPoint]:
+        """Maps a point from original frame coordinates to QLabel coordinates."""
+        pixmap_rect = self._get_pixmap_rect_in_label()
+        if not pixmap_rect or self.frame is None:
+            return None
+
+        frame_width = self.frame.shape[1]
+        frame_height = self.frame.shape[0]
+
+        if frame_width == 0 or frame_height == 0:
+            return None
+
+        # Scale from original frame dimensions to pixmap dimensions
+        x_in_pixmap = int(frame_point[0] * (pixmap_rect.width() / frame_width))
+        y_in_pixmap = int(frame_point[1] * (pixmap_rect.height() / frame_height))
+
+        # Adjust point relative to the label
+        label_x = x_in_pixmap + pixmap_rect.x()
+        label_y = y_in_pixmap + pixmap_rect.y()
+
+        return QtCore.QPoint(label_x, label_y)
+
+    def _map_label_to_frame_rect(self, p1_label: QtCore.QPoint, p2_label: QtCore.QPoint) -> Optional[Tuple[Tuple[int, int], Tuple[int, int]]]:
+        """Maps two points defining a rectangle from QLabel to frame coordinates."""
+        p1_frame = self._map_label_to_frame_point(p1_label)
+        p2_frame = self._map_label_to_frame_point(p2_label)
+        if p1_frame and p2_frame:
+            return p1_frame, p2_frame
+        return None
+
+    def _scale_value_for_pixmap(self, value: int) -> int:
+        """Scales a value (e.g., sensitivity) from original frame scale to current pixmap scale."""
+        if self.frame is None or self.image_label.pixmap() is None:
+            return value
         
-        if not self.audio_analyzer.available:
-            QtWidgets.QMessageBox.warning(self, "Audio Detection", 
-                "Audio analysis not available. Please install librosa:\npip install librosa soundfile")
-            return
+        original_width = self.frame.shape[1]
+        current_width = self.image_label.pixmap().width()
         
-        # Get expected run duration
-        expected_duration = self.run_duration_spin.value()
-        if expected_duration <= 0.0:
-            QtWidgets.QMessageBox.warning(self, "Audio Detection", 
-                "Please set an expected run duration (> 0 seconds) to calculate start frames from detected completion beeps.")
-            return
-        
-        # Show progress dialog
-        progress = QtWidgets.QProgressDialog("Analyzing audio for completion beeps...", "Cancel", 0, 0, self)
-        progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle("Audio Detection")
-        progress.setRange(0, 0)  # Indeterminate progress
-        progress.show()
-        QtWidgets.QApplication.processEvents()
-        
-        try:
-            # Find completion beeps in the audio
-            completion_beeps = self.audio_analyzer.find_completion_beeps(self.video_path, expected_duration)
+        if original_width == 0:
+            return value
             
-            progress.close()
-            
-            if not completion_beeps:
-                QtWidgets.QMessageBox.information(self, "Audio Detection", 
-                    "No completion beeps detected in the audio. Try adjusting the audio detection parameters or check if the video has audio.")
-                self.results_label.setText("Audio Detection: No completion beeps found.")
-                return
-            
-            # Show detected beeps to user for selection
-            if len(completion_beeps) == 1:
-                # Only one beep found, use it automatically
-                selected_beep_time, selected_end_frame = completion_beeps[0]
-            else:
-                # Multiple beeps found, let user choose
-                beep_options = []
-                for i, (beep_time, frame_num) in enumerate(completion_beeps):
-                    beep_options.append(f"Beep {i+1}: {beep_time:.1f}s (Frame {frame_num+1})")
-                
-                selected_option, ok = QtWidgets.QInputDialog.getItem(
-                    self, "Audio Detection", 
-                    f"Found {len(completion_beeps)} completion beeps. Select which one to use:",
-                    beep_options, 0, False)
-                
-                if not ok:
-                    self.results_label.setText("Audio Detection: User cancelled selection.")
-                    return
-                
-                # Get the selected beep
-                selected_index = beep_options.index(selected_option)
-                selected_beep_time, selected_end_frame = completion_beeps[selected_index]
-            
-            # Calculate start frame using run duration and video FPS
-            cap = cv2.VideoCapture(self.video_path)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            cap.release()
-            
-            if fps <= 0:
-                QtWidgets.QMessageBox.critical(self, "Error", "Could not determine video frame rate.")
-                return
-            
-            # Calculate start frame (work backwards from completion beep)
-            start_time = selected_beep_time - expected_duration
-            calculated_start_frame = max(0, int(start_time * fps))
-            
-            # Ensure we don't go beyond video bounds
-            calculated_end_frame = min(selected_end_frame, total_frames - 1)
-            calculated_start_frame = min(calculated_start_frame, calculated_end_frame)
-            
-            # Update UI with detected range
-            self.start_frame = calculated_start_frame
-            self.end_frame = calculated_end_frame
-            
-            # Update slider and spinbox to the new start frame, then seek
-            self.frame_slider.blockSignals(True)
-            self.frame_spinbox.blockSignals(True)
-            self.frame_slider.setValue(self.start_frame)
-            self.frame_spinbox.setValue(self.start_frame)
-            self.frame_slider.blockSignals(False)
-            self.frame_spinbox.blockSignals(False)
-            
-            self._seek_to_frame(self.start_frame)
-            self.update_frame_label()
-            
-            # Calculate actual duration for verification
-            actual_duration = (self.end_frame - self.start_frame + 1) / fps
-            
-            self.results_label.setText(
-                f"✅ Audio-detected range: Frame {self.start_frame + 1} to {self.end_frame + 1} "
-                f"(Duration: {actual_duration:.1f}s, Expected: {expected_duration:.1f}s)")
-            
-            # Play success sound if duration is close to expected
-            duration_difference = abs(actual_duration - expected_duration)
-            if duration_difference <= expected_duration * 0.1:  # Within 10%
-                self.audio_manager.play_run_detected()
-                
-        except Exception as e:
-            progress.close()
-            QtWidgets.QMessageBox.critical(self, "Audio Detection Error", 
-                f"An error occurred during audio analysis:\n{str(e)}")
-            self.results_label.setText(f"Audio Detection failed: {str(e)}")
-            logging.error(f"Audio detection error: {e}")
+        scale_factor = current_width / original_width
+        return int(value * scale_factor)
 
+    def _get_resize_cursor(self, corner_index: int) -> QtCore.Qt.CursorShape:
+        """Returns the appropriate cursor for resizing based on the corner."""
+        # 0: Top-Left, 1: Top-Right, 2: Bottom-Left, 3: Bottom-Right
+        if corner_index == 0 or corner_index == 3:
+            return QtCore.Qt.SizeFDiagCursor # NWSE
+        else:
+            return QtCore.Qt.SizeBDiagCursor # NESW
 
-    # --- Analysis and Plotting ---
+    # --- Analysis Logic ---
 
     def analyze_video(self):
-        """Performs brightness analysis with enhanced progress tracking and error handling."""
-        # --- Preconditions ---
-        if not self.video_path:
-            QtWidgets.QMessageBox.warning(self, "Analysis Error", "Please load a video file first.")
+        """Performs brightness analysis on the selected video range and ROIs."""
+        if not self.cap or not self.cap.isOpened():
+            QtWidgets.QMessageBox.warning(self, 'Analysis Error', 'No video loaded.')
             return
         if not self.rects:
-            QtWidgets.QMessageBox.warning(self, "Analysis Error", "Please define at least one ROI.")
+            QtWidgets.QMessageBox.warning(self, 'Analysis Error', 'No ROIs defined. Please draw at least one ROI.')
             return
-        if self.start_frame is None or self.end_frame is None or self.start_frame > self.end_frame:
-             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Invalid start/end frame range selected.")
-             return
+        if self.selected_rect_idx is None and self.locked_roi is None:
+            QtWidgets.QMessageBox.warning(self, 'Analysis Error', 'No ROI selected for analysis. Please select an ROI or lock one.')
+            return
 
-        # Set analysis state
         self._analysis_in_progress = True
-        self.stop_playback()  # Stop playback during analysis
         self._update_widget_states(video_loaded=True, rois_exist=True)
-        
-        # --- Get Save Directory ---
-        initial_dir = os.path.dirname(self.video_path) if self.video_path else ""
-        save_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Choose Directory to Save Analysis Results and Plots", initial_dir)
-        if not save_dir:
-            self.results_label.setText("Analysis cancelled (no save directory chosen).")
-            self._analysis_in_progress = False
-            self._update_widget_states(video_loaded=True, rois_exist=True)
-            return
-
-        # --- Setup ---
-        self.results_label.setText("Starting analysis...")
-        self.brightness_display_label.setText("Analyzing...")
-        
-        # Play analysis start sound
+        self.statusBar().showMessage("Analysis in progress...")
         self.audio_manager.play_analysis_start()
-        self.statusBar().showMessage("Running brightness analysis...")
-        QtWidgets.QApplication.processEvents()
 
+        start_frame = self.start_frame
+        end_frame = self.end_frame if self.end_frame is not None else self.total_frames - 1
+
+        # Validate frame range
         try:
-            analysis_cap = cv2.VideoCapture(self.video_path)
-            if not analysis_cap.isOpened():
-                raise Exception(f"Could not open video file for analysis: {os.path.basename(self.video_path)}")
-
-            # Frame range for analysis (inclusive)
-            start = self.start_frame
-            end = self.end_frame
-            num_frames_to_analyze = end - start + 1
-
-            # Data structure: list of lists for mean and median, one inner list per non-background ROI
-            non_background_rois = [i for i in range(len(self.rects)) if i != self.background_roi_idx]
-            brightness_mean_data = [[] for _ in non_background_rois]
-            brightness_median_data = [[] for _ in non_background_rois]
-            blue_mean_data = [[] for _ in non_background_rois]
-            blue_median_data = [[] for _ in non_background_rois]
-            background_values_per_frame = []  # Track background brightness for each frame
-
-            # --- Progress Dialog ---
-            progress = QtWidgets.QProgressDialog("Analyzing video frames...", "Cancel", 0, num_frames_to_analyze, self)
-            progress.setWindowModality(QtCore.Qt.WindowModal)
-            progress.setWindowTitle("Analyzing Brightness")
-            progress.setValue(0)
-            progress.show()
-            QtWidgets.QApplication.processEvents()
-
-            # --- Frame Processing Loop ---
-            analysis_cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-            analysis_cancelled = False
-            frames_processed = 0
-            start_time = time.time()
-
-            for f_idx in range(start, end + 1):
-                if progress.wasCanceled():
-                    analysis_cancelled = True
-                    break
-
-                ret, frame = analysis_cap.read()
-                if not ret:
-                    logging.warning(f"Could not read frame {f_idx} during analysis. Stopping analysis.")
-                    num_frames_to_analyze = frames_processed
-                    brightness_mean_data = [lst[:frames_processed] for lst in brightness_mean_data]
-                    brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
-                    blue_mean_data = [lst[:frames_processed] for lst in blue_mean_data]
-                    blue_median_data = [lst[:frames_processed] for lst in blue_median_data]
-                    break
-
-                # Calculate background brightness for this frame
-                background_brightness = self._compute_background_brightness(frame)
-                background_values_per_frame.append(background_brightness if background_brightness is not None else 0.0)
-                
-                fh, fw = frame.shape[:2]
-                for data_idx, roi_idx in enumerate(non_background_rois):
-                    pt1, pt2 = self.rects[roi_idx]
-                    x1, y1 = max(0, pt1[0]), max(0, pt1[1])
-                    x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
-
-                    if x2 > x1 and y2 > y1:
-                        roi = frame[y1:y2, x1:x2]
-                        l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(roi, background_brightness)
-                        # Store background-subtracted values if background ROI defined, otherwise raw values
-                        if background_brightness is not None:
-                            brightness_mean_data[data_idx].append(l_bg_sub_mean)
-                            brightness_median_data[data_idx].append(l_bg_sub_median)
-                            blue_mean_data[data_idx].append(b_bg_sub_mean)
-                            blue_median_data[data_idx].append(b_bg_sub_median)
-                        else:
-                            brightness_mean_data[data_idx].append(l_raw_mean)
-                            brightness_median_data[data_idx].append(l_raw_median)
-                            blue_mean_data[data_idx].append(b_raw_mean)
-                            blue_median_data[data_idx].append(b_raw_median)
-                    else:
-                        brightness_mean_data[data_idx].append(0.0)
-                        brightness_median_data[data_idx].append(0.0)
-                        blue_mean_data[data_idx].append(0.0)
-                        blue_median_data[data_idx].append(0.0)
-
-                frames_processed += 1
-                
-                # Update progress with time estimate
-                if frames_processed % 10 == 0:
-                    elapsed_time = time.time() - start_time
-                    if elapsed_time > 0:
-                        fps = frames_processed / elapsed_time
-                        remaining_frames = num_frames_to_analyze - frames_processed
-                        eta_seconds = remaining_frames / fps if fps > 0 else 0
-                        progress.setLabelText(f"Analyzing frame {frames_processed}/{num_frames_to_analyze}\n"
-                                            f"Speed: {fps:.1f} fps, ETA: {eta_seconds:.0f}s")
-                    
-                progress.setValue(frames_processed)
-                QtWidgets.QApplication.processEvents()
-
-            analysis_cap.release()
-            progress.close()
-
-            if analysis_cancelled:
-                self.results_label.setText("Analysis cancelled by user.")
-                self._update_current_brightness_display()
-                return
-
-            if frames_processed == 0:
-                 QtWidgets.QMessageBox.warning(self, "Analysis", "No frames were processed during analysis.")
-                 self.results_label.setText("Analysis completed, but no frames processed.")
-                 self._update_current_brightness_display()
-                 return
-
-            # --- Save Results and Generate Plots ---
-            self._save_analysis_results(brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame)
-
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Analysis Error", f"An error occurred during analysis:\n{str(e)}")
-            self.results_label.setText(f"Analysis failed: {str(e)}")
-            logging.error(f"Analysis error: {e}")
-        finally:
+            validate_frame_range(start_frame, end_frame, self.total_frames)
+        except ValidationError as e:
+            QtWidgets.QMessageBox.critical(self, 'Analysis Error', str(e))
             self._analysis_in_progress = False
             self._update_widget_states(video_loaded=True, rois_exist=True)
-            self.statusBar().showMessage("Analysis complete")
-            
-            # Play analysis completion sound
-            self.audio_manager.play_analysis_complete()
-            
-            # Check run duration if specified
-            expected_duration = self.run_duration_spin.value()
-            if expected_duration > 0.0 and self.start_frame is not None and self.end_frame is not None:
-                confidence = self._validate_run_duration(self.start_frame, self.end_frame, expected_duration)
-                if confidence >= 0.8:  # High confidence threshold
-                    self.audio_manager.play_run_detected()
-
-    def _save_analysis_results(self, brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame):
-        """Save analysis results and generate plots."""
-        self.out_paths = []
-        if self.video_path is None:
+            self.statusBar().showMessage("Analysis failed.")
             return
-        base_video_name = os.path.splitext(os.path.basename(self.video_path))[0]
-        analysis_name = self.analysis_name_input.text().strip() or "DefaultAnalysis"
-        analysis_name = "".join(c for c in analysis_name if c.isalnum() or c in ('_', '-')).rstrip()
 
-        summary_lines = [f"Analysis Complete ({frames_processed} frames analyzed):"]
-        avg_brightness_summary = []
+        # Initialize results storage
+        results: List[List[Tuple[int, float, float, float, float, float, float, float, float]]] = [[] for _ in self.rects]
+        
+        # Determine background brightness for the entire analysis if a background ROI is set
+        overall_background_brightness = None
+        if self.background_roi_idx is not None:
+            # Calculate average brightness of the background ROI over the entire analysis range
+            bg_roi_brightness_sum = 0.0
+            bg_roi_frame_count = 0
+            
+            progress_bg = QtWidgets.QProgressDialog("Calculating background brightness...", "Cancel", start_frame, end_frame, self)
+            progress_bg.setWindowModality(QtCore.Qt.WindowModal)
+            
+            for i in range(start_frame, end_frame + 1):
+                progress_bg.setValue(i)
+                if progress_bg.wasCanceled():
+                    break
+                
+                frame = self._get_frame(i)
+                if frame is None:
+                    continue
+                
+                pt1, pt2 = self.rects[self.background_roi_idx]
+                fh, fw = frame.shape[:2]
+                x1 = max(0, min(pt1[0], fw - 1))
+                y1 = max(0, min(pt1[1], fh - 1))
+                x2 = max(0, min(pt2[0], fw - 1))
+                y2 = max(0, min(pt2[1], fh - 1))
+                
+                if x2 > x1 and y2 > y1:
+                    bg_roi = frame[y1:y2, x1:x2]
+                    l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(bg_roi)
+                    bg_roi_brightness_sum += l_raw_mean
+                    bg_roi_frame_count += 1
+            
+            progress_bg.setValue(end_frame) # Ensure progress bar is full
+            
+            if bg_roi_frame_count > 0:
+                overall_background_brightness = bg_roi_brightness_sum / bg_roi_frame_count
+                logger.info(f"Overall background brightness calculated: {overall_background_brightness:.2f} L*")
+            else:
+                logger.warning("Could not calculate overall background brightness. Using manual threshold or no threshold.")
+                QtWidgets.QMessageBox.warning(self, "Background Calculation Failed", "Could not calculate background brightness for the selected ROI over the analysis range. Using manual threshold or no threshold.")
 
-        # Update progress dialog for plot generation
-        progress = QtWidgets.QProgressDialog("Saving results and generating plots...", "Cancel", 0, len(brightness_mean_data), self)
+        progress = QtWidgets.QProgressDialog("Analyzing frames...", "Cancel", start_frame, end_frame, self)
         progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle("Saving Results")
-        progress.setValue(0)
-        progress.show()
-        QtWidgets.QApplication.processEvents()
 
-        plot_failed = False
-        for data_idx in range(len(brightness_mean_data)):
+        for i in range(start_frame, end_frame + 1):
+            progress.setValue(i)
             if progress.wasCanceled():
                 break
-                
-            actual_roi_idx = non_background_rois[data_idx]  # Get the actual ROI index
-            mean_data = brightness_mean_data[data_idx]
-            median_data = brightness_median_data[data_idx]
-            blue_mean = blue_mean_data[data_idx]
-            blue_median = blue_median_data[data_idx]
-            
-            if not mean_data: 
-                progress.setValue(data_idx + 1)
+
+            frame = self._get_frame(i)
+            if frame is None:
                 continue
 
-            # Create DataFrame with L* and blue channel data
-            frame_numbers = range(self.start_frame, self.start_frame + len(mean_data))
-            df = pd.DataFrame({
-                "frame": frame_numbers, 
-                "brightness_mean": mean_data,
-                "brightness_median": median_data,
-                "blue_mean": blue_mean,
-                "blue_median": blue_median
-            })
+            # Process each ROI
+            for roi_idx, _ in enumerate(self.rects):
+                if roi_idx == self.background_roi_idx:
+                    continue
 
-            # Calculate averages for summary
-            avg_mean = np.mean(mean_data)
-            avg_median = np.mean(median_data)
-            avg_blue_mean = np.mean(blue_mean)
-            avg_blue_median = np.mean(blue_median)
-            avg_brightness_summary.append(f"ROI {actual_roi_idx+1} L*: {avg_mean:.2f}±{avg_median:.2f}, Blue: {avg_blue_mean:.1f}±{avg_blue_median:.1f}")
+                # Get the ROI for the current frame
+                if self.locked_roi and roi_idx == self.selected_rect_idx: # Only apply locked ROI to the selected ROI
+                    pt1, pt2 = self.locked_roi['rect']
+                else:
+                    pt1, pt2 = self.rects[roi_idx]
 
-            # Construct filename and save CSV using actual ROI number
-            base_filename = f"{analysis_name}_{base_video_name}_ROI{actual_roi_idx+1}_frames{self.start_frame+1}-{self.start_frame+len(mean_data)}"
-            csv_file = f"{base_filename}_brightness.csv"
-            csv_path = os.path.join(save_dir, csv_file)
-            
-            try:
-                df.to_csv(csv_path, index=False)
-                self.out_paths.append(csv_path)
-                summary_lines.append(f" - Saved CSV: {csv_file}")
-                
-                # Generate enhanced plot for this ROI
-                self._generate_enhanced_plot(df, base_filename, save_dir, actual_roi_idx, analysis_name, base_video_name, background_values_per_frame)
-                summary_lines.append(f" - Saved Plot: {base_filename}_plot.png")
+                fh, fw = frame.shape[:2]
+                x1 = max(0, min(pt1[0], fw - 1))
+                y1 = max(0, min(pt1[1], fh - 1))
+                x2 = max(0, min(pt2[0], fw - 1))
+                y2 = max(0, min(pt2[1], fh - 1))
+                roi = frame[y1:y2, x1:x2]
 
-            except Exception as e:
-                plot_failed = True
-                error_msg = f"Failed to save/plot ROI {actual_roi_idx+1}: {e}"
-                logging.error(error_msg)
-                summary_lines.append(f" - FAILED: ROI {actual_roi_idx+1}")
+                # Compute brightness stats
+                brightness_stats = self._compute_brightness_stats(roi, overall_background_brightness if overall_background_brightness is not None else self.manual_threshold)
+                results[roi_idx].append((i,) + brightness_stats)
 
-            progress.setValue(data_idx + 1)
-            QtWidgets.QApplication.processEvents()
+        progress.setValue(end_frame) # Ensure progress bar is full
 
-        progress.close()
+        self.audio_manager.play_analysis_complete()
+        self._analysis_in_progress = False
+        self._update_widget_states(video_loaded=True, rois_exist=True)
+        self.statusBar().showMessage("Analysis complete.")
 
-        # --- Update UI ---
-        if plot_failed:
-            summary_lines.append("Note: Some plots failed to generate - check console for details")
-            
-        self.results_label.setText("\n".join(summary_lines))
-        self.brightness_display_label.setText(", ".join(avg_brightness_summary) if avg_brightness_summary else "N/A")
+        # Post-analysis: Plotting and CSV export
+        self._plot_results(results)
+        self._export_results_to_csv(results)
 
-    def _generate_enhanced_plot(self, df, base_filename, save_dir, r_idx, analysis_name, base_video_name, background_values_per_frame):
-        """Generate enhanced plots with better styling and information."""
-        try:
-            frames = df['frame']
-            brightness_mean = df['brightness_mean']
-            brightness_median = df['brightness_median']
-            blue_mean = df['blue_mean']
-            blue_median = df['blue_median']
+    def _plot_results(self, results: List[List[Tuple[int, float, float, float, float, float, float, float, float]]]):
+        """Plots the brightness analysis results."""
+        if not results or all(not r for r in results):
+            QtWidgets.QMessageBox.warning(self, 'Plotting Error', 'No analysis data to plot.')
+            return
 
-            if brightness_mean.empty:
-                return
+        fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+        fig.suptitle('Brightness Analysis Results', fontsize=16)
 
-            # Statistics
-            idx_peak_mean = brightness_mean.idxmax()
-            frame_peak_mean, val_peak_mean = frames.iloc[idx_peak_mean], brightness_mean.iloc[idx_peak_mean]
-            mean_of_means = brightness_mean.mean()
-            std_of_means = brightness_mean.std()
-            
-            idx_peak_median = brightness_median.idxmax()
-            frame_peak_median, val_peak_median = frames.iloc[idx_peak_median], brightness_median.iloc[idx_peak_median]
-            mean_of_medians = brightness_median.mean()
-            std_of_medians = brightness_median.std()
-            
-            # Blue channel statistics
-            idx_peak_blue_mean = blue_mean.idxmax()
-            frame_peak_blue_mean, val_peak_blue_mean = frames.iloc[idx_peak_blue_mean], blue_mean.iloc[idx_peak_blue_mean]
-            mean_of_blue_means = blue_mean.mean()
-            std_of_blue_means = blue_mean.std()
-            
-            idx_peak_blue_median = blue_median.idxmax()
-            frame_peak_blue_median, val_peak_blue_median = frames.iloc[idx_peak_blue_median], blue_median.iloc[idx_peak_blue_median]
-            mean_of_blue_medians = blue_median.mean()
-            std_of_blue_medians = blue_median.std()
+        # L* Channel Plot
+        ax1 = axes[0]
+        for roi_idx, roi_results in enumerate(results):
+            if not roi_results:
+                continue
+            frames = [r[0] for r in roi_results]
+            l_raw_means = [r[1] for r in roi_results]
+            l_bg_sub_means = [r[3] for r in roi_results] # Background-subtracted mean
 
-            # Create enhanced plot with dual subplots
-            plt.style.use('seaborn-v0_8-darkgrid')
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-
-            # Main brightness plot
-            ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
-            ax1.plot(frames, brightness_median, label='Median Brightness', color='#70ad47', linewidth=2, alpha=0.8)
-            
-            # Add background line if background values are available
-            if background_values_per_frame and len(background_values_per_frame) == len(frames):
-                # Filter out zero values (frames where background ROI wasn't available)
-                background_array = np.array(background_values_per_frame)
-                valid_background_mask = background_array > 0
-                if np.any(valid_background_mask):
-                    ax1.plot(frames, background_array, label='Background Level', color='#808080', 
-                           linewidth=1.5, linestyle=':', alpha=0.9)
-            
-            # Add confidence bands (mean ± std)
-            ax1.fill_between(frames, brightness_mean - std_of_means, brightness_mean + std_of_means, 
-                           alpha=0.2, color='#5a9bd5', label=f'Mean ±1σ ({std_of_means:.1f})')
-            ax1.fill_between(frames, brightness_median - std_of_medians, brightness_median + std_of_medians, 
-                           alpha=0.2, color='#70ad47', label=f'Median ±1σ ({std_of_medians:.1f})')
-            
-            # Add horizontal lines for averages
-            ax1.axhline(mean_of_means, color='#5a9bd5', linestyle='--', alpha=0.7, 
-                       label=f'Avg Mean ({mean_of_means:.1f})')
-            ax1.axhline(mean_of_medians, color='#70ad47', linestyle='--', alpha=0.7, 
-                       label=f'Avg Median ({mean_of_medians:.1f})')
-            
-            # Mark peak points
-            ax1.scatter([frame_peak_mean], [val_peak_mean], color='#ff0000', zorder=5, s=100, 
-                       marker='^', label=f'Peak Mean ({val_peak_mean:.1f})')
-            ax1.scatter([frame_peak_median], [val_peak_median], color='#ed7d31', zorder=5, s=100, 
-                       marker='v', label=f'Peak Median ({val_peak_median:.1f})')
-
-            ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
-            ax1.set_ylabel('L* Brightness', fontsize=12)
-            ax1.legend(fontsize=10, loc='best')
-            ax1.grid(True, alpha=0.3)
-            
-            # Adjust y-axis limits to provide more space at the top for statistics panel
-            y_min, y_max = ax1.get_ylim()
-            y_range = y_max - y_min
-            # Add 15% padding at the top to accommodate the statistics panel
-            ax1.set_ylim(y_min, y_max + 0.15 * y_range)
-
-            # Add statistics text box - positioned in top-right to avoid interference
-            stats_text = f"""Statistics:
-Mean: {mean_of_means:.2f} ± {std_of_means:.2f}
-Median: {mean_of_medians:.2f} ± {std_of_medians:.2f}
-Peak Mean: {val_peak_mean:.2f} @ Frame {frame_peak_mean}
-Peak Median: {val_peak_median:.2f} @ Frame {frame_peak_median}
-Frames Analyzed: {len(frames)}"""
-            
-            ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
-                    verticalalignment='top', horizontalalignment='right', 
-                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-            
-            # Blue channel plot
-            ax2.plot(frames, blue_mean, label='Blue Mean', color='#0066cc', linewidth=2, alpha=0.8)
-            ax2.plot(frames, blue_median, label='Blue Median', color='#3399ff', linewidth=2, alpha=0.8)
-            
-            # Add confidence bands for blue channel
-            ax2.fill_between(frames, blue_mean - std_of_blue_means, blue_mean + std_of_blue_means, 
-                           alpha=0.2, color='#0066cc', label=f'Blue Mean ±1σ ({std_of_blue_means:.1f})')
-            ax2.fill_between(frames, blue_median - std_of_blue_medians, blue_median + std_of_blue_medians, 
-                           alpha=0.2, color='#3399ff', label=f'Blue Median ±1σ ({std_of_blue_medians:.1f})')
-            
-            # Add horizontal lines for blue averages
-            ax2.axhline(mean_of_blue_means, color='#0066cc', linestyle='--', alpha=0.7, 
-                       label=f'Avg Blue Mean ({mean_of_blue_means:.1f})')
-            ax2.axhline(mean_of_blue_medians, color='#3399ff', linestyle='--', alpha=0.7, 
-                       label=f'Avg Blue Median ({mean_of_blue_medians:.1f})')
-            
-            # Mark blue peak points
-            ax2.scatter([frame_peak_blue_mean], [val_peak_blue_mean], color='#ff0000', zorder=5, s=100, 
-                       marker='^', label=f'Peak Blue Mean ({val_peak_blue_mean:.1f})')
-            ax2.scatter([frame_peak_blue_median], [val_peak_blue_median], color='#ed7d31', zorder=5, s=100, 
-                       marker='v', label=f'Peak Blue Median ({val_peak_blue_median:.1f})')
-            
-            ax2.set_xlabel('Frame Number', fontsize=12)
-            ax2.set_ylabel('Blue Channel Value', fontsize=12)
-            ax2.legend(fontsize=10, loc='best')
-            ax2.grid(True, alpha=0.3)
-            
-            # Add blue channel statistics text box
-            blue_stats_text = f"""Blue Channel Statistics:
-Mean: {mean_of_blue_means:.1f} ± {std_of_blue_means:.1f}
-Median: {mean_of_blue_medians:.1f} ± {std_of_blue_medians:.1f}
-Peak Mean: {val_peak_blue_mean:.1f} @ Frame {frame_peak_blue_mean}
-Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
-            
-            ax2.text(0.98, 0.98, blue_stats_text, transform=ax2.transAxes, fontsize=9,
-                    verticalalignment='top', horizontalalignment='right', 
-                    bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
-
-            plt.tight_layout()
-
-            # Save plot
-            plot_filename = f"{base_filename}_plot.png"
-            plot_save_path = os.path.join(save_dir, plot_filename)
-            plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
-            plt.show()
-            plt.close(fig)
-            
-            # Automatically open the generated PNG file
-            try:
-                import subprocess
-                subprocess.run(['open', plot_save_path], check=True)
-            except Exception as e:
-                logging.warning(f"Could not automatically open plot file {plot_save_path}: {e}")
-
-        except Exception as e:
-            logging.error(f"Failed to generate plot for ROI {r_idx+1}: {e}")
-            raise
-
-    # --- Utility Methods ---
-
-    def _validate_run_duration(self, start_frame: int, end_frame: int, expected_duration: float) -> float:
-        """
-        Calculate confidence score for detected run vs expected duration.
+            color = plt.cm.get_cmap('tab10')(roi_idx) # Use a colormap for distinct colors
+            ax1.plot(frames, l_raw_means, label=f'ROI {roi_idx+1} (Raw L*)', color=color, linestyle='-')
+            if self.background_roi_idx is not None:
+                ax1.plot(frames, l_bg_sub_means, label=f'ROI {roi_idx+1} (BG-Sub L*)', color=color, linestyle='--', alpha=0.7)
         
-        Args:
-            start_frame: Start frame of detected run
-            end_frame: End frame of detected run
-            expected_duration: Expected duration in seconds
+        ax1.set_ylabel('L* Brightness (0-100)')
+        ax1.set_title('L* Brightness Over Time')
+        ax1.legend()
+        ax1.grid(True)
+
+        # Blue Channel Plot
+        ax2 = axes[1]
+        for roi_idx, roi_results in enumerate(results):
+            if not roi_results:
+                continue
+            frames = [r[0] for r in roi_results]
+            b_raw_means = [r[5] for r in roi_results] # Raw blue mean
+            b_bg_sub_means = [r[7] for r in roi_results] # Background-subtracted blue mean
+
+            color = plt.cm.get_cmap('tab10')(roi_idx)
+            ax2.plot(frames, b_raw_means, label=f'ROI {roi_idx+1} (Raw Blue)', color=color, linestyle='-')
+            if self.background_roi_idx is not None:
+                ax2.plot(frames, b_bg_sub_means, label=f'ROI {roi_idx+1} (BG-Sub Blue)', color=color, linestyle='--', alpha=0.7)
+        
+        ax2.set_xlabel('Frame Number')
+        ax2.set_ylabel('Blue Channel Value (0-255)')
+        ax2.set_title('Blue Channel Value Over Time')
+        ax2.legend()
+        ax2.grid(True)
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to prevent title overlap
+        
+        # Save plot
+        plot_filename = f"{self.analysis_name_input.text()}_brightness_analysis.png"
+        plt.savefig(plot_filename)
+        logger.info(f"Plot saved to {plot_filename}")
+        self.out_paths.append(plot_filename)
+        plt.close(fig) # Close the figure to free memory
+
+    def _export_results_to_csv(self, results: List[List[Tuple[int, float, float, float, float, float, float, float, float]]]):
+        """Exports the analysis results to a CSV file."""
+        if not results or all(not r for r in results):
+            QtWidgets.QMessageBox.warning(self, 'Export Error', 'No analysis data to export.')
+            return
+
+        all_data = []
+        for roi_idx, roi_results in enumerate(results):
+            for frame_data in roi_results:
+                frame_num, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = frame_data
+                all_data.append({
+                    'ROI': roi_idx + 1,
+                    'Frame': frame_num,
+                    'L_Raw_Mean': l_raw_mean,
+                    'L_Raw_Median': l_raw_median,
+                    'L_BG_Sub_Mean': l_bg_sub_mean,
+                    'L_BG_Sub_Median': l_bg_sub_median,
+                    'Blue_Raw_Mean': b_raw_mean,
+                    'Blue_Raw_Median': b_raw_median,
+                    'Blue_BG_Sub_Mean': b_bg_sub_mean,
+                    'Blue_BG_Sub_Median': b_bg_sub_median
+                })
+        
+        if not all_data:
+            QtWidgets.QMessageBox.warning(self, 'Export Error', 'No valid data collected for export.')
+            return
+
+        df = pd.DataFrame(all_data)
+        csv_filename = f"{self.analysis_name_input.text()}_brightness_analysis.csv"
+        df.to_csv(csv_filename, index=False)
+        logger.info(f"Results exported to {csv_filename}")
+        self.out_paths.append(csv_filename)
+
+        self.results_label.setText(f"Analysis complete. Results saved to:\n"
+                                   f"- {os.path.basename(csv_filename)}\n"
+                                   f"- {os.path.basename(csv_filename.replace('.csv', '.png'))}")
+
+    def _get_frame(self, frame_index: int) -> Optional[np.ndarray]:
+        """Retrieves a frame from the video, using cache if available."""
+        cached_frame = self.frame_cache.get(frame_index)
+        if cached_frame is not None:
+            return cached_frame
+        
+        if self.cap and self.cap.isOpened():
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ret, frame = self.cap.read()
+            if ret:
+                self.frame_cache.put(frame_index, frame)
+                return frame
+        return None
+
+    def _compute_background_brightness(self, frame: np.ndarray) -> Optional[float]:
+        """Computes the background brightness from the designated background ROI."""
+        if self.background_roi_idx is None or self.background_roi_idx >= len(self.rects):
+            return None
+        
+        pt1, pt2 = self.rects[self.background_roi_idx]
+        fh, fw = frame.shape[:2]
+        x1 = max(0, min(pt1[0], fw - 1))
+        y1 = max(0, min(pt1[1], fh - 1))
+        x2 = max(0, min(pt2[0], fw - 1))
+        y2 = max(0, min(pt2[1], fh - 1))
+        
+        if x2 > x1 and y2 > y1:
+            bg_roi = frame[y1:y2, x1:x2]
+            # Convert to LAB and get L* channel
+            lab = cv2.cvtColor(bg_roi, cv2.COLOR_BGR2LAB)
+            l_chan = lab[:, :, 0].astype(np.float32)
+            l_star = l_chan * 100.0 / 255.0
             
-        Returns:
-            Confidence score from 0.0 to 1.0 (1.0 = perfect match)
-        """
-        if expected_duration <= 0.0 or not self.cap:
-            return 1.0  # No validation if duration not set or video not loaded
-        
-        fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            return 1.0  # No validation if fps unknown
-        
-        actual_duration = (end_frame - start_frame + 1) / fps
-        duration_difference = abs(actual_duration - expected_duration)
-        
-        # Calculate confidence - perfect match = 1.0, large difference = 0.0
-        # Allow 20% tolerance before confidence starts dropping
-        tolerance = expected_duration * 0.2
-        if duration_difference <= tolerance:
-            confidence = 1.0
-        else:
-            # Linear decay from 1.0 to 0.0 over the next 80% of expected duration
-            max_difference = expected_duration * 0.8
-            confidence = max(0.0, 1.0 - (duration_difference - tolerance) / max_difference)
-        
-        return confidence
+            # Use 90th percentile for background brightness to be more robust to noise/small bright spots
+            return float(np.percentile(l_star, 90))
+        return None
 
     def _compute_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
         """
         Calculates brightness statistics for an ROI with optional background subtraction.
+        Uses low-light enhancement if enabled for better results in low-light conditions.
 
         Converts BGR to CIE LAB color space and uses the L* channel.
         Also extracts blue channel statistics for blue light analysis.
+        """
+        if roi_bgr is None or roi_bgr.size == 0:
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
+        try:
+            # Use low-light enhancement if enabled
+            if hasattr(self, 'low_light_enhancer') and self.low_light_enhancer.enabled:
+                return self.low_light_enhancer.compute_enhanced_brightness_stats(roi_bgr, background_brightness)
+            else:
+                # Fall back to standard calculation
+                return self._compute_standard_brightness_stats(roi_bgr, background_brightness)
+            
+        except Exception as e:
+            logger.error(f"Error computing brightness statistics: {e}")
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    
+    def _compute_standard_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
+        """
+        Standard brightness calculation without enhancement.
+        
         Args:
             roi_bgr: The region of interest as a NumPy array (BGR format).
             background_brightness: Optional background L* value to subtract from all pixels.
 
         Returns:
-            Tuple of (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, 
-                     b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median)
-            L* values in 0-100 range, Blue values in 0-255 range
-            or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) if the ROI is invalid or calculation fails.
+            Tuple of brightness statistics.
         """
         if roi_bgr is None or roi_bgr.size == 0:
             return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -2905,124 +3199,148 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
         try:
             lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
             l_chan = lab[:, :, 0].astype(np.float32)
-
-            # Convert raw L to L* scale (0–100)
             l_star = l_chan * 100.0 / 255.0
             
-            # Extract blue channel (BGR format, so blue is index 0)
+            # Extract blue channel
             blue_chan = roi_bgr[:, :, 0].astype(np.float32)
-
-            # Calculate raw L* statistics (unthresholded)
+            
+            # Calculate raw statistics
             l_raw_mean = float(np.mean(l_star))
             l_raw_median = float(np.median(l_star))
-            
-            # Calculate raw blue statistics (unthresholded)
             b_raw_mean = float(np.mean(blue_chan))
             b_raw_median = float(np.median(blue_chan))
             
-            # Calculate background-subtracted statistics if background provided
+            # Calculate background-subtracted statistics
             if background_brightness is not None:
-                # Filter pixels above background threshold, then subtract background
                 above_background_mask = l_star > background_brightness
                 
-                # Apply morphological operations to clean up the mask (remove noise/stray pixels)
-                if np.any(above_background_mask):
-                    # Create structuring element for morphological operations
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
-                                                     (MORPHOLOGICAL_KERNEL_SIZE, MORPHOLOGICAL_KERNEL_SIZE))
-                    
-                    # Convert boolean mask to uint8 for morphological operations
+                # Apply morphological cleanup if enabled
+                if self.low_light_enhancer.morphological_cleanup and np.any(above_background_mask):
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
                     mask_uint8 = above_background_mask.astype(np.uint8) * 255
-                    
-                    # Apply opening (erosion followed by dilation) to remove small noise
                     cleaned_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-                    
-                    # Convert back to boolean mask
                     above_background_mask = cleaned_mask > 0
                 
                 if np.any(above_background_mask):
-                    # Only analyze pixels above background threshold
                     filtered_l_pixels = l_star[above_background_mask]
                     filtered_b_pixels = blue_chan[above_background_mask]
                     
-                    # Background-subtracted L* statistics
-                    bg_subtracted_l_pixels = filtered_l_pixels - background_brightness
-                    l_bg_sub_mean = float(np.mean(bg_subtracted_l_pixels))
-                    l_bg_sub_median = float(np.median(bg_subtracted_l_pixels))
+                    # Apply additional noise filtering to extracted pixels
+                    if self.low_light_enhancer.gaussian_blur_sigma > 0 and len(filtered_l_pixels) > 10:
+                        # Use robust statistics for noisy signals
+                        l_bg_sub_mean = float(np.mean(filtered_l_pixels) - background_brightness)
+                        l_bg_sub_median = float(np.median(filtered_l_pixels) - background_brightness)
+                        
+                        # Apply Gaussian smoothing to reduce noise in statistics
+                        l_values = filtered_l_pixels - background_brightness
+                        if len(l_values) > 5:
+                            # Use trimmed mean for better noise resistance
+                            l_trimmed = np.sort(l_values)[int(len(l_values)*0.1):int(len(l_values)*0.9)]
+                            if len(l_trimmed) > 0:
+                                l_bg_sub_mean = float(np.mean(l_trimmed))
+                    else:
+                        l_bg_sub_mean = float(np.mean(filtered_l_pixels) - background_brightness)
+                        l_bg_sub_median = float(np.median(filtered_l_pixels) - background_brightness)
                     
-                    # Blue channel statistics for masked pixels (no background subtraction for blue)
                     b_bg_sub_mean = float(np.mean(filtered_b_pixels))
                     b_bg_sub_median = float(np.median(filtered_b_pixels))
                 else:
-                    # No pixels above background - return 0
-                    l_bg_sub_mean = 0.0
-                    l_bg_sub_median = 0.0
-                    b_bg_sub_mean = 0.0
-                    b_bg_sub_median = 0.0
+                    l_bg_sub_mean = l_bg_sub_median = b_bg_sub_mean = b_bg_sub_median = 0.0
             else:
                 l_bg_sub_mean = l_raw_mean
                 l_bg_sub_median = l_raw_median
                 b_bg_sub_mean = b_raw_mean
                 b_bg_sub_median = b_raw_median
             
-            return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
-
-        except cv2.error as e:
-            print(f"OpenCV error during brightness computation: {e}")
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        except Exception as e:
-            print(f"Error during brightness computation: {e}")
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-
-    def _compute_background_brightness(self, frame: np.ndarray) -> Optional[float]:
-        """
-        Calculate background ROI brightness for current frame.
-        
-        Args:
-            frame: Current video frame in BGR format
-            
-        Returns:
-            90th percentile L* brightness of background ROI, or None if no background ROI defined
-        """
-        if self.background_roi_idx is None or frame is None:
-            return None
-            
-        if not (0 <= self.background_roi_idx < len(self.rects)):
-            return None
-            
-        try:
-            pt1, pt2 = self.rects[self.background_roi_idx]
-            roi = frame[pt1[1]:pt2[1], pt1[0]:pt2[0]]
-            if roi.size == 0:
-                return None
-                
-            # Convert to LAB and get L* channel
-            lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-            l_chan = lab[:, :, 0].astype(np.float32)
-            l_star = l_chan * 100.0 / 255.0
-            
-            return float(np.percentile(l_star, 90))
+            return (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median,
+                   b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median)
             
         except Exception as e:
-            print(f"Error computing background brightness: {e}")
-            return None
+            logger.error(f"Error computing brightness statistics: {e}")
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    def _compute_brightness(self, roi_bgr: np.ndarray) -> float:
-        """
-        Legacy method for backward compatibility.
-        Returns only the mean brightness for existing code that expects a single value.
-        """
+    def get_roi_brightness(self, roi_bgr: np.ndarray) -> float:
+        """Helper to get L* mean brightness of an ROI."""
+        if roi_bgr is None or roi_bgr.size == 0:
+            return 0.0
         l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi_bgr)
         return l_raw_mean
     
-if __name__ == '__main__':
+def main():
+    """Main application entry point with comprehensive error handling."""
+    # Initialize application
     app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    app.setApplicationDisplayName(f"{APP_NAME} v{APP_VERSION}")
+    app.setOrganizationName("Brightness Sorcerer Development Team")
+    app.setOrganizationDomain("brightnesssorcerer.dev")
     
-    # Set up logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    # Set application icon (if available)
+    try:
+        from pathlib import Path
+        icon_path = Path("icon.ico")
+        if icon_path.exists():
+            app.setWindowIcon(QtGui.QIcon(str(icon_path)))
+    except Exception as e:
+        logger.debug(f"Could not load application icon: {e}")
+    
+    # Global exception handler
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        """Handle uncaught exceptions."""
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        
+        error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        logger.critical(f"Uncaught exception: {error_msg}")
+        
+        # Show error dialog
+        error_dialog = QtWidgets.QMessageBox()
+        error_dialog.setIcon(QtWidgets.QMessageBox.Critical)
+        error_dialog.setWindowTitle("Critical Error")
+        error_dialog.setText("An unexpected error occurred.")
+        error_dialog.setDetailedText(error_msg)
+        error_dialog.setInformativeText("The application will now close. Please check the log file for details.")
+        error_dialog.exec_()
+    
+    # Install exception handler
+    sys.excepthook = handle_exception
+    
+    try:
+        # Create and show the main window
+        logger.info(f"Starting {APP_NAME} v{APP_VERSION}")
+        win = VideoAnalyzer()
+        
+        # Center window on screen
+        screen = app.desktop().screenGeometry()
+        window = win.geometry()
+        win.move((screen.width() - window.width()) // 2, 
+                 (screen.height() - window.height()) // 2)
+        
+        win.show()
+        logger.info("Application startup complete")
+        
+        # Run application
+        exit_code = app.exec_()
+        logger.info(f"Application exiting with code {exit_code}")
+        return exit_code
+        
+    except Exception as e:
+        logger.critical(f"Failed to start application: {e}", exc_info=True)
+        
+        # Show startup error dialog
+        error_dialog = QtWidgets.QMessageBox()
+        error_dialog.setIcon(QtWidgets.QMessageBox.Critical)
+        error_dialog.setWindowTitle("Startup Error")
+        error_dialog.setText(f"Failed to start {APP_NAME}")
+        error_dialog.setInformativeText(str(e))
+        error_dialog.exec_()
+        
+        return 1
+    
+    finally:
+        logger.info("Application cleanup complete")
 
-    # Create and show the main window
-    win = VideoAnalyzer()
-    win.show()
-
-    sys.exit(app.exec_())
+if __name__ == '__main__':
+    sys.exit(main())
