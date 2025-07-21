@@ -1,0 +1,93 @@
+2025-07-21 18:42:06 | INFO     | BrightnessSorcerer:main:3312 | Starting Brightness Sorcerer v2.0.0
+2025-07-21 18:42:06 | CRITICAL | BrightnessSorcerer:main:3330 | Failed to start application: name 'OrderedDict' is not defined
+Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 3313, in main
+    win = VideoAnalyzer()
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 771, in __init__
+    self._init_vars()
+    ~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 794, in _init_vars
+    self.frame_cache = FrameCache(FRAME_CACHE_SIZE)
+                       ~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 464, in __init__
+    self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
+                                                ^^^^^^^^^^^
+NameError: name 'OrderedDict' is not defined
+2025-07-21 18:42:19 | INFO     | BrightnessSorcerer:main:3343 | Application cleanup complete
+2025-07-21 18:54:03 | INFO     | BrightnessSorcerer:main:3312 | Starting Brightness Sorcerer v2.0.0
+2025-07-21 18:54:03 | CRITICAL | BrightnessSorcerer:main:3330 | Failed to start application: name 'OrderedDict' is not defined
+Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 3313, in main
+    win = VideoAnalyzer()
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 771, in __init__
+    self._init_vars()
+    ~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 794, in _init_vars
+    self.frame_cache = FrameCache(FRAME_CACHE_SIZE)
+                       ~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 464, in __init__
+    self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
+                                                ^^^^^^^^^^^
+NameError: name 'OrderedDict' is not defined
+2025-07-21 18:55:23 | INFO     | BrightnessSorcerer:main:3312 | Starting Brightness Sorcerer v2.0.0
+2025-07-21 18:55:23 | CRITICAL | BrightnessSorcerer:main:3330 | Failed to start application: name 'OrderedDict' is not defined
+Traceback (most recent call last):
+  File "<string>", line 3313, in main
+  File "<string>", line 771, in __init__
+  File "<string>", line 794, in _init_vars
+  File "<string>", line 464, in __init__
+NameError: name 'OrderedDict' is not defined
+2025-07-21 18:55:38 | INFO     | BrightnessSorcerer:main:3343 | Application cleanup complete
+2025-07-21 18:55:39 | INFO     | BrightnessSorcerer:main:3343 | Application cleanup complete
+2025-07-21 18:57:31 | INFO     | BrightnessSorcerer:main:3313 | Starting Brightness Sorcerer v2.0.0
+2025-07-21 18:57:31 | INFO     | BrightnessSorcerer:_load_settings:900 | Loaded settings with 1 recent files
+2025-07-21 18:57:31 | CRITICAL | BrightnessSorcerer:main:3331 | Failed to start application: 'VideoAnalyzer' object has no attribute 'set_start_frame'
+Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 3314, in main
+    win = VideoAnalyzer()
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 774, in __init__
+    self._init_ui()
+    ~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 1002, in _init_ui
+    self._connect_signals()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 1738, in _connect_signals
+    self.set_start_btn.clicked.connect(self.set_start_frame)
+                                       ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'VideoAnalyzer' object has no attribute 'set_start_frame'. Did you mean: 'start_frame'?
+2025-07-21 19:00:17 | INFO     | BrightnessSorcerer:main:3371 | Starting Brightness Sorcerer v2.0.0
+2025-07-21 19:00:17 | INFO     | BrightnessSorcerer:_load_settings:900 | Loaded settings with 1 recent files
+2025-07-21 19:00:18 | INFO     | BrightnessSorcerer:main:3381 | Application startup complete
+2025-07-21 19:02:29 | INFO     | BrightnessSorcerer:main:3371 | Starting Brightness Sorcerer v2.0.0
+2025-07-21 19:02:29 | INFO     | BrightnessSorcerer:_load_settings:900 | Loaded settings with 1 recent files
+2025-07-21 19:02:29 | INFO     | BrightnessSorcerer:main:3381 | Application startup complete
+2025-07-21 19:02:34 | INFO     | BrightnessSorcerer:load_video:1909 | Loading video: Jasper Data Device 12.mp4
+2025-07-21 19:02:34 | INFO     | BrightnessSorcerer:load_video:1966 | Video loaded successfully: 1280x720, 1230 frames, 29.88 FPS, 41.17s
+2025-07-21 19:02:42 | CRITICAL | BrightnessSorcerer:handle_exception:3355 | Uncaught exception: Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 1761, in mouseReleaseEvent
+    return self.image_mouse_release(ev)
+           ~~~~~~~~~~~~~~~~~~~~~~~~^^^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 2833, in image_mouse_release
+    pt1_frame, pt2_frame = self._map_label_to_frame_rect(self.start_point, event.pos())
+    ^^^^^^^^^^^^^^^^^^^^
+TypeError: cannot unpack non-iterable NoneType object
+
+2025-07-21 19:03:02 | CRITICAL | BrightnessSorcerer:handle_exception:3355 | Uncaught exception: Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 1761, in mouseReleaseEvent
+    return self.image_mouse_release(ev)
+           ~~~~~~~~~~~~~~~~~~~~~~~~^^^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 2833, in image_mouse_release
+    pt1_frame, pt2_frame = self._map_label_to_frame_rect(self.start_point, event.pos())
+    ^^^^^^^^^^^^^^^^^^^^
+TypeError: cannot unpack non-iterable NoneType object
+
+2025-07-21 19:03:11 | INFO     | BrightnessSorcerer:main:3385 | Application exiting with code 0
+2025-07-21 19:03:11 | INFO     | BrightnessSorcerer:main:3402 | Application cleanup complete
+2025-07-21 19:08:56 | INFO     | BrightnessSorcerer:main:3383 | Starting Brightness Sorcerer v2.0.0
+2025-07-21 19:08:56 | INFO     | BrightnessSorcerer:_load_settings:900 | Loaded settings with 1 recent files
+2025-07-21 19:08:56 | INFO     | BrightnessSorcerer:main:3393 | Application startup complete
+2025-07-21 19:40:21 | INFO     | BrightnessSorcerer:main:3383 | Starting Brightness Sorcerer v2.0.0
+2025-07-21 19:40:21 | INFO     | BrightnessSorcerer:_load_settings:900 | Loaded settings with 1 recent files
+2025-07-21 19:40:21 | INFO     | BrightnessSorcerer:main:3393 | Application startup complete
+2025-07-21 19:40:29 | INFO     | BrightnessSorcerer:main:3397 | Application exiting with code 0
+2025-07-21 19:40:29 | INFO     | BrightnessSorcerer:main:3414 | Application cleanup complete

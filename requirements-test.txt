@@ -1,0 +1,27 @@
+# Testing dependencies for Brightness Sorcerer
+
+# Core testing framework
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-xvfb>=3.0.0  # For headless GUI testing
+pytest-qt>=4.2.0   # For PyQt5 testing
+pytest-mock>=3.10.0
+pytest-asyncio>=0.21.0
+
+# Test utilities
+hypothesis>=6.70.0  # Property-based testing
+factory-boy>=3.2.1  # Test data generation
+Pillow>=9.0.0      # Image testing utilities
+freezegun>=1.2.2   # Time/date mocking
+
+# Coverage and reporting
+coverage>=7.0.0
+pytest-html>=3.1.0
+pytest-json-report>=1.5.0
+
+# Performance testing
+pytest-benchmark>=4.0.0
+memory-profiler>=0.60.0
+
+# Mock video files for testing
+numpy>=1.21.0  # Already in main requirements but needed for test data generation

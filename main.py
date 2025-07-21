@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import traceback
+from collections import OrderedDict
 from typing import List, Optional, Tuple
 
 import cv2
@@ -2110,6 +2111,64 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if new_idx != self.current_frame_index:
             self.frame_slider.setValue(new_idx) # Let slider signal handle the update
 
+    def set_start_frame(self):
+        """Set the current frame as the analysis start frame."""
+        if not self.cap or not self.cap.isOpened() or self.total_frames == 0:
+            return
+        self.start_frame = self.current_frame_index
+        logger.info(f"Start frame set to: {self.start_frame}")
+        # Update any UI elements that display start frame
+        self.update_frame_label()
+
+    def set_end_frame(self):
+        """Set the current frame as the analysis end frame."""
+        if not self.cap or not self.cap.isOpened() or self.total_frames == 0:
+            return
+        self.end_frame = self.current_frame_index
+        logger.info(f"End frame set to: {self.end_frame}")
+        # Update any UI elements that display end frame
+        self.update_frame_label()
+
+    def auto_detect_range(self):
+        """Auto-detect frame ranges from audio beeps."""
+        if not self.cap or not self.cap.isOpened() or self.total_frames == 0:
+            return
+        
+        if not hasattr(self, 'video_path') or not self.video_path:
+            QtWidgets.QMessageBox.warning(self, "Warning", "No video file loaded")
+            return
+            
+        try:
+            logger.info("Starting auto-detection of frame ranges from audio...")
+            audio_analyzer = AudioAnalyzer()
+            beep_data = audio_analyzer.find_completion_beeps(self.video_path)
+            
+            if beep_data:
+                # Use the first detected beep as end frame
+                beep_time, frame_number = beep_data[0]
+                self.end_frame = frame_number
+                logger.info(f"Auto-detected end frame: {self.end_frame} (beep at {beep_time:.2f}s)")
+                
+                # Optionally seek to the detected frame
+                self.frame_slider.setValue(frame_number)
+                
+                QtWidgets.QMessageBox.information(
+                    self, "Auto-Detection Complete", 
+                    f"Detected beep at frame {frame_number} ({beep_time:.2f}s)\nEnd frame set automatically."
+                )
+            else:
+                QtWidgets.QMessageBox.information(
+                    self, "No Beeps Detected", 
+                    "No audio beeps were detected in the video.\nPlease set frames manually."
+                )
+                
+        except Exception as e:
+            logger.error(f"Auto-detection failed: {e}")
+            QtWidgets.QMessageBox.warning(
+                self, "Auto-Detection Failed", 
+                f"Failed to detect audio beeps: {str(e)}"
+            )
+
     def toggle_playback(self):
         """Toggle video playback on/off."""
         if not self.cap or not self.cap.isOpened() or self.total_frames == 0:
@@ -2771,35 +2830,47 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.image_label.unsetCursor() # Reset cursor
             
             # Map final points to frame coordinates
-            pt1_frame, pt2_frame = self._map_label_to_frame_rect(self.start_point, event.pos())
-            if pt1_frame and pt2_frame:
-                # Ensure valid rectangle (min size)
-                x1, y1 = pt1_frame
-                x2, y2 = pt2_frame
-                
-                # Ensure x1 < x2 and y1 < y2
-                x1, x2 = min(x1, x2), max(x1, x2)
-                y1, y2 = min(y1, y2), max(y1, y2)
+            if self.start_point is not None:
+                rect_mapping = self._map_label_to_frame_rect(self.start_point, event.pos())
+                if rect_mapping is not None:
+                    pt1_frame, pt2_frame = rect_mapping
+                    # Ensure valid rectangle (min size)
+                    x1, y1 = pt1_frame
+                    x2, y2 = pt2_frame
+                    
+                    # Ensure x1 < x2 and y1 < y2
+                    x1, x2 = min(x1, x2), max(x1, x2)
+                    y1, y2 = min(y1, y2), max(y1, y2)
 
-                # Apply minimum size constraint
-                if (x2 - x1) < MIN_ROI_SIZE[0]:
-                    x2 = x1 + MIN_ROI_SIZE[0]
-                if (y2 - y1) < MIN_ROI_SIZE[1]:
-                    y2 = y1 + MIN_ROI_SIZE[1]
+                    # Apply minimum size constraint
+                    if (x2 - x1) < MIN_ROI_SIZE[0]:
+                        x2 = x1 + MIN_ROI_SIZE[0]
+                    if (y2 - y1) < MIN_ROI_SIZE[1]:
+                        y2 = y1 + MIN_ROI_SIZE[1]
 
-                # Clamp to frame boundaries
-                x2 = min(x2, self.frame.shape[1])
-                y2 = min(y2, self.frame.shape[0])
-                x1 = max(0, x2 - (x2 - x1)) # Adjust x1 if x2 was clamped
-                y1 = max(0, y2 - (y2 - y1)) # Adjust y1 if y2 was clamped
+                    # Clamp to frame boundaries
+                    x2 = min(x2, self.frame.shape[1])
+                    y2 = min(y2, self.frame.shape[0])
+                    x1 = max(0, x2 - (x2 - x1)) # Adjust x1 if x2 was clamped
+                    y1 = max(0, y2 - (y2 - y1)) # Adjust y1 if y2 was clamped
 
-                if (x2 - x1) >= MIN_ROI_SIZE[0] and (y2 - y1) >= MIN_ROI_SIZE[1]:
-                    self.rects.append(((x1, y1), (x2, y2)))
-                    self.selected_rect_idx = len(self.rects) - 1 # Select the newly added ROI
-                    self.update_rect_list()
-                    self.show_frame()
+                    if (x2 - x1) >= MIN_ROI_SIZE[0] and (y2 - y1) >= MIN_ROI_SIZE[1]:
+                        self.rects.append(((x1, y1), (x2, y2)))
+                        self.selected_rect_idx = len(self.rects) - 1 # Select the newly added ROI
+                        self.update_rect_list()
+                        self.show_frame()
+                    else:
+                        QtWidgets.QMessageBox.warning(self, "Invalid ROI", "The drawn ROI is too small.")
                 else:
-                    QtWidgets.QMessageBox.warning(self, "Invalid ROI", "The drawn ROI is too small.")
+                    # Handle case where coordinate mapping failed
+                    logger.warning("Failed to map ROI coordinates from label to frame")
+                    QtWidgets.QMessageBox.warning(
+                        self, "ROI Creation Failed", 
+                        "Unable to create ROI at this location. Please ensure you're drawing within the video frame area."
+                    )
+            else:
+                # Handle case where start_point is None
+                logger.warning("ROI creation failed: start_point is None")
             self.start_point = None
             self.end_point = None
         elif self.moving or self.resizing:
@@ -2835,7 +2906,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _map_label_to_frame_point(self, label_point: QtCore.QPoint) -> Optional[Tuple[int, int]]:
         """Maps a point from QLabel coordinates to original frame coordinates."""
         pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect or not self.frame is None:
+        if not pixmap_rect or self.frame is None:
             return None
 
         # Adjust point relative to the pixmap within the label

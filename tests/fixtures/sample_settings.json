@@ -1,0 +1,15 @@
+{
+  "recent_files": [
+    "/path/to/test_video1.mp4",
+    "/path/to/test_video2.avi"
+  ],
+  "audio_enabled": true,
+  "audio_volume": 0.7,
+  "window_geometry": null,
+  "window_state": null,
+  "last_directory": "/tmp",
+  "auto_save_results": true,
+  "default_analysis_name": "test_analysis",
+  "frame_cache_size": 50,
+  "log_level": "INFO"
+}
