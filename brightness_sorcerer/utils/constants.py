@@ -60,7 +60,7 @@ AUDIO_BEEP_MIN_AMPLITUDE = 0.1  # normalized
 AUDIO_SAMPLE_RATE = 44100  # Hz
 
 # File and settings
-DEFAULT_SETTINGS_FILE = "brightness_analyzer_settings.json"
+DEFAULT_SETTINGS_FILE = "config/brightness_analyzer_settings.json"
 DEFAULT_LOG_FILE = "brightness_analyzer.log"
 
 # Performance settings
@@ -84,7 +84,7 @@ MORPHOLOGICAL_KERNEL_SIZE = 3
 MOUSE_RESIZE_HANDLE_SENSITIVITY = 10
 
 # File and backup settings
-BACKUP_SETTINGS_FILE = "brightness_analyzer_settings.backup.json"
+BACKUP_SETTINGS_FILE = "config/brightness_analyzer_settings.backup.json"
 
 # Video validation constants
 MIN_VIDEO_DURATION = 0.1  # seconds
