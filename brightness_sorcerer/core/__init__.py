@@ -13,6 +13,16 @@ from .exceptions import (
     ValidationError
 )
 
+# Import core business logic classes (will be created)
+try:
+    from .video_processor import VideoProcessor
+    from .brightness_analyzer import BrightnessAnalyzer
+    from .roi_manager import ROIManager
+    VIDEO_CLASSES_AVAILABLE = True
+except ImportError:
+    # Classes not yet created - will be available after refactoring
+    VIDEO_CLASSES_AVAILABLE = False
+
 __all__ = [
     'BrightnessSorcererError',
     'VideoLoadError',
@@ -20,3 +30,10 @@ __all__ = [
     'ConfigurationError',
     'ValidationError'
 ]
+
+if VIDEO_CLASSES_AVAILABLE:
+    __all__.extend([
+        'VideoProcessor',
+        'BrightnessAnalyzer',
+        'ROIManager'
+    ])

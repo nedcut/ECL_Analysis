@@ -77,6 +77,39 @@ PLOT_LINE_WIDTH = 1.5
 MIN_ROI_SIZE = (10, 10)  # minimum width, height in pixels
 MAX_ROI_SIZE_RATIO = 0.8  # maximum fraction of frame size
 
+# Window dimensions and UI layout
+WINDOW_MIN_WIDTH = 1200
+WINDOW_MIN_HEIGHT = 800
+WINDOW_DEFAULT_WIDTH = 1400  
+WINDOW_DEFAULT_HEIGHT = 900
+WINDOW_DEFAULT_X = 100
+WINDOW_DEFAULT_Y = 100
+VIDEO_DISPLAY_MIN_WIDTH = 640
+VIDEO_DISPLAY_MIN_HEIGHT = 360
+CONTROL_PANEL_MIN_WIDTH = 350
+CONTROL_PANEL_MAX_WIDTH = 450
+
+# Color space conversion constants  
+LAB_L_CHANNEL_SCALE = 100.0  # L* channel scale factor
+COLOR_CHANNEL_MAX = 255.0    # 8-bit color maximum
+CLAHE_CLIP_LIMIT = 2.0       # CLAHE clip limit for contrast enhancement
+CLAHE_TILE_SIZE = (8, 8)     # CLAHE tile grid size
+
+# Image processing constants
+BILATERAL_FILTER_D = 9       # Neighborhood diameter
+BILATERAL_SIGMA_COLOR = 75   # Color sigma
+BILATERAL_SIGMA_SPACE = 75   # Space sigma
+NOISE_REDUCTION_DEFAULT = 0.5
+GAUSSIAN_BLUR_SIGMA_DEFAULT = 0.5
+SIGNAL_AMPLIFICATION_DEFAULT = 1.0
+L_STAR_BOOST_DEFAULT = 1.0
+BLUE_BOOST_DEFAULT = 1.0
+
+# Statistical analysis constants
+TRIMMED_MEAN_LOWER_PERCENTILE = 0.1  # Remove bottom 10%
+TRIMMED_MEAN_UPPER_PERCENTILE = 0.9  # Remove top 10%
+MIN_PIXELS_FOR_ROBUST_STATS = 10     # Minimum pixels for robust statistics
+
 # Additional UI constants
 ROI_LABEL_FONT_SCALE = 0.8
 ROI_LABEL_THICKNESS = 2

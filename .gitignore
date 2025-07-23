@@ -24,6 +24,10 @@ wheels/
 brightness_analyzer_settings.json
 *.csv
 *.png
+brightness_analyzer.log
+htmlcov/
+.coverage
+.pytest_cache/
 
 # IDE
 .vscode/

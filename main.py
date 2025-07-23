@@ -15,8 +15,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 # Import from new modular structure
 from brightness_sorcerer.core.exceptions import (
-    BrightnessSorcererError, VideoLoadError, ValidationError
+    VideoLoadError, ValidationError
 )
+from brightness_sorcerer.core.brightness_analyzer import BrightnessAnalyzer
+from brightness_sorcerer.core.roi_manager import ROIManager
 from brightness_sorcerer.utils.constants import *
 from brightness_sorcerer.utils.validation import (
     validate_video_file, validate_frame_range,
@@ -39,7 +41,6 @@ except ImportError:
 
 try:
     import librosa
-    import soundfile as sf
     LIBROSA_AVAILABLE = True
 except ImportError:
     librosa = None
@@ -137,8 +138,11 @@ class LowLightEnhancer:
             
             return np.clip(enhanced_roi, 0, 255).astype(np.uint8)
             
-        except Exception as e:
+        except (cv2.error, ValueError, TypeError, MemoryError) as e:
             logger.warning(f"Low-light enhancement failed: {e}")
+            return roi_bgr
+        except Exception as e:
+            logger.error(f"Unexpected error in low-light enhancement: {e}")
             return roi_bgr
     
     def _apply_bilateral_filter(self, roi: np.ndarray, strength: float) -> np.ndarray:
@@ -313,8 +317,11 @@ class LowLightEnhancer:
             return (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median,
                    b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median)
             
-        except Exception as e:
+        except (cv2.error, ValueError, TypeError, IndexError, MemoryError) as e:
             logger.error(f"Error computing brightness statistics: {e}")
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        except Exception as e:
+            logger.critical(f"Unexpected error in brightness statistics: {e}")
             return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
 # Enhanced progress dialogs and UI components
@@ -366,7 +373,7 @@ class ProgressDialog(QtWidgets.QProgressDialog):
         self._start_time = time.time()
         self._last_update = 0
         
-    def update_progress(self, current: int, status_text: str = None, eta_text: str = None):
+    def update_progress(self, current: int, status_text: Optional[str] = None, eta_text: Optional[str] = None):
         """Update progress with optional status and ETA."""
         self.setValue(current)
         label_parts = []
@@ -375,10 +382,7 @@ class ProgressDialog(QtWidgets.QProgressDialog):
         if eta_text is not None:
             label_parts.append(str(eta_text))
         label = " | ".join(label_parts) if label_parts else ""
-        if label is None:
-            self.setLabelText("")
-        else:
-            self.setLabelText(label)
+        self.setLabelText(label)
         # Force GUI update every 100ms to prevent freezing
         current_time = time.time()
         if current_time - self._last_update > 0.1:
@@ -454,8 +458,12 @@ class StatusBar(QtWidgets.QStatusBar):
             self.memory_label.setText(f"Memory: {memory_mb:.0f} MB")
         except ImportError:
             self.memory_label.setText("Memory: N/A")
-        except Exception as e:
+        except (OSError, AttributeError, ValueError) as e:
             logger.debug(f"Could not update memory usage: {e}")
+            self.memory_label.setText("Memory: N/A")
+        except Exception as e:
+            logger.warning(f"Unexpected error updating memory usage: {e}")
+            self.memory_label.setText("Memory: N/A")
 
 class FrameCache:
     """Efficient frame caching system for better performance."""
@@ -610,8 +618,14 @@ class AudioAnalyzer:
             audio_data, sr = librosa.load(video_path, sr=self.sample_rate, mono=True)
             logger.info(f"Extracted audio: {len(audio_data)/sr:.2f} seconds at {sr} Hz")
             return audio_data, sr
+        except (FileNotFoundError, OSError) as e:
+            logger.error(f"Failed to access video file for audio extraction: {e}")
+            return None, None
+        except (ValueError, RuntimeError) as e:
+            logger.error(f"Failed to process audio from video: {e}")
+            return None, None
         except Exception as e:
-            logger.error(f"Failed to extract audio from video: {e}")
+            logger.critical(f"Unexpected error extracting audio from video: {e}")
             return None, None
     
     def detect_beeps(self, audio_data: np.ndarray, sample_rate: float, 
@@ -699,8 +713,14 @@ class AudioAnalyzer:
             logger.info(f"Detected {len(beep_times)} beeps at: {beep_times}")
             return beep_times
             
+        except (ValueError, IndexError, TypeError) as e:
+            logger.error(f"Failed to process audio data for beep detection: {e}")
+            return []
+        except (RuntimeError, MemoryError) as e:
+            logger.error(f"Failed to detect beeps due to processing error: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Failed to detect beeps: {e}")
+            logger.critical(f"Unexpected error in beep detection: {e}")
             return []
     
     def find_completion_beeps(self, video_path: str, expected_run_duration: float = 0.0) -> List[Tuple[float, int]]:
@@ -759,8 +779,14 @@ class AudioAnalyzer:
             
             return results
             
+        except (cv2.error, OSError) as e:
+            logger.error(f"Failed to access video file for beep detection: {e}")
+            return []
+        except (ValueError, TypeError) as e:
+            logger.error(f"Failed to process video data for beep detection: {e}")
+            return []
         except Exception as e:
-            logger.error(f"Failed to process video for beep detection: {e}")
+            logger.critical(f"Unexpected error in beep detection processing: {e}")
             return []
 
 class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better menu support
@@ -784,6 +810,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _init_vars(self):
         """Initialize instance variables."""
+        # Video processing (refactored architecture) - Initialize first
+        try:
+            from brightness_sorcerer.core.video_processor import VideoProcessor
+            self.video_processor = VideoProcessor(cache_size=FRAME_CACHE_SIZE)
+            self._use_video_processor = True
+            logger.debug("Using refactored VideoProcessor")
+        except ImportError:
+            # Fallback to old architecture during transition
+            self._use_video_processor = False
+            logger.debug("Using legacy video processing")
+        
         self.video_path = None
         self.frame = None
         self.current_frame_index = 0
@@ -791,8 +828,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.cap = None
         self.out_paths = []
         
-        # Frame caching
-        self.frame_cache = FrameCache(FRAME_CACHE_SIZE)
+        # Frame caching (only for legacy mode)
+        if not self._use_video_processor:
+            self.frame_cache = FrameCache(FRAME_CACHE_SIZE)
+        else:
+            self.frame_cache = None  # VideoProcessor has its own caching
         
         # Audio system
         self.audio_manager = AudioManager()
@@ -801,12 +841,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Low-light enhancement system
         self.low_light_enhancer = LowLightEnhancer()
         
+        # Brightness analysis engine
+        self.brightness_analyzer = BrightnessAnalyzer(
+            analysis_method='enhanced',
+            morphological_cleanup=True,
+            gaussian_blur_sigma=0.0
+        )
+        
+        # ROI management system
+        self.roi_manager = ROIManager()
+        
         # Recent files
         self.recent_files = []
         
-        # ROI management
-        self.rects = []
-        self.selected_rect_idx = None
+        # Legacy ROI drawing state (for UI compatibility)
         self.drawing = False
         self.moving = False
         self.resizing = False
@@ -830,8 +878,37 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.manual_threshold = DEFAULT_MANUAL_THRESHOLD
         self.background_roi_idx = None       # index into self.rects
         
+        # Enhanced manual threshold controls (Research-grade)
+        self.use_global_threshold = True     # Toggle between global and per-ROI thresholds
+        self.roi_thresholds = {}             # Dict[roi_idx, float] - per-ROI custom thresholds
+        self.threshold_profiles = {          # Predefined threshold configurations
+            'conservative': {'global': 8.0, 'description': 'High threshold for noise reduction'},
+            'standard': {'global': 5.0, 'description': 'Balanced threshold for general use'},
+            'sensitive': {'global': 2.0, 'description': 'Low threshold for subtle changes'},
+            'custom': {'global': 5.0, 'description': 'User-defined custom settings'}
+        }
+        self.active_threshold_profile = 'standard'
+        
+        # Reference mask system (Professional-grade)
+        self.reference_frame_idx = None      # Frame index used for reference masks
+        self.reference_masks = {}            # Dict[roi_idx, np.ndarray] - binary masks per ROI
+        self.use_reference_masks = False     # Toggle reference mask mode
+        self.mask_generation_method = 'threshold'  # 'threshold', 'manual', 'adaptive'
+        self.reference_mask_metadata = {}   # Dict[roi_idx, dict] - mask quality metrics
+        
+        # Emergency override system (Research-critical)
+        self.emergency_manual_mode = False   # Bypass all automation
+        self.force_manual_thresholds = False # Ignore auto-detection
+        self.enable_expert_mode = False      # Show advanced controls
+        
+        # Analysis parameter overrides
+        self.brightness_calc_method = 'standard'  # 'standard', 'enhanced', 'custom'
+        self.statistical_method = 'mean'     # 'mean', 'median', 'trimmed_mean'
+        self.background_subtraction_method = 'roi'  # 'roi', 'manual', 'none'
+        
         # Pixel visualization
         self.show_pixel_mask = False
+        self.show_reference_mask = False     # Show reference mask overlay
         
         # Video playback
         self.is_playing = False
@@ -839,8 +916,65 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.playback_fps = 30.0  # Default playback FPS
         self.playback_speed = 1.0  # Playback speed multiplier
         
-        # Locked ROI for best-fit analysis
+        # Locked ROI for best-fit analysis (migrate to ROI manager)
         self.locked_roi = None
+
+    # === ROI Manager Compatibility Properties ===
+    @property
+    def rects(self):
+        """Compatibility property for ROI rectangles."""
+        return self.roi_manager.rects
+    
+    @rects.setter
+    def rects(self, value):
+        """Compatibility setter for ROI rectangles."""
+        self.roi_manager.rects = value
+    
+    @property
+    def selected_rect_idx(self):
+        """Compatibility property for selected ROI index."""
+        return self.roi_manager.selected_rect_idx
+    
+    @selected_rect_idx.setter
+    def selected_rect_idx(self, value):
+        """Compatibility setter for selected ROI index."""
+        if value is not None and self.roi_manager.is_valid_roi_index(value):
+            self.roi_manager.select_roi(value)
+        elif value is None:
+            self.roi_manager.selected_rect_idx = None
+    
+    @property
+    def background_roi_idx(self):
+        """Compatibility property for background ROI index."""
+        return self.roi_manager.background_roi_idx
+    
+    @background_roi_idx.setter
+    def background_roi_idx(self, value):
+        """Compatibility setter for background ROI index."""
+        if value is not None and self.roi_manager.is_valid_roi_index(value):
+            self.roi_manager.set_background_roi(value)
+        elif value is None:
+            self.roi_manager.background_roi_idx = None
+    
+    @property
+    def reference_masks(self):
+        """Compatibility property for reference masks."""
+        return self.roi_manager.reference_masks
+    
+    @reference_masks.setter
+    def reference_masks(self, value):
+        """Compatibility setter for reference masks."""
+        self.roi_manager.reference_masks = value
+    
+    @property
+    def reference_frame_idx(self):
+        """Compatibility property for reference frame index."""
+        return self.roi_manager.reference_frame_idx
+    
+    @reference_frame_idx.setter
+    def reference_frame_idx(self, value):
+        """Compatibility setter for reference frame index."""
+        self.roi_manager.reference_frame_idx = value
 
     def _load_settings(self):
         """Load application settings from file with robust error handling."""
@@ -924,12 +1058,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         except Exception as e:
             logger.warning(f"Could not apply audio settings: {e}")
         
-        # Update frame cache size if changed
-        try:
-            cache_size = self.settings.get('frame_cache_size', FRAME_CACHE_SIZE)
-            self.frame_cache = FrameCache(cache_size)
-        except Exception as e:
-            logger.warning(f"Could not update frame cache size: {e}")
+        # Update frame cache size if changed (only for legacy mode)
+        if not self._use_video_processor:
+            try:
+                cache_size = self.settings.get('frame_cache_size', FRAME_CACHE_SIZE)
+                self.frame_cache = FrameCache(cache_size)
+            except Exception as e:
+                logger.warning(f"Could not update frame cache size: {e}")
 
     def _save_settings(self):
         """Save application settings to file with error handling."""
@@ -988,20 +1123,28 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _init_ui(self):
         """Set up the main UI layout and widgets."""
         self.setWindowTitle('Brightness Sorcerer v2.0')
-        self.setGeometry(100, 100, 1400, 900)  # Larger default size
+        self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)  # Minimum size to prevent UI overflow
+        self.setGeometry(WINDOW_DEFAULT_X, WINDOW_DEFAULT_Y, WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT)  # Default size
         self.setAcceptDrops(True)
         self._apply_stylesheet()
 
-        # Create central widget and main layout
+        # Create central widget with responsive splitter layout
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
-        self.main_layout = QtWidgets.QHBoxLayout(central_widget)
+        
+        # Main horizontal splitter for responsive layout
+        main_layout = QtWidgets.QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        main_layout.addWidget(self.main_splitter)
         
         self._create_layouts()
         self._create_widgets()
         self._connect_signals()
         self._setup_shortcuts()
         self._update_widget_states()
+        self._update_ref_mask_status()  # Initialize reference mask status display
 
     def _create_menus(self):
         """Create application menus."""
@@ -1464,183 +1607,282 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         )
 
     def _create_layouts(self):
-        """Create the main horizontal and vertical layouts."""
-        self.left_layout = QtWidgets.QVBoxLayout()
-        self.right_layout = QtWidgets.QVBoxLayout()
-        self.main_layout.addLayout(self.left_layout, stretch=3)
-        self.main_layout.addLayout(self.right_layout, stretch=1)
+        """Create the responsive video and control panels."""
+        # Left panel: Video display and basic controls
+        self.video_panel = QtWidgets.QWidget()
+        self.left_layout = QtWidgets.QVBoxLayout(self.video_panel)
+        self.left_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Right panel: Control tabs
+        self.control_panel = QtWidgets.QWidget()
+        self.control_panel.setMinimumWidth(CONTROL_PANEL_MIN_WIDTH)  # Prevent controls from becoming too narrow
+        self.control_panel.setMaximumWidth(CONTROL_PANEL_MAX_WIDTH)  # Prevent controls from taking too much space
+        self.right_layout = QtWidgets.QVBoxLayout(self.control_panel)
+        self.right_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Add panels to splitter with appropriate sizing
+        self.main_splitter.addWidget(self.video_panel)
+        self.main_splitter.addWidget(self.control_panel)
+        self.main_splitter.setSizes([1000, 350])  # Initial sizes
+        self.main_splitter.setStretchFactor(0, 1)  # Video panel gets extra space
+
+    def _create_advanced_controls_hidden(self):
+        """Create hidden/minimal advanced controls for compatibility with existing code."""
+        # Create minimal checkbox for enhanced preview (hidden/disabled state)
+        self.show_enhanced_preview_cb = QtWidgets.QCheckBox("Enhanced Preview")
+        self.show_enhanced_preview_cb.setChecked(False)
+        self.show_enhanced_preview_cb.setVisible(False)  # Hidden by default in new UI
+        
+        # These can be added to advanced settings panel later if needed
+        # For now, they maintain compatibility without cluttering the UI
 
     def _create_widgets(self):
         """Create all the widgets and add them to layouts."""
-        # --- Left Layout Widgets ---
-        self.title_label = QtWidgets.QLabel("Brightness Sorcerer", self)
-        self.title_label.setObjectName("titleLabel")
-        self.left_layout.addWidget(self.title_label)
+        # === VIDEO PANEL (Left Side) ===
+        self._create_video_panel_widgets()
+        
+        # === CONTROL PANEL (Right Side) ===
+        self._create_control_panel_widgets()
 
-        # File info label
+    def _create_video_panel_widgets(self):
+        """Create widgets for the video display panel."""
+        # Header with title and file info
+        header_layout = QtWidgets.QHBoxLayout()
+        self.title_label = QtWidgets.QLabel("Brightness Sorcerer v2.0")
+        self.title_label.setObjectName("titleLabel")
+        self.title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #5a9bd5;")
+        header_layout.addWidget(self.title_label)
+        
+        header_layout.addStretch()
+        
+        # File info (cleaner, right-aligned)
         self.file_info_label = QtWidgets.QLabel("No video loaded")
         self.file_info_label.setObjectName("statusLabel")
-        self.left_layout.addWidget(self.file_info_label)
+        self.file_info_label.setStyleSheet("color: #888888; font-style: italic;")
+        header_layout.addWidget(self.file_info_label)
+        
+        self.left_layout.addLayout(header_layout)
 
-        # Open-file button
-        self.open_btn = QtWidgets.QPushButton("Open Video… (Ctrl+O)")    
+        # Open button (more prominent)
+        self.open_btn = QtWidgets.QPushButton("📁 Open Video (Ctrl+O)")    
         self.open_btn.setToolTip("Choose a video file from disk")
+        self.open_btn.setMinimumHeight(35)
         self.left_layout.addWidget(self.open_btn)
 
+        # Video display area
         self.image_label = QtWidgets.QLabel(self)
         self.image_label.setObjectName("imageLabel")
         self.image_label.setAlignment(QtCore.Qt.AlignCenter)
         self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
         self.image_label.setText("Drag & Drop Video File Here")
+        self.image_label.setMinimumSize(VIDEO_DISPLAY_MIN_WIDTH, VIDEO_DISPLAY_MIN_HEIGHT)  # Ensure minimum video display size
         self.left_layout.addWidget(self.image_label, stretch=1)
 
-        # Video Controls Groupbox for better organization
+        # Compact video controls  
         self.video_controls_groupbox = QtWidgets.QGroupBox("Video Controls")
         controls_layout = QtWidgets.QVBoxLayout()
         
-        # Timeline and Frame Info
+        # Timeline slider and frame info (compact)
         timeline_layout = QtWidgets.QHBoxLayout()
         self.frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.frame_slider.setToolTip("Drag to navigate frames or click to seek")
+        self.frame_slider.setToolTip("Navigate video frames")
         timeline_layout.addWidget(self.frame_slider)
         
-        # Frame info and input
-        frame_info_layout = QtWidgets.QVBoxLayout()
-        self.frame_label = QtWidgets.QLabel("Frame: 0 / 0")
-        self.frame_label.setMinimumWidth(100)
+        # Compact frame info
+        self.frame_label = QtWidgets.QLabel("0/0")
+        self.frame_label.setMinimumWidth(60)
         self.frame_label.setAlignment(QtCore.Qt.AlignCenter)
-        frame_info_layout.addWidget(self.frame_label)
+        timeline_layout.addWidget(self.frame_label)
         
         self.frame_spinbox = QtWidgets.QSpinBox()
+        self.frame_spinbox.setMaximumWidth(80)
         self.frame_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
-        self.frame_spinbox.setToolTip("Enter frame number directly")
-        self.frame_spinbox.setAlignment(QtCore.Qt.AlignCenter)
-        frame_info_layout.addWidget(self.frame_spinbox)
-        timeline_layout.addLayout(frame_info_layout)
-        
+        timeline_layout.addWidget(self.frame_spinbox)
         controls_layout.addLayout(timeline_layout)
         
-        # Playback Controls Row
-        playback_layout = QtWidgets.QHBoxLayout()
+        # Compact control buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        self.prev_frame_btn = QtWidgets.QPushButton("◀")
+        self.prev_frame_btn.setFixedSize(30, 25)
+        self.next_frame_btn = QtWidgets.QPushButton("▶")
+        self.next_frame_btn.setFixedSize(30, 25)
+        self.play_pause_btn = QtWidgets.QPushButton("▶")
+        self.play_pause_btn.setFixedSize(40, 25)
         
-        # Play/Pause button
-        self.play_pause_btn = QtWidgets.QPushButton("▶ Play")
-        self.play_pause_btn.setToolTip("Play/Pause video (Spacebar)")
-        self.play_pause_btn.setMinimumWidth(80)
-        playback_layout.addWidget(self.play_pause_btn)
+        self.jump_back_btn = QtWidgets.QPushButton(f"◀◀")
+        self.jump_back_btn.setFixedSize(35, 25)
+        self.jump_forward_btn = QtWidgets.QPushButton(f"▶▶")
+        self.jump_forward_btn.setFixedSize(35, 25)
+        
+        button_layout.addWidget(self.prev_frame_btn)
+        button_layout.addWidget(self.play_pause_btn)
+        button_layout.addWidget(self.next_frame_btn)
+        button_layout.addWidget(QtWidgets.QLabel("|"))
+        button_layout.addWidget(self.jump_back_btn)
+        button_layout.addWidget(self.jump_forward_btn)
         
         # Speed control
-        speed_label = QtWidgets.QLabel("Speed:")
-        playback_layout.addWidget(speed_label)
         self.speed_combo = QtWidgets.QComboBox()
         self.speed_combo.addItems(["0.25x", "0.5x", "1x", "2x", "4x"])
         self.speed_combo.setCurrentText("1x")
-        self.speed_combo.setToolTip("Playback speed")
-        playback_layout.addWidget(self.speed_combo)
+        self.speed_combo.setMaximumWidth(60)
+        button_layout.addWidget(self.speed_combo)
+        button_layout.addStretch()
         
-        playback_layout.addStretch()
-        controls_layout.addLayout(playback_layout)
+        controls_layout.addLayout(button_layout)
         
-        # Navigation Controls Row  
-        navigation_layout = QtWidgets.QHBoxLayout()
-        
-        self.prev_frame_btn = QtWidgets.QPushButton("◀")
-        self.prev_frame_btn.setToolTip("Previous Frame (Left Arrow)")
-        self.prev_frame_btn.setFixedSize(35, 30)
-        navigation_layout.addWidget(self.prev_frame_btn)
-        
-        self.next_frame_btn = QtWidgets.QPushButton("▶")
-        self.next_frame_btn.setToolTip("Next Frame (Right Arrow)")
-        self.next_frame_btn.setFixedSize(35, 30)
-        navigation_layout.addWidget(self.next_frame_btn)
-        
-        navigation_layout.addWidget(QtWidgets.QLabel("|"))  # Separator
-        
-        self.jump_back_btn = QtWidgets.QPushButton(f"◀◀ {JUMP_FRAMES}")
-        self.jump_back_btn.setToolTip(f"Jump back {JUMP_FRAMES} frames (Page Up)")
-        navigation_layout.addWidget(self.jump_back_btn)
-        
-        self.jump_forward_btn = QtWidgets.QPushButton(f"{JUMP_FRAMES} ▶▶")
-        self.jump_forward_btn.setToolTip(f"Jump forward {JUMP_FRAMES} frames (Page Down)")
-        navigation_layout.addWidget(self.jump_forward_btn)
-        
-        navigation_layout.addStretch()
-        controls_layout.addLayout(navigation_layout)
-        
-        # Analysis Controls Row
-        analysis_layout = QtWidgets.QHBoxLayout()
-        
+        # Range controls (compact)
+        range_layout = QtWidgets.QHBoxLayout()
         self.set_start_btn = QtWidgets.QPushButton("Set Start")
-        self.set_start_btn.setToolTip("Set current frame as analysis start")
-        analysis_layout.addWidget(self.set_start_btn)
-        
         self.set_end_btn = QtWidgets.QPushButton("Set End")
-        self.set_end_btn.setToolTip("Set current frame as analysis end")
-        analysis_layout.addWidget(self.set_end_btn)
+        self.auto_detect_btn = QtWidgets.QPushButton("Auto-Detect")
         
-        analysis_layout.addWidget(QtWidgets.QLabel("|"))  # Separator
-        
-        self.auto_detect_btn = QtWidgets.QPushButton("Detect from Audio")
-        self.auto_detect_btn.setToolTip("Detect completion beeps in audio and calculate frame ranges (Ctrl+D)")
-        analysis_layout.addWidget(self.auto_detect_btn)
-        
-        analysis_layout.addStretch()
-        controls_layout.addLayout(analysis_layout)
+        range_layout.addWidget(self.set_start_btn)
+        range_layout.addWidget(self.set_end_btn)
+        range_layout.addWidget(self.auto_detect_btn)
+        controls_layout.addLayout(range_layout)
         
         self.video_controls_groupbox.setLayout(controls_layout)
         self.left_layout.addWidget(self.video_controls_groupbox)
-
-        # Analysis Name Layout
+        
+        # Analysis name and action button
+        action_layout = QtWidgets.QVBoxLayout()
+        
         name_layout = QtWidgets.QHBoxLayout()
         name_layout.addWidget(QtWidgets.QLabel("Analysis Name:"))
         self.analysis_name_input = QtWidgets.QLineEdit()
         self.analysis_name_input.setPlaceholderText("DefaultAnalysis")
         name_layout.addWidget(self.analysis_name_input)
-        self.left_layout.addLayout(name_layout)
-
-        # Action Buttons Layout
-        action_layout = QtWidgets.QHBoxLayout()
-        self.analyze_btn = QtWidgets.QPushButton('Analyze Brightness (F5)')
+        action_layout.addLayout(name_layout)
+        
+        # Main analyze button (prominent)
+        self.analyze_btn = QtWidgets.QPushButton('🔍 Analyze Brightness (F5)')
         self.analyze_btn.setToolTip("Run brightness analysis on the selected frame range and ROIs")
+        self.analyze_btn.setMinimumHeight(40)
+        self.analyze_btn.setStyleSheet("QPushButton { background-color: #5a9bd5; color: white; font-weight: bold; }")
         action_layout.addWidget(self.analyze_btn)
+        
         self.left_layout.addLayout(action_layout)
 
-        # --- Right Layout Widgets ---
-        # Video info group
-        self.video_info_groupbox = QtWidgets.QGroupBox("Video Information")
+    def _create_control_panel_widgets(self):
+        """Create widgets for the control panel (simplified for now)."""
+        # Create a scrollable widget for all controls
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        
+        scroll_widget = QtWidgets.QWidget()
+        scroll_layout = QtWidgets.QVBoxLayout(scroll_widget)
+        
+        # === Video Information (cleaned up) ===
+        self.video_info_groupbox = QtWidgets.QGroupBox("📹 Video Info")
         video_info_layout = QtWidgets.QVBoxLayout()
         self.video_info_label = QtWidgets.QLabel("No video loaded")
         self.video_info_label.setWordWrap(True)
+        self.video_info_label.setStyleSheet("font-size: 11px; padding: 5px;")
         video_info_layout.addWidget(self.video_info_label)
         self.video_info_groupbox.setLayout(video_info_layout)
-        self.right_layout.addWidget(self.video_info_groupbox)
-
-        # Brightness Display
-        self.brightness_groupbox = QtWidgets.QGroupBox("ROI Brightness: Mean±Median (Current Frame)")
-        brightness_groupbox_layout = QtWidgets.QVBoxLayout()
+        scroll_layout.addWidget(self.video_info_groupbox)
+        
+        # === Current Frame Brightness (simplified) ===
+        self.brightness_groupbox = QtWidgets.QGroupBox("📊 Current Frame")
+        brightness_layout = QtWidgets.QVBoxLayout()
         self.brightness_display_label = QtWidgets.QLabel("N/A")
         self.brightness_display_label.setObjectName("brightnessDisplayLabel")
-        brightness_groupbox_layout.addWidget(self.brightness_display_label)
-        self.brightness_groupbox.setLayout(brightness_groupbox_layout)
-        self.right_layout.addWidget(self.brightness_groupbox)
-
-        # -- Run Duration Settings
-        self.run_duration_groupbox = QtWidgets.QGroupBox("Run Duration (Optional)")
-        run_duration_layout = QtWidgets.QVBoxLayout()
+        self.brightness_display_label.setWordWrap(True)
+        self.brightness_display_label.setStyleSheet("font-size: 11px; padding: 5px;")
+        brightness_layout.addWidget(self.brightness_display_label)
+        self.brightness_groupbox.setLayout(brightness_layout)
+        scroll_layout.addWidget(self.brightness_groupbox)
         
-        duration_input_layout = QtWidgets.QHBoxLayout()
-        duration_input_layout.addWidget(QtWidgets.QLabel("Expected Duration (sec):"))
+        # === ROI Controls (simplified) ===
+        self.rect_groupbox = QtWidgets.QGroupBox("🎯 ROI Controls")
+        rect_layout = QtWidgets.QVBoxLayout()
+        
+        # ROI list (smaller)
+        self.rect_list = QtWidgets.QListWidget()
+        self.rect_list.setMaximumHeight(100)
+        self.rect_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        rect_layout.addWidget(self.rect_list)
+        
+        # ROI buttons (compact)
+        roi_btn_layout1 = QtWidgets.QHBoxLayout()
+        self.add_rect_btn = QtWidgets.QPushButton("Add")
+        self.add_rect_btn.setCheckable(True)
+        self.del_rect_btn = QtWidgets.QPushButton("Delete")
+        roi_btn_layout1.addWidget(self.add_rect_btn)
+        roi_btn_layout1.addWidget(self.del_rect_btn)
+        rect_layout.addLayout(roi_btn_layout1)
+        
+        roi_btn_layout2 = QtWidgets.QHBoxLayout()
+        self.clear_rect_btn = QtWidgets.QPushButton("Clear All")
+        self.find_lock_btn = QtWidgets.QPushButton("Find Best")
+        roi_btn_layout2.addWidget(self.clear_rect_btn)
+        roi_btn_layout2.addWidget(self.find_lock_btn)
+        rect_layout.addLayout(roi_btn_layout2)
+        
+        self.rect_groupbox.setLayout(rect_layout)
+        scroll_layout.addWidget(self.rect_groupbox)
+        
+        # === Basic Settings ===
+        self.threshold_groupbox = QtWidgets.QGroupBox("⚙️ Settings")
+        settings_layout = QtWidgets.QVBoxLayout()
+        
+        # Manual threshold (simplified)
+        threshold_layout = QtWidgets.QHBoxLayout()
+        threshold_layout.addWidget(QtWidgets.QLabel("Threshold:"))
+        self.threshold_spin = QtWidgets.QDoubleSpinBox()
+        self.threshold_spin.setDecimals(1)
+        self.threshold_spin.setRange(0.0, 100.0)
+        self.threshold_spin.setValue(self.manual_threshold)
+        self.threshold_spin.setMaximumWidth(80)
+        threshold_layout.addWidget(self.threshold_spin)
+        settings_layout.addLayout(threshold_layout)
+        
+        # Background ROI button
+        self.set_bg_btn = QtWidgets.QPushButton("Set Background ROI")
+        settings_layout.addWidget(self.set_bg_btn)
+        
+        # Run duration (simplified)
+        duration_layout = QtWidgets.QHBoxLayout()
+        duration_layout.addWidget(QtWidgets.QLabel("Duration (s):"))
         self.run_duration_spin = QtWidgets.QDoubleSpinBox()
         self.run_duration_spin.setDecimals(1)
-        self.run_duration_spin.setRange(0.0, 3600.0)  # 0 to 1 hour
-        self.run_duration_spin.setSingleStep(0.5)
-        self.run_duration_spin.setValue(0.0)  # 0 = disabled
-        self.run_duration_spin.setToolTip("Expected run duration for validation (0 = disabled)")
-        duration_input_layout.addWidget(self.run_duration_spin)
-        run_duration_layout.addLayout(duration_input_layout)
+        self.run_duration_spin.setRange(0.0, 3600.0)
+        self.run_duration_spin.setValue(0.0)
+        self.run_duration_spin.setMaximumWidth(80)
+        duration_layout.addWidget(self.run_duration_spin)
+        settings_layout.addLayout(duration_layout)
         
-        self.run_duration_groupbox.setLayout(run_duration_layout)
-        self.right_layout.addWidget(self.run_duration_groupbox)
+        self.threshold_groupbox.setLayout(settings_layout)
+        scroll_layout.addWidget(self.threshold_groupbox)
+        
+        # === Status and Results ===
+        results_groupbox = QtWidgets.QGroupBox("📋 Status")
+        results_layout = QtWidgets.QVBoxLayout()
+        
+        self.cache_status_label = QtWidgets.QLabel("Cache: 0 frames")
+        self.cache_status_label.setStyleSheet("font-size: 10px; color: #888888;")
+        results_layout.addWidget(self.cache_status_label)
+        
+        self.results_label = QtWidgets.QLabel("Load a video to begin analysis.")
+        self.results_label.setWordWrap(True)
+        self.results_label.setStyleSheet("font-size: 11px; padding: 5px;")
+        results_layout.addWidget(self.results_label)
+        
+        results_groupbox.setLayout(results_layout)
+        scroll_layout.addWidget(results_groupbox)
+        
+        # Add stretch to push everything to top
+        scroll_layout.addStretch()
+        
+        # Set scroll widget and add to layout
+        scroll_area.setWidget(scroll_widget)
+        self.right_layout.addWidget(scroll_area)
+        
+        # Create simplified hidden advanced controls (for compatibility)
+        self._create_advanced_controls_hidden()
+
 
         # -- Threshold groupbox
         self.threshold_groupbox = QtWidgets.QGroupBox("Threshold Settings")
@@ -1671,6 +1913,107 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.threshold_groupbox.setLayout(th_layout)
         self.right_layout.addWidget(self.threshold_groupbox)
 
+        # Professional Reference Mask Controls
+        self.ref_mask_groupbox = QtWidgets.QGroupBox("Reference Mask System (Professional)")
+        ref_mask_layout = QtWidgets.QVBoxLayout()
+        
+        # Reference frame controls
+        ref_frame_layout = QtWidgets.QHBoxLayout()
+        self.set_ref_frame_btn = QtWidgets.QPushButton("Set Reference Frame")
+        self.set_ref_frame_btn.setToolTip("Use current frame to generate reference masks for consistent analysis")
+        ref_frame_layout.addWidget(self.set_ref_frame_btn)
+        
+        self.clear_ref_masks_btn = QtWidgets.QPushButton("Clear")
+        self.clear_ref_masks_btn.setToolTip("Clear all reference masks")
+        ref_frame_layout.addWidget(self.clear_ref_masks_btn)
+        ref_mask_layout.addLayout(ref_frame_layout)
+        
+        # Reference mask status display
+        self.ref_mask_status_label = QtWidgets.QLabel("No reference frame set")
+        self.ref_mask_status_label.setStyleSheet("color: #888888; font-style: italic; padding: 2px;")
+        ref_mask_layout.addWidget(self.ref_mask_status_label)
+        
+        # Reference mask mode toggle
+        self.use_ref_masks_checkbox = QtWidgets.QCheckBox("Use Reference Mask Analysis")
+        self.use_ref_masks_checkbox.setToolTip("Apply reference masks for consistent pixel analysis across all frames")
+        self.use_ref_masks_checkbox.setChecked(self.use_reference_masks)
+        ref_mask_layout.addWidget(self.use_ref_masks_checkbox)
+        
+        # Mask generation method selection
+        mask_method_layout = QtWidgets.QHBoxLayout()
+        mask_method_layout.addWidget(QtWidgets.QLabel("Method:"))
+        self.mask_method_combo = QtWidgets.QComboBox()
+        self.mask_method_combo.addItems(['threshold', 'adaptive'])
+        self.mask_method_combo.setCurrentText(self.mask_generation_method)
+        self.mask_method_combo.setToolTip("threshold: Simple threshold-based masking\nadaptive: Otsu-based adaptive masking")
+        mask_method_layout.addWidget(self.mask_method_combo)
+        ref_mask_layout.addLayout(mask_method_layout)
+        
+        self.ref_mask_groupbox.setLayout(ref_mask_layout)
+        self.right_layout.addWidget(self.ref_mask_groupbox)
+
+        # Advanced Manual Controls (Expert Mode)
+        self.expert_groupbox = QtWidgets.QGroupBox("Expert Controls")
+        expert_layout = QtWidgets.QVBoxLayout()
+        
+        # Expert mode toggle
+        self.expert_mode_checkbox = QtWidgets.QCheckBox("Enable Expert Mode")
+        self.expert_mode_checkbox.setToolTip("Show advanced manual override controls for research-grade precision")
+        self.expert_mode_checkbox.setChecked(self.enable_expert_mode)
+        expert_layout.addWidget(self.expert_mode_checkbox)
+        
+        # Emergency manual mode controls (initially hidden)
+        self.emergency_controls_widget = QtWidgets.QWidget()
+        emergency_layout = QtWidgets.QVBoxLayout(self.emergency_controls_widget)
+        emergency_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Emergency override toggles
+        self.emergency_manual_checkbox = QtWidgets.QCheckBox("Emergency Manual Mode")
+        self.emergency_manual_checkbox.setToolTip("Bypass ALL automation - pure manual control")
+        self.emergency_manual_checkbox.setChecked(self.emergency_manual_mode)
+        self.emergency_manual_checkbox.setStyleSheet("QCheckBox { color: #ff6666; font-weight: bold; }")
+        emergency_layout.addWidget(self.emergency_manual_checkbox)
+        
+        self.force_manual_thresholds_checkbox = QtWidgets.QCheckBox("Force Manual Thresholds")
+        self.force_manual_thresholds_checkbox.setToolTip("Ignore all auto-detection and background ROI calculations")
+        self.force_manual_thresholds_checkbox.setChecked(self.force_manual_thresholds)
+        emergency_layout.addWidget(self.force_manual_thresholds_checkbox)
+        
+        # Per-ROI threshold controls
+        per_roi_layout = QtWidgets.QHBoxLayout()
+        self.use_global_threshold_checkbox = QtWidgets.QCheckBox("Use Global Threshold")
+        self.use_global_threshold_checkbox.setToolTip("When unchecked, allows per-ROI custom thresholds")
+        self.use_global_threshold_checkbox.setChecked(self.use_global_threshold)
+        per_roi_layout.addWidget(self.use_global_threshold_checkbox)
+        emergency_layout.addLayout(per_roi_layout)
+        
+        # Analysis method selection
+        analysis_method_layout = QtWidgets.QHBoxLayout()
+        analysis_method_layout.addWidget(QtWidgets.QLabel("Analysis Method:"))
+        self.analysis_method_combo = QtWidgets.QComboBox()
+        self.analysis_method_combo.addItems(['standard', 'enhanced'])
+        self.analysis_method_combo.setCurrentText(self.brightness_calc_method)
+        self.analysis_method_combo.setToolTip("standard: Basic LAB analysis\nenhanced: Advanced with low-light optimization")
+        analysis_method_layout.addWidget(self.analysis_method_combo)
+        emergency_layout.addLayout(analysis_method_layout)
+        
+        # Statistical method selection
+        stats_method_layout = QtWidgets.QHBoxLayout()
+        stats_method_layout.addWidget(QtWidgets.QLabel("Statistics:"))
+        self.stats_method_combo = QtWidgets.QComboBox()
+        self.stats_method_combo.addItems(['mean', 'median', 'both'])
+        self.stats_method_combo.setCurrentText(self.statistical_method)
+        self.stats_method_combo.setToolTip("Statistical method for brightness calculation")
+        stats_method_layout.addWidget(self.stats_method_combo)
+        emergency_layout.addLayout(stats_method_layout)
+        
+        # Initially hide expert controls
+        self.emergency_controls_widget.setVisible(self.enable_expert_mode)
+        expert_layout.addWidget(self.emergency_controls_widget)
+        
+        self.expert_groupbox.setLayout(expert_layout)
+        self.right_layout.addWidget(self.expert_groupbox)
+
         # Visualization Controls
         self.viz_groupbox = QtWidgets.QGroupBox("Visualization")
         viz_layout = QtWidgets.QVBoxLayout()
@@ -1679,6 +2022,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.show_mask_checkbox.setToolTip("Highlight analyzed pixels in red overlay")
         self.show_mask_checkbox.setChecked(self.show_pixel_mask)
         viz_layout.addWidget(self.show_mask_checkbox)
+        
+        self.show_ref_mask_checkbox = QtWidgets.QCheckBox("Show Reference Mask")
+        self.show_ref_mask_checkbox.setToolTip("Highlight reference mask pixels in blue overlay")
+        self.show_ref_mask_checkbox.setChecked(self.show_reference_mask)
+        viz_layout.addWidget(self.show_ref_mask_checkbox)
         
         self.viz_groupbox.setLayout(viz_layout)
         self.right_layout.addWidget(self.viz_groupbox)
@@ -1766,6 +2114,21 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.threshold_spin.valueChanged.connect(self._on_threshold_changed)
         self.set_bg_btn.clicked.connect(self._set_background_roi)
         self.show_mask_checkbox.toggled.connect(self._on_mask_checkbox_toggled)
+        
+        # Reference mask system signals
+        self.set_ref_frame_btn.clicked.connect(self.set_reference_frame)
+        self.clear_ref_masks_btn.clicked.connect(self.clear_reference_masks)
+        self.use_ref_masks_checkbox.toggled.connect(self._on_use_ref_masks_toggled)
+        self.mask_method_combo.currentTextChanged.connect(self._on_mask_method_changed)
+        self.show_ref_mask_checkbox.toggled.connect(self._on_show_ref_mask_toggled)
+        
+        # Expert mode and manual override signals
+        self.expert_mode_checkbox.toggled.connect(self._on_expert_mode_toggled)
+        self.emergency_manual_checkbox.toggled.connect(self._on_emergency_manual_toggled)
+        self.force_manual_thresholds_checkbox.toggled.connect(self._on_force_manual_thresholds_toggled)
+        self.use_global_threshold_checkbox.toggled.connect(self._on_use_global_threshold_toggled)
+        self.analysis_method_combo.currentTextChanged.connect(self._on_analysis_method_changed)
+        self.stats_method_combo.currentTextChanged.connect(self._on_stats_method_changed)
 
     def _update_widget_states(self, video_loaded=False, rois_exist=False):
         """Enable/disable widgets based on application state."""
@@ -1788,11 +2151,31 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.clear_rect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
         self.set_bg_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
         self.threshold_spin.setEnabled(not self._analysis_in_progress)
+        
+        # Reference mask controls
+        self.set_ref_frame_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        self.clear_ref_masks_btn.setEnabled(bool(self.reference_masks) and not self._analysis_in_progress)
+        self.use_ref_masks_checkbox.setEnabled(bool(self.reference_masks) and not self._analysis_in_progress)
+        self.mask_method_combo.setEnabled(video_loaded and not self._analysis_in_progress)
+        
+        # Expert controls - always available when not analyzing
+        self.expert_mode_checkbox.setEnabled(not self._analysis_in_progress)
+        self.emergency_manual_checkbox.setEnabled(not self._analysis_in_progress)
+        self.force_manual_thresholds_checkbox.setEnabled(not self._analysis_in_progress)
+        self.use_global_threshold_checkbox.setEnabled(not self._analysis_in_progress)
+        self.analysis_method_combo.setEnabled(not self._analysis_in_progress)
+        self.stats_method_combo.setEnabled(not self._analysis_in_progress)
 
     def _update_cache_status(self):
         """Update cache status display."""
-        cache_size = self.frame_cache.get_size()
-        self.cache_status_label.setText(f"Cache: {cache_size}/{FRAME_CACHE_SIZE} frames")
+        if self.frame_cache is not None:
+            cache_size = self.frame_cache.get_size()
+            self.cache_status_label.setText(f"Cache: {cache_size}/{FRAME_CACHE_SIZE} frames")
+        elif self._use_video_processor and hasattr(self, 'video_processor'):
+            cache_size = self.video_processor.frame_cache.get_size()
+            self.cache_status_label.setText(f"Cache: {cache_size}/{FRAME_CACHE_SIZE} frames")
+        else:
+            self.cache_status_label.setText("Cache: N/A")
 
     def _update_video_info(self):
         """Update video information display."""
@@ -1810,13 +2193,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         file_size = os.path.getsize(self.video_path) / (1024 * 1024)  # MB
         
         info_text = f"""
-<b>File:</b> {file_name}<br>
-<b>Size:</b> {file_size:.1f} MB<br>
-<b>Resolution:</b> {width} × {height}<br>
-<b>Frames:</b> {self.total_frames}<br>
-<b>FPS:</b> {fps:.2f}<br>
-<b>Duration:</b> {duration_sec:.1f}s<br>
-<b>Analysis Range:</b> {self.start_frame + 1}-{(self.end_frame or 0) + 1}
+<b>📁 {file_name}</b><br>
+<b>📐</b> {width} × {height} • {self.total_frames} frames<br>
+<b>⏱️</b> {duration_sec:.1f}s @ {fps:.2f} FPS<br>
+<b>💾</b> {file_size:.1f} MB<br>
+<b>🎬</b> Analysis: {self.start_frame + 1}-{(self.end_frame or 0) + 1}
         """.strip()
         
         self.video_info_label.setText(info_text)
@@ -1839,16 +2220,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.video_path = path
             self.load_video()
 
-    def dragEnterEvent(self, event: QtGui.QDragEnterEvent):
+    def dragEnterEvent(self, a0: QtGui.QDragEnterEvent):
         """Accept drag events if they contain URLs (files)."""
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction() # Use acceptProposedAction for clarity
+        if a0.mimeData().hasUrls():
+            a0.acceptProposedAction() # Use acceptProposedAction for clarity
         else:
-            event.ignore()
+            a0.ignore()
 
-    def dropEvent(self, event: QtGui.QDropEvent):
+    def dropEvent(self, a0: QtGui.QDropEvent):
         """Handle dropped files, attempting to load the first valid video."""
-        urls = event.mimeData().urls()
+        urls = a0.mimeData().urls()
         if urls:
             path = urls[0].toLocalFile()
             # Basic check for video file extensions (can be improved)
@@ -1858,18 +2239,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             else:
                 QtWidgets.QMessageBox.warning(self, 'Invalid File',
                                               f'Unsupported file type: {os.path.basename(path)}')
-            event.acceptProposedAction()
+            a0.acceptProposedAction()
         else:
-            event.ignore()
+            a0.ignore()
 
-    def closeEvent(self, event: QtGui.QCloseEvent):
+    def closeEvent(self, a0: QtGui.QCloseEvent):
         """Release resources and save settings when the window closes."""
         if self.cap:
             self.cap.release()
         self._save_settings()
-        super().closeEvent(event)
+        super().closeEvent(a0)
 
-    def resizeEvent(self, event: QtGui.QResizeEvent):
+    def resizeEvent(self, a0: QtGui.QResizeEvent):
         """
         Update cached label size *without* immediately redrawing the frame.
         Calling show_frame() synchronously inside resizeEvent can create
@@ -1886,7 +2267,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 QtCore.QTimer.singleShot(0, self.show_frame)
 
         # Call base-class handler last (standard Qt practice)
-        super().resizeEvent(event)
+        super().resizeEvent(a0)
 
     # --- Video Loading and Frame Display ---
 
@@ -1898,7 +2279,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.cap = None
             
         # Clear frame cache
-        self.frame_cache.clear()
+        if self.frame_cache is not None:
+            self.frame_cache.clear()
         
         # Validate video file path
         try:
@@ -1983,7 +2365,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
              return
 
         # Clear cache when loading new video
-        self.frame_cache.clear()
+        if self.frame_cache is not None:
+            self.frame_cache.clear()
         
         self.current_frame_index = 0
         self.start_frame = 0
@@ -1993,7 +2376,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         ret, frame = self.cap.read()
         if ret:
             self.frame = frame
-            self.frame_cache.put(0, frame)  # Cache first frame
+            if self.frame_cache is not None:
+                self.frame_cache.put(0, frame)  # Cache first frame
 
             # Ensure the pixmap scales to the label's current size the first time we draw it
             self._current_image_size = self.image_label.size()
@@ -2055,7 +2439,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.playback_fps = 30.0
         
         # Clear frame cache and force memory cleanup
-        self.frame_cache.clear()
+        if self.frame_cache is not None:
+            self.frame_cache.clear()
         
         # Reset playback controls
         self.speed_combo.setCurrentText("1x")
@@ -2236,7 +2621,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
 
         # Check cache first
-        cached_frame = self.frame_cache.get(frame_index)
+        cached_frame = self.frame_cache.get(frame_index) if self.frame_cache else None
         if cached_frame is not None:
             self.frame = cached_frame
             self.current_frame_index = frame_index
@@ -2254,7 +2639,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.current_frame_index = frame_index
             
             # Cache the frame
-            self.frame_cache.put(frame_index, frame)
+            if self.frame_cache is not None:
+                self.frame_cache.put(frame_index, frame)
             self._update_cache_status()
             
             self.show_frame()
@@ -2370,17 +2756,23 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         if roi_data:
             # Build comprehensive display
-            display_lines = ["Current Brightness:"]
+            display_lines = []
             
+            # Clean header with frame info
+            display_lines.append(f"<b>Frame {self.current_frame_index + 1}</b>")
+            
+            # ROI brightness data with better formatting
             for idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median in roi_data:
+                roi_prefix = "🎯" if idx == self.selected_rect_idx else "  "
+                
                 if self.background_roi_idx is not None:
-                    # Show L* with background subtraction and blue channel
-                    display_lines.append(f"ROI {idx+1}: L* {l_raw_mean:.1f} (BG-Sub: {l_bg_sub_mean:.1f}) | Blue: {b_raw_mean:.0f}")
+                    # Clean format with background subtraction (show as raw → corrected)
+                    display_lines.append(f"{roi_prefix} ROI {idx+1}: L* {l_raw_mean:.1f} → {l_bg_sub_mean:.1f} | B {b_raw_mean:.0f}")
                 else:
-                    # Show raw L* and blue channel when no background ROI
-                    display_lines.append(f"ROI {idx+1}: L* {l_raw_mean:.1f} | Blue: {b_raw_mean:.0f}")
+                    # Clean format without background
+                    display_lines.append(f"{roi_prefix} ROI {idx+1}: L* {l_raw_mean:.1f} | B {b_raw_mean:.0f}")
             
-            # Add background ROI info if defined
+            # Background ROI info (if defined)
             if self.background_roi_idx is not None and background_brightness is not None:
                 # Calculate blue channel for background ROI
                 bg_pt1, bg_pt2 = self.rects[self.background_roi_idx]
@@ -2392,9 +2784,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 if bg_x2 > bg_x1 and bg_y2 > bg_y1:
                     bg_roi = self.frame[bg_y1:bg_y2, bg_x1:bg_x2]
                     _, _, _, _, bg_b_mean, _, _, _ = self._compute_brightness_stats(bg_roi)
-                    display_lines.append(f"Background: L* {background_brightness:.1f} | Blue: {bg_b_mean:.0f}")
+                    display_lines.append(f"   Background: L* {background_brightness:.1f} | B {bg_b_mean:.0f}")
             
-            self.brightness_display_label.setText("\n".join(display_lines))
+            # Use HTML formatting for better display
+            formatted_text = "<br>".join(display_lines)
+            self.brightness_display_label.setText(formatted_text)
         else:
             self.brightness_display_label.setText("N/A")
 
@@ -2605,20 +2999,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _apply_pixel_mask_overlay(self, frame: np.ndarray) -> np.ndarray:
         """
-        Apply red overlay to show which pixels are being analyzed in each ROI.
+        Apply colored overlays to show analyzed pixels and reference masks.
+        
+        Colors:
+        - Red: Current frame dynamic threshold pixels (standard mode)
+        - Blue: Reference mask pixels (reference mode)
+        - Green: Per-ROI custom threshold pixels
         
         Args:
             frame: BGR frame to apply overlay to
             
         Returns:
-            Frame with red mask overlay applied
+            Frame with colored mask overlays applied
         """
         overlay = frame.copy()
-        
-        # Get the active threshold for the current frame
-        active_threshold = self._calculate_background_threshold()
-        if active_threshold is None:
-            active_threshold = self.manual_threshold
         
         for roi_idx, (pt1, pt2) in enumerate(self.rects):
             # Skip background ROI
@@ -2633,25 +3027,45 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             y2 = max(0, min(pt2[1], fh - 1))
             
             if x2 > x1 and y2 > y1:
-                # Extract ROI and convert to LAB
-                roi = frame[y1:y2, x1:x2]
+                roi_overlay = overlay[y1:y2, x1:x2].copy()
+                
                 try:
-                    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-                    l_chan = lab[:, :, 0].astype(np.float32)
-                    l_star = l_chan * 100.0 / 255.0
+                    # Show reference mask if available and enabled
+                    if (self.show_reference_mask and roi_idx in self.reference_masks):
+                        reference_mask = self.reference_masks[roi_idx]
+                        if reference_mask.shape == roi_overlay.shape[:2]:
+                            # Blue overlay for reference mask pixels
+                            roi_overlay[reference_mask] = roi_overlay[reference_mask] * 0.7 + np.array([255, 0, 0]) * 0.3  # Blue tint
                     
-                    # Create mask for analyzed pixels based on the active threshold
-                    mask = l_star > active_threshold
+                    # Show current frame mask if pixel mask is enabled
+                    elif self.show_pixel_mask:
+                        roi = frame[y1:y2, x1:x2]
+                        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+                        l_chan = lab[:, :, 0].astype(np.float32)
+                        l_star = l_chan * 100.0 / 255.0
+                        
+                        # Get active threshold for this ROI
+                        active_threshold = self._get_active_threshold_for_roi(roi_idx)
+                        
+                        # Create mask for analyzed pixels
+                        mask = l_star > active_threshold
+                        
+                        # Choose color based on threshold type
+                        if not self.use_global_threshold and roi_idx in self.roi_thresholds:
+                            # Green for per-ROI custom thresholds
+                            color_overlay = np.array([0, 255, 0])  # Green
+                        else:
+                            # Red for global/background thresholds
+                            color_overlay = np.array([0, 0, 255])  # Red
+                        
+                        # Apply colored overlay to analyzed pixels
+                        roi_overlay[mask] = roi_overlay[mask] * 0.7 + color_overlay * 0.3
                     
-                    # Apply red overlay to analyzed pixels
-                    roi_overlay = roi.copy()
-                    roi_overlay[mask] = roi_overlay[mask] * 0.7 + np.array([0, 0, 255]) * 0.3  # Red tint
-                    
-                    # Apply overlay back to main frame
+                    # Apply the processed ROI back to the main overlay
                     overlay[y1:y2, x1:x2] = roi_overlay
                     
                 except Exception as e:
-                    print(f"Error creating pixel mask for ROI {roi_idx+1}: {e}")
+                    logger.warning(f"Error creating pixel mask for ROI {roi_idx+1}: {e}")
                     continue
         
         return overlay
@@ -2660,6 +3074,354 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Handle changes to the manual threshold spinbox."""
         self.manual_threshold = value
         self._update_threshold_display()
+        if self.frame is not None:
+            self.show_frame()
+
+    # --- UI Signal Handlers for Professional Controls ---
+
+    def _on_use_ref_masks_toggled(self, checked: bool):
+        """Handle reference mask mode toggle."""
+        if checked and not self.reference_masks:
+            QtWidgets.QMessageBox.warning(self, 'Reference Mask Mode', 
+                'No reference masks available. Please set a reference frame first.')
+            self.use_ref_masks_checkbox.setChecked(False)
+            return
+        
+        self.use_reference_masks = checked
+        status = "enabled" if checked else "disabled"
+        logger.info(f"Reference mask analysis {status}")
+        
+        # Update UI status
+        self._update_ref_mask_status()
+        
+        # Update display
+        if self.frame is not None:
+            self.show_frame()
+
+    def _on_mask_method_changed(self, method: str):
+        """Handle mask generation method change."""
+        self.mask_generation_method = method
+        logger.info(f"Mask generation method changed to: {method}")
+        
+        # Regenerate masks if reference frame is set
+        if self.reference_frame_idx is not None:
+            self.generate_reference_masks()
+            self._update_ref_mask_status()
+            if self.frame is not None:
+                self.show_frame()
+
+    def _on_show_ref_mask_toggled(self, checked: bool):
+        """Handle reference mask visualization toggle."""
+        self.show_reference_mask = checked
+        if self.frame is not None:
+            self.show_frame()
+
+    def _on_expert_mode_toggled(self, checked: bool):
+        """Handle expert mode toggle."""
+        self.enable_expert_mode = checked
+        self.emergency_controls_widget.setVisible(checked)
+        
+        if checked:
+            logger.info("Expert mode enabled - advanced manual controls available")
+        else:
+            logger.info("Expert mode disabled - simplified interface")
+            # Reset emergency modes when exiting expert mode
+            self.emergency_manual_mode = False
+            self.force_manual_thresholds = False
+            self.emergency_manual_checkbox.setChecked(False)
+            self.force_manual_thresholds_checkbox.setChecked(False)
+
+    def _on_emergency_manual_toggled(self, checked: bool):
+        """Handle emergency manual mode toggle."""
+        self.emergency_manual_mode = checked
+        if checked:
+            logger.warning("EMERGENCY MANUAL MODE ENABLED - All automation bypassed")
+            QtWidgets.QMessageBox.warning(self, 'Emergency Manual Mode', 
+                'Emergency Manual Mode enabled.\n\n'
+                'ALL automation is now bypassed. You have complete manual control.\n'
+                'Use this mode only when automatic systems fail.')
+        else:
+            logger.info("Emergency manual mode disabled")
+
+    def _on_force_manual_thresholds_toggled(self, checked: bool):
+        """Handle force manual thresholds toggle."""
+        self.force_manual_thresholds = checked
+        if checked:
+            logger.info("Manual thresholds forced - ignoring auto-detection and background ROI")
+        else:
+            logger.info("Auto-detection and background ROI calculations re-enabled")
+        
+        # Update threshold display
+        self._update_threshold_display()
+        
+        # Update display
+        if self.frame is not None:
+            self.show_frame()
+
+    def _on_use_global_threshold_toggled(self, checked: bool):
+        """Handle global threshold mode toggle."""
+        self.use_global_threshold = checked
+        if checked:
+            logger.info("Using global threshold for all ROIs")
+        else:
+            logger.info("Per-ROI threshold mode enabled")
+        
+        # Update display
+        if self.frame is not None:
+            self.show_frame()
+
+    def _on_analysis_method_changed(self, method: str):
+        """Handle analysis method change."""
+        self.brightness_calc_method = method
+        logger.info(f"Brightness calculation method changed to: {method}")
+
+    def _on_stats_method_changed(self, method: str):
+        """Handle statistical method change."""
+        self.statistical_method = method
+        logger.info(f"Statistical method changed to: {method}")
+
+    def _update_ref_mask_status(self):
+        """Update the reference mask status display."""
+        if self.reference_frame_idx is not None:
+            mask_count = len(self.reference_masks)
+            status_text = f"Reference frame: {self.reference_frame_idx + 1} | {mask_count} masks"
+            if self.use_reference_masks:
+                status_text += " | ACTIVE"
+                self.ref_mask_status_label.setStyleSheet("color: #70ad47; font-weight: bold; padding: 2px;")
+            else:
+                status_text += " | inactive"
+                self.ref_mask_status_label.setStyleSheet("color: #888888; font-style: italic; padding: 2px;")
+        else:
+            status_text = "No reference frame set"
+            self.ref_mask_status_label.setStyleSheet("color: #888888; font-style: italic; padding: 2px;")
+        
+        self.ref_mask_status_label.setText(status_text)
+
+    # --- Reference Mask System (Professional-Grade) ---
+
+    def set_reference_frame(self):
+        """Set the current frame as the reference for mask generation."""
+        if not self.cap or not self.cap.isOpened() or self.frame is None:
+            QtWidgets.QMessageBox.warning(self, 'Reference Frame Error', 'No video loaded or no current frame.')
+            return
+        
+        if not self.rects:
+            QtWidgets.QMessageBox.warning(self, 'Reference Frame Error', 'No ROIs defined. Please draw ROIs first.')
+            return
+        
+        self.reference_frame_idx = self.current_frame_index
+        logger.info(f"Reference frame set to: {self.reference_frame_idx}")
+        
+        # Generate reference masks for all ROIs
+        self.generate_reference_masks()
+        
+        # Update UI to show reference frame is set
+        self._update_ref_mask_status()
+        QtWidgets.QMessageBox.information(self, 'Reference Frame Set', 
+            f"Reference frame set to frame {self.reference_frame_idx + 1}.\n"
+            f"Generated {len(self.reference_masks)} reference masks.")
+        
+        # Update display if reference mask visualization is enabled
+        if self.show_reference_mask and self.frame is not None:
+            self.show_frame()
+
+    def generate_reference_masks(self):
+        """Generate binary masks for all ROIs based on the reference frame."""
+        if self.reference_frame_idx is None or self.frame is None:
+            logger.warning("Cannot generate reference masks: no reference frame set")
+            return
+        
+        # Get the reference frame
+        reference_frame = self._get_frame(self.reference_frame_idx)
+        if reference_frame is None:
+            logger.error(f"Cannot load reference frame {self.reference_frame_idx}")
+            return
+        
+        self.reference_masks.clear()
+        self.reference_mask_metadata.clear()
+        
+        # Get active threshold for mask generation
+        active_threshold = self._get_active_threshold_for_roi(None)  # Use global for reference
+        
+        for roi_idx, (pt1, pt2) in enumerate(self.rects):
+            # Skip background ROI
+            if roi_idx == self.background_roi_idx:
+                continue
+            
+            try:
+                # Extract ROI from reference frame
+                mask, metadata = self._generate_roi_reference_mask(
+                    reference_frame, pt1, pt2, roi_idx, active_threshold
+                )
+                
+                if mask is not None:
+                    self.reference_masks[roi_idx] = mask
+                    self.reference_mask_metadata[roi_idx] = metadata
+                    logger.info(f"Generated reference mask for ROI {roi_idx + 1}: "
+                              f"{metadata['pixel_count']} pixels ({metadata['coverage_percentage']:.1f}%)")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate reference mask for ROI {roi_idx + 1}: {e}")
+                continue
+        
+        logger.info(f"Reference mask generation complete: {len(self.reference_masks)} masks generated")
+
+    def _generate_roi_reference_mask(self, frame: np.ndarray, pt1: tuple, pt2: tuple, 
+                                   roi_idx: int, threshold: float) -> tuple:
+        """Generate a reference mask for a single ROI."""
+        fh, fw = frame.shape[:2]
+        x1 = max(0, min(pt1[0], fw - 1))
+        y1 = max(0, min(pt1[1], fh - 1))
+        x2 = max(0, min(pt2[0], fw - 1))
+        y2 = max(0, min(pt2[1], fh - 1))
+        
+        if x2 <= x1 or y2 <= y1:
+            return None, {}
+        
+        # Extract ROI and convert to LAB
+        roi = frame[y1:y2, x1:x2]
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        l_chan = lab[:, :, 0].astype(np.float32)
+        l_star = l_chan * 100.0 / 255.0
+        
+        # Create binary mask based on threshold
+        if self.mask_generation_method == 'threshold':
+            mask = l_star > threshold
+        elif self.mask_generation_method == 'adaptive':
+            # Use adaptive thresholding for more sophisticated masking
+            mask = self._generate_adaptive_mask(l_star, threshold)
+        else:  # manual method would be implemented separately
+            mask = l_star > threshold
+        
+        # Calculate mask quality metrics
+        total_pixels = mask.size
+        active_pixels = np.sum(mask)
+        coverage_percentage = (active_pixels / total_pixels) * 100
+        
+        # Calculate brightness statistics for masked pixels
+        masked_brightness = l_star[mask]
+        if len(masked_brightness) > 0:
+            brightness_mean = np.mean(masked_brightness)
+            brightness_std = np.std(masked_brightness)
+            brightness_median = np.median(masked_brightness)
+        else:
+            brightness_mean = brightness_std = brightness_median = 0.0
+        
+        metadata = {
+            'roi_idx': roi_idx,
+            'frame_idx': self.reference_frame_idx,
+            'threshold_used': threshold,
+            'generation_method': self.mask_generation_method,
+            'pixel_count': int(active_pixels),
+            'total_pixels': int(total_pixels),
+            'coverage_percentage': coverage_percentage,
+            'brightness_stats': {
+                'mean': brightness_mean,
+                'std': brightness_std,
+                'median': brightness_median
+            },
+            'roi_bounds': (x1, y1, x2, y2),
+            'mask_shape': mask.shape
+        }
+        
+        return mask, metadata
+
+    def _generate_adaptive_mask(self, l_star: np.ndarray, base_threshold: float) -> np.ndarray:
+        """Generate an adaptive threshold mask for more sophisticated masking."""
+        # Use Otsu's method as a starting point, then adjust based on base_threshold
+        try:
+            # Convert to uint8 for Otsu
+            l_uint8 = (l_star * 255.0 / 100.0).astype(np.uint8)
+            otsu_thresh, _ = cv2.threshold(l_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            otsu_thresh_l_star = (otsu_thresh / 255.0) * 100.0
+            
+            # Blend Otsu threshold with manual threshold
+            adaptive_threshold = (otsu_thresh_l_star + base_threshold) / 2.0
+            
+            return l_star > adaptive_threshold
+            
+        except Exception as e:
+            logger.warning(f"Adaptive masking failed, falling back to simple threshold: {e}")
+            return l_star > base_threshold
+
+    def _get_active_threshold_for_roi(self, roi_idx: Optional[int]) -> float:
+        """Get the active threshold for a specific ROI, considering manual overrides."""
+        # Emergency manual mode - always use manual threshold
+        if self.emergency_manual_mode or self.force_manual_thresholds:
+            return self.manual_threshold
+        
+        # Check for per-ROI threshold override
+        if not self.use_global_threshold and roi_idx is not None and roi_idx in self.roi_thresholds:
+            return self.roi_thresholds[roi_idx]
+        
+        # Use background ROI calculation if available and not forced manual
+        if not self.force_manual_thresholds:
+            bg_threshold = self._calculate_background_threshold()
+            if bg_threshold is not None:
+                return bg_threshold
+        
+        # Fall back to manual threshold
+        return self.manual_threshold
+
+    def apply_reference_mask_to_roi(self, frame: np.ndarray, roi_idx: int, pt1: tuple, pt2: tuple) -> np.ndarray:
+        """Apply the reference mask to extract consistent pixels from an ROI."""
+        if not self.use_reference_masks or roi_idx not in self.reference_masks:
+            # Fall back to standard extraction
+            fh, fw = frame.shape[:2]
+            x1 = max(0, min(pt1[0], fw - 1))
+            y1 = max(0, min(pt1[1], fh - 1))
+            x2 = max(0, min(pt2[0], fw - 1))
+            y2 = max(0, min(pt2[1], fh - 1))
+            return frame[y1:y2, x1:x2]
+        
+        # Apply reference mask
+        reference_mask = self.reference_masks[roi_idx]
+        metadata = self.reference_mask_metadata[roi_idx]
+        x1, y1, x2, y2 = metadata['roi_bounds']
+        
+        # Extract ROI and apply mask
+        roi = frame[y1:y2, x1:x2]
+        
+        # Create masked ROI where non-mask pixels are set to a consistent value
+        masked_roi = roi.copy()
+        if reference_mask.shape == roi.shape[:2]:
+            # Set non-masked pixels to a neutral value (mean of the ROI)
+            roi_mean = np.mean(roi, axis=(0, 1)).astype(roi.dtype)
+            masked_roi[~reference_mask] = roi_mean
+        
+        return masked_roi
+
+    def toggle_reference_mask_mode(self):
+        """Toggle reference mask analysis mode on/off."""
+        if not self.reference_masks:
+            QtWidgets.QMessageBox.warning(self, 'Reference Mask Mode', 
+                'No reference masks available. Please set a reference frame first.')
+            return
+        
+        self.use_reference_masks = not self.use_reference_masks
+        status = "enabled" if self.use_reference_masks else "disabled"
+        logger.info(f"Reference mask mode {status}")
+        
+        # Update display
+        if self.frame is not None:
+            self.show_frame()
+        
+        return self.use_reference_masks
+
+    def clear_reference_masks(self):
+        """Clear all reference masks and reset reference frame."""
+        self.reference_masks.clear()
+        self.reference_mask_metadata.clear()
+        self.reference_frame_idx = None
+        self.use_reference_masks = False
+        
+        # Update UI checkboxes
+        self.use_ref_masks_checkbox.setChecked(False)
+        self._update_ref_mask_status()
+        
+        logger.info("Reference masks cleared")
+        
+        # Update display
         if self.frame is not None:
             self.show_frame()
 
@@ -2906,7 +3668,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _map_label_to_frame_point(self, label_point: QtCore.QPoint) -> Optional[Tuple[int, int]]:
         """Maps a point from QLabel coordinates to original frame coordinates."""
         pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect or self.frame is None:
+        if pixmap_rect is None or self.frame is None:
             return None
 
         # Adjust point relative to the pixmap within the label
@@ -2929,7 +3691,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _map_frame_to_label_point(self, frame_point: Tuple[int, int]) -> Optional[QtCore.QPoint]:
         """Maps a point from original frame coordinates to QLabel coordinates."""
         pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect or self.frame is None:
+        if pixmap_rect is None or self.frame is None:
             return None
 
         frame_width = self.frame.shape[1]
@@ -3077,15 +3839,34 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 else:
                     pt1, pt2 = self.rects[roi_idx]
 
-                fh, fw = frame.shape[:2]
-                x1 = max(0, min(pt1[0], fw - 1))
-                y1 = max(0, min(pt1[1], fh - 1))
-                x2 = max(0, min(pt2[0], fw - 1))
-                y2 = max(0, min(pt2[1], fh - 1))
-                roi = frame[y1:y2, x1:x2]
+                # Extract ROI with reference mask support
+                if self.use_reference_masks and roi_idx in self.reference_masks:
+                    # Use reference mask for consistent pixel analysis
+                    roi = self.apply_reference_mask_to_roi(frame, roi_idx, pt1, pt2)
+                    # Use specific threshold method for reference mask analysis
+                    if roi_idx in self.reference_mask_metadata:
+                        threshold_override = self.reference_mask_metadata[roi_idx]['threshold_used']
+                        brightness_stats = self._compute_brightness_stats_with_reference_mask(
+                            frame, roi_idx, pt1, pt2, threshold_override)
+                    else:
+                        # Fallback to standard computation
+                        brightness_stats = self._compute_brightness_stats(roi, overall_background_brightness if overall_background_brightness is not None else self.manual_threshold)
+                else:
+                    # Standard ROI extraction and analysis
+                    fh, fw = frame.shape[:2]
+                    x1 = max(0, min(pt1[0], fw - 1))
+                    y1 = max(0, min(pt1[1], fh - 1))
+                    x2 = max(0, min(pt2[0], fw - 1))
+                    y2 = max(0, min(pt2[1], fh - 1))
+                    roi = frame[y1:y2, x1:x2]
 
-                # Compute brightness stats
-                brightness_stats = self._compute_brightness_stats(roi, overall_background_brightness if overall_background_brightness is not None else self.manual_threshold)
+                    # Get appropriate threshold for this ROI
+                    active_threshold = self._get_active_threshold_for_roi(roi_idx)
+                    if overall_background_brightness is not None and not self.force_manual_thresholds:
+                        active_threshold = overall_background_brightness
+                    
+                    # Compute brightness stats
+                    brightness_stats = self._compute_brightness_stats(roi, active_threshold)
                 results[roi_idx].append((i,) + brightness_stats)
 
         progress.setValue(end_frame) # Ensure progress bar is full
@@ -3147,7 +3928,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         ax2.legend()
         ax2.grid(True)
 
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to prevent title overlap
+        plt.tight_layout(rect=(0, 0.03, 1, 0.95)) # Adjust layout to prevent title overlap
         
         # Save plot
         plot_filename = f"{self.analysis_name_input.text()}_brightness_analysis.png"
@@ -3195,7 +3976,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _get_frame(self, frame_index: int) -> Optional[np.ndarray]:
         """Retrieves a frame from the video, using cache if available."""
-        cached_frame = self.frame_cache.get(frame_index)
+        cached_frame = self.frame_cache.get(frame_index) if self.frame_cache else None
         if cached_frame is not None:
             return cached_frame
         
@@ -3203,7 +3984,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
             ret, frame = self.cap.read()
             if ret:
-                self.frame_cache.put(frame_index, frame)
+                if self.frame_cache is not None:
+                    self.frame_cache.put(frame_index, frame)
                 return frame
         return None
 
@@ -3229,6 +4011,74 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Use 90th percentile for background brightness to be more robust to noise/small bright spots
             return float(np.percentile(l_star, 90))
         return None
+
+    def _compute_brightness_stats_with_reference_mask(self, frame: np.ndarray, roi_idx: int, 
+                                                    pt1: tuple, pt2: tuple, threshold: float) -> Tuple[float, float, float, float, float, float, float, float]:
+        """
+        Compute brightness statistics using reference mask for consistent pixel analysis.
+        Only analyzes pixels that were identified in the reference mask.
+        """
+        if roi_idx not in self.reference_masks:
+            # Fallback to standard analysis
+            fh, fw = frame.shape[:2]
+            x1 = max(0, min(pt1[0], fw - 1))
+            y1 = max(0, min(pt1[1], fh - 1))
+            x2 = max(0, min(pt2[0], fw - 1))
+            y2 = max(0, min(pt2[1], fh - 1))
+            roi = frame[y1:y2, x1:x2]
+            return self._compute_brightness_stats(roi, threshold)
+        
+        # Get reference mask and metadata
+        reference_mask = self.reference_masks[roi_idx]
+        metadata = self.reference_mask_metadata[roi_idx]
+        x1, y1, x2, y2 = metadata['roi_bounds']
+        
+        # Extract ROI from current frame
+        roi = frame[y1:y2, x1:x2]
+        
+        # Convert to LAB color space
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        l_chan = lab[:, :, 0].astype(np.float32)
+        l_star = l_chan * 100.0 / 255.0  # Convert to 0-100 range
+        blue_chan = roi[:, :, 0].astype(np.float32)  # Blue channel (0-255)
+        
+        # Apply reference mask to get only the consistent pixels
+        if reference_mask.shape == l_star.shape:
+            masked_l_star = l_star[reference_mask]
+            masked_blue = blue_chan[reference_mask]
+        else:
+            logger.warning(f"Reference mask shape mismatch for ROI {roi_idx + 1}, falling back to threshold")
+            mask = l_star > threshold
+            masked_l_star = l_star[mask]
+            masked_blue = blue_chan[mask]
+        
+        # Calculate statistics for masked pixels
+        if len(masked_l_star) > 0:
+            l_raw_mean = float(np.mean(masked_l_star))
+            l_raw_median = float(np.median(masked_l_star))
+            blue_mean = float(np.mean(masked_blue))
+            blue_median = float(np.median(masked_blue))
+        else:
+            # No pixels pass the mask
+            l_raw_mean = l_raw_median = blue_mean = blue_median = 0.0
+        
+        # Background subtraction (if threshold represents background)
+        if threshold > 0:
+            l_bg_sub_mean = max(0.0, l_raw_mean - threshold)
+            l_bg_sub_median = max(0.0, l_raw_median - threshold)
+        else:
+            l_bg_sub_mean = l_raw_mean
+            l_bg_sub_median = l_raw_median
+        
+        # Additional stats for compatibility
+        l_enhanced_mean = l_raw_mean  # Could apply enhancement here if needed
+        l_enhanced_median = l_raw_median
+        
+        logger.debug(f"Reference mask analysis ROI {roi_idx + 1}: {len(masked_l_star)} pixels, "
+                    f"L* mean: {l_raw_mean:.2f}, blue mean: {blue_mean:.2f}")
+        
+        return (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, 
+                blue_mean, blue_median, l_enhanced_mean, l_enhanced_median)
 
     def _compute_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
         """

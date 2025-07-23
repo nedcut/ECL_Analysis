@@ -1,5 +1,9 @@
 """
-User interface components for Brightness Sorcerer.
+Modern user interface components for Brightness Sorcerer.
 
-Contains the main window, dialogs, custom widgets, and UI utilities.
+Enhanced UI with modular architecture, modern styling, and improved UX.
 """
+
+from .main_window import ModernMainWindow
+
+__all__ = ['ModernMainWindow']
