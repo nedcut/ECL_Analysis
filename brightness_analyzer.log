@@ -91,3 +91,101 @@ TypeError: cannot unpack non-iterable NoneType object
 2025-07-21 19:40:21 | INFO     | BrightnessSorcerer:main:3393 | Application startup complete
 2025-07-21 19:40:29 | INFO     | BrightnessSorcerer:main:3397 | Application exiting with code 0
 2025-07-21 19:40:29 | INFO     | BrightnessSorcerer:main:3414 | Application cleanup complete
+2025-07-21 22:11:09 | INFO     | BrightnessSorcerer:_load_settings:929 | Loaded settings with 1 recent files
+2025-07-22 10:14:28 | INFO     | BrightnessSorcerer:_load_settings:940 | Loaded settings with 1 recent files
+2025-07-22 10:17:30 | INFO     | BrightnessSorcerer:main:4021 | Starting Brightness Sorcerer v2.0.0
+2025-07-22 10:17:30 | CRITICAL | BrightnessSorcerer:main:4039 | Failed to start application: 'VideoAnalyzer' object has no attribute '_use_video_processor'
+Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 4022, in main
+    win = VideoAnalyzer()
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 775, in __init__
+    self._init_vars()
+    ~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 798, in _init_vars
+    if not self._use_video_processor:
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'VideoAnalyzer' object has no attribute '_use_video_processor'
+2025-07-22 10:18:09 | INFO     | BrightnessSorcerer:main:4021 | Starting Brightness Sorcerer v2.0.0
+2025-07-22 10:18:09 | INFO     | BrightnessSorcerer:_load_settings:946 | Loaded settings with 1 recent files
+2025-07-22 10:18:10 | INFO     | BrightnessSorcerer:main:4031 | Application startup complete
+2025-07-22 10:22:23 | INFO     | BrightnessSorcerer:main:4046 | Starting Brightness Sorcerer v2.0.0
+2025-07-22 10:22:23 | INFO     | BrightnessSorcerer:_load_settings:971 | Loaded settings with 1 recent files
+2025-07-22 10:22:23 | INFO     | BrightnessSorcerer:main:4056 | Application startup complete
+2025-07-22 10:22:33 | CRITICAL | BrightnessSorcerer:handle_exception:4030 | Uncaught exception: Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 2048, in open_video_dialog
+    self.load_video()
+    ~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 2109, in load_video
+    self.frame_cache.clear()
+    ^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'clear'
+
+2025-07-22 10:22:54 | INFO     | BrightnessSorcerer:main:4060 | Application exiting with code 0
+2025-07-22 10:22:54 | INFO     | BrightnessSorcerer:main:4077 | Application cleanup complete
+2025-07-22 10:26:16 | INFO     | BrightnessSorcerer:main:4058 | Starting Brightness Sorcerer v2.0.0
+2025-07-22 10:26:16 | INFO     | BrightnessSorcerer:_load_settings:971 | Loaded settings with 1 recent files
+2025-07-22 10:26:16 | INFO     | BrightnessSorcerer:main:4068 | Application startup complete
+2025-07-22 10:26:22 | INFO     | BrightnessSorcerer:load_video:2124 | Loading video: Jasper Data Device 12.mp4
+2025-07-22 10:26:22 | INFO     | BrightnessSorcerer:load_video:2181 | Video loaded successfully: 1280x720, 1230 frames, 29.88 FPS, 41.17s
+2025-07-22 10:27:46 | INFO     | BrightnessSorcerer:_on_expert_mode_toggled:2950 | Expert mode enabled - advanced manual controls available
+2025-07-22 10:27:50 | WARNING  | BrightnessSorcerer:_on_emergency_manual_toggled:2963 | EMERGENCY MANUAL MODE ENABLED - All automation bypassed
+2025-07-22 10:27:59 | INFO     | BrightnessSorcerer:_on_analysis_method_changed:3001 | Brightness calculation method changed to: enhanced
+2025-07-22 10:28:41 | INFO     | BrightnessSorcerer:set_reference_frame:3038 | Reference frame set to: 846
+2025-07-22 10:28:41 | INFO     | BrightnessSorcerer:generate_reference_masks:3085 | Generated reference mask for ROI 1: 3638 pixels (45.0%)
+2025-07-22 10:28:41 | INFO     | BrightnessSorcerer:generate_reference_masks:3092 | Reference mask generation complete: 1 masks generated
+2025-07-22 10:28:47 | INFO     | BrightnessSorcerer:_on_emergency_manual_toggled:2969 | Emergency manual mode disabled
+2025-07-22 10:28:48 | INFO     | BrightnessSorcerer:_on_expert_mode_toggled:2952 | Expert mode disabled - simplified interface
+2025-07-22 10:29:02 | INFO     | BrightnessSorcerer:main:4072 | Application exiting with code 0
+2025-07-22 10:29:02 | INFO     | BrightnessSorcerer:main:4089 | Application cleanup complete
+2025-07-22 10:39:14 | INFO     | BrightnessSorcerer:main:4197 | Starting Brightness Sorcerer v2.0.0
+2025-07-22 10:39:14 | INFO     | BrightnessSorcerer:_load_settings:971 | Loaded settings with 1 recent files
+2025-07-22 10:39:15 | INFO     | BrightnessSorcerer:main:4207 | Application startup complete
+2025-07-22 10:39:35 | INFO     | BrightnessSorcerer:load_video:2263 | Loading video: Jasper Data Device 12.mp4
+2025-07-22 10:39:35 | INFO     | BrightnessSorcerer:load_video:2320 | Video loaded successfully: 1280x720, 1230 frames, 29.88 FPS, 41.17s
+2025-07-22 10:40:56 | INFO     | BrightnessSorcerer:_on_expert_mode_toggled:3089 | Expert mode enabled - advanced manual controls available
+2025-07-22 10:40:58 | INFO     | BrightnessSorcerer:_on_force_manual_thresholds_toggled:3114 | Manual thresholds forced - ignoring auto-detection and background ROI
+2025-07-22 10:41:05 | INFO     | BrightnessSorcerer:main:4211 | Application exiting with code 0
+2025-07-22 10:41:05 | INFO     | BrightnessSorcerer:main:4228 | Application cleanup complete
+2025-07-22 10:42:55 | INFO     | BrightnessSorcerer:main:4164 | Starting Brightness Sorcerer v2.0.0
+2025-07-22 10:42:55 | INFO     | BrightnessSorcerer:_load_settings:971 | Loaded settings with 1 recent files
+2025-07-22 10:42:55 | INFO     | BrightnessSorcerer:main:4174 | Application startup complete
+2025-07-22 10:43:06 | INFO     | BrightnessSorcerer:load_video:2230 | Loading video: Jasper Data Device 12.mp4
+2025-07-22 10:43:06 | INFO     | BrightnessSorcerer:load_video:2287 | Video loaded successfully: 1280x720, 1230 frames, 29.88 FPS, 41.17s
+2025-07-22 10:43:23 | INFO     | BrightnessSorcerer:_on_expert_mode_toggled:3056 | Expert mode enabled - advanced manual controls available
+2025-07-22 10:43:25 | INFO     | BrightnessSorcerer:_on_force_manual_thresholds_toggled:3081 | Manual thresholds forced - ignoring auto-detection and background ROI
+2025-07-22 10:43:39 | INFO     | BrightnessSorcerer:set_reference_frame:3144 | Reference frame set to: 824
+2025-07-22 10:43:39 | INFO     | BrightnessSorcerer:generate_reference_masks:3191 | Generated reference mask for ROI 1: 4516 pixels (53.0%)
+2025-07-22 10:43:39 | INFO     | BrightnessSorcerer:generate_reference_masks:3198 | Reference mask generation complete: 1 masks generated
+2025-07-22 10:43:59 | INFO     | BrightnessSorcerer:set_start_frame:2443 | Start frame set to: 675
+2025-07-22 10:44:36 | WARNING  | BrightnessSorcerer:_on_emergency_manual_toggled:3069 | EMERGENCY MANUAL MODE ENABLED - All automation bypassed
+2025-07-22 10:44:54 | INFO     | BrightnessSorcerer:_on_use_ref_masks_toggled:3023 | Reference mask analysis enabled
+2025-07-22 10:46:25 | INFO     | BrightnessSorcerer:main:4170 | Starting Brightness Sorcerer v2.0.0
+2025-07-22 10:46:25 | INFO     | BrightnessSorcerer:_load_settings:971 | Loaded settings with 1 recent files
+2025-07-22 10:46:26 | INFO     | BrightnessSorcerer:main:4180 | Application startup complete
+2025-07-22 10:46:29 | INFO     | BrightnessSorcerer:main:4184 | Application exiting with code 0
+2025-07-22 10:46:29 | INFO     | BrightnessSorcerer:main:4201 | Application cleanup complete
+2025-07-22 10:49:37 | INFO     | BrightnessSorcerer:main:4170 | Starting Brightness Sorcerer v2.0.0
+2025-07-22 10:49:37 | INFO     | BrightnessSorcerer:_load_settings:971 | Loaded settings with 1 recent files
+2025-07-22 10:49:38 | INFO     | BrightnessSorcerer:main:4180 | Application startup complete
+2025-07-22 10:50:27 | INFO     | BrightnessSorcerer:load_video:2228 | Loading video: Jasper Data Device 12.mp4
+2025-07-22 10:50:27 | INFO     | BrightnessSorcerer:load_video:2285 | Video loaded successfully: 1280x720, 1230 frames, 29.88 FPS, 41.17s
+2025-07-22 10:50:45 | INFO     | BrightnessSorcerer:_on_expert_mode_toggled:3062 | Expert mode enabled - advanced manual controls available
+2025-07-22 10:50:48 | INFO     | BrightnessSorcerer:_on_force_manual_thresholds_toggled:3087 | Manual thresholds forced - ignoring auto-detection and background ROI
+2025-07-22 10:54:11 | INFO     | BrightnessSorcerer:main:4184 | Application exiting with code 0
+2025-07-22 10:54:11 | INFO     | BrightnessSorcerer:main:4201 | Application cleanup complete
+2025-07-22 22:35:04 | INFO     | BrightnessSorcerer:main:4227 | Starting Brightness Sorcerer v2.0.0
+2025-07-22 22:35:04 | CRITICAL | BrightnessSorcerer:main:4245 | Failed to start application: property 'reference_masks' of 'VideoAnalyzer' object has no setter
+Traceback (most recent call last):
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 4228, in main
+    win = VideoAnalyzer()
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 802, in __init__
+    self._init_vars()
+    ~~~~~~~~~~~~~~~^^
+  File "/Users/nedcutler/Documents/Code/ECL_Analysis/main.py", line 898, in _init_vars
+    self.reference_masks = {}            # Dict[roi_idx, np.ndarray] - binary masks per ROI
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: property 'reference_masks' of 'VideoAnalyzer' object has no setter
+2025-07-22 22:37:08 | INFO     | BrightnessSorcerer:main:4258 | Application cleanup complete
+2025-07-23 00:02:42 | INFO     | BrightnessSorcerer:main:4232 | Starting Brightness Sorcerer v2.0.0
+2025-07-23 00:02:42 | INFO     | BrightnessSorcerer:_load_settings:1033 | Loaded settings with 1 recent files
+2025-07-23 00:02:43 | INFO     | BrightnessSorcerer:main:4242 | Application startup complete

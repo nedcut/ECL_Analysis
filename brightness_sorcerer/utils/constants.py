@@ -53,12 +53,6 @@ LOW_LIGHT_BILATERAL_SIGMA_SPACE = 75
 LOW_LIGHT_CHANNEL_BOOST_FACTOR = 1.2
 LOW_LIGHT_SIGNAL_AMPLIFICATION_FACTOR = 1.5
 
-# Audio processing constants
-AUDIO_BEEP_FREQUENCY_RANGE = (800, 1200)  # Hz
-AUDIO_BEEP_MIN_DURATION = 0.1  # seconds
-AUDIO_BEEP_MIN_AMPLITUDE = 0.1  # normalized
-AUDIO_SAMPLE_RATE = 44100  # Hz
-
 # File and settings
 DEFAULT_SETTINGS_FILE = "config/brightness_analyzer_settings.json"
 DEFAULT_LOG_FILE = "brightness_analyzer.log"

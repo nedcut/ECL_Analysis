@@ -12,8 +12,7 @@ from brightness_sorcerer.core.exceptions import (
     ConfigurationError,
     ValidationError,
     ROIError,
-    CacheError,
-    AudioError
+    CacheError
 )
 
 
@@ -176,29 +175,6 @@ class TestCacheError:
         assert memory_error.details["current_size"] == 1024
 
 
-class TestAudioError:
-    """Test audio specific errors."""
-    
-    def test_inheritance(self):
-        """Test that AudioError inherits from BrightnessSorcererError."""
-        error = AudioError("Audio system failed")
-        assert isinstance(error, BrightnessSorcererError)
-        assert isinstance(error, AudioError)
-    
-    def test_audio_error_scenarios(self):
-        """Test various audio error scenarios."""
-        # Initialization error
-        init_error = AudioError("Failed to initialize audio system")
-        assert "Failed to initialize" in str(init_error)
-        
-        # Playback error
-        playback_error = AudioError(
-            "Audio playback failed",
-            error_code="AUDIO001",
-            details={"device": "default", "format": "wav"}
-        )
-        assert "Audio playback failed" in str(playback_error)
-        assert playback_error.error_code == "AUDIO001"
 
 
 class TestExceptionHierarchy:
@@ -212,8 +188,7 @@ class TestExceptionHierarchy:
             ConfigurationError,
             ValidationError,
             ROIError,
-            CacheError,
-            AudioError
+            CacheError
         ]
         
         for exc_class in exception_classes:

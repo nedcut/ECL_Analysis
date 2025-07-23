@@ -168,15 +168,6 @@ def setup_test_logging():
     logging.getLogger().handlers.clear()
 
 
-@pytest.fixture
-def mock_audio_manager():
-    """Create a mock audio manager."""
-    mock_manager = Mock()
-    mock_manager.initialize.return_value = True
-    mock_manager.is_initialized = True
-    mock_manager.play_sound.return_value = None
-    mock_manager.cleanup.return_value = None
-    return mock_manager
 
 
 # Test utilities

@@ -160,35 +160,6 @@ class TestAnalysisConstants:
             assert const_value > 0
 
 
-class TestAudioConstants:
-    """Test audio processing constants."""
-    
-    def test_audio_processing_constants(self):
-        """Test audio processing constants."""
-        audio_constants = [
-            'AUDIO_BEEP_FREQUENCY_RANGE',
-            'AUDIO_BEEP_MIN_DURATION',
-            'AUDIO_BEEP_MIN_AMPLITUDE',
-            'AUDIO_SAMPLE_RATE'
-        ]
-        
-        for const_name in audio_constants:
-            assert hasattr(constants, const_name), f"Missing constant: {const_name}"
-    
-    def test_audio_frequency_range(self):
-        """Test audio frequency range is valid."""
-        freq_range = constants.AUDIO_BEEP_FREQUENCY_RANGE
-        assert isinstance(freq_range, tuple)
-        assert len(freq_range) == 2
-        assert freq_range[0] < freq_range[1]  # Min < Max
-        assert freq_range[0] > 0  # Positive frequencies
-    
-    def test_audio_timing_constants(self):
-        """Test audio timing constants."""
-        assert constants.AUDIO_BEEP_MIN_DURATION > 0
-        assert constants.AUDIO_BEEP_MIN_AMPLITUDE > 0
-        assert constants.AUDIO_SAMPLE_RATE > 0
-        assert constants.AUDIO_SAMPLE_RATE >= 8000  # Reasonable minimum
 
 
 class TestFileConstants:

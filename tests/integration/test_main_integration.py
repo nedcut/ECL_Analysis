@@ -117,17 +117,12 @@ class TestConfigurationIntegration:
         # Test settings structure
         test_settings = {
             'recent_files': ['/path/to/video.mp4'],
-            'audio_enabled': True,
-            'audio_volume': 0.7,
             'frame_cache_size': 100,
             'log_level': 'INFO'
         }
         
         # Verify settings structure
         assert isinstance(test_settings['recent_files'], list)
-        assert isinstance(test_settings['audio_enabled'], bool)
-        assert isinstance(test_settings['audio_volume'], (int, float))
-        assert 0 <= test_settings['audio_volume'] <= 1.0
         assert isinstance(test_settings['frame_cache_size'], int)
         assert test_settings['frame_cache_size'] > 0
     
