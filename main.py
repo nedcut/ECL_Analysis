@@ -6,7 +6,7 @@ import os
 import json
 import time
 from typing import Optional, Tuple, List, Union, Dict
-import matplotlib.pyplot as plt
+# Matplotlib is imported lazily inside _generate_enhanced_plot for faster startup and smaller bundle size
 from PyQt5 import QtWidgets, QtGui, QtCore
 import logging
 from collections import OrderedDict
@@ -57,12 +57,19 @@ class FrameCache:
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
     
     def get(self, frame_index: int) -> Optional[np.ndarray]:
-        """Get frame from cache, moving it to end (most recently used)."""
+        """Get frame from cache, moving it to end (most recently used).
+
+        Returning the stored NumPy array directly avoids the additional memory
+        copy that was previously made here.  The caller already uses
+        `frame.copy()` defensively where modifications are required (e.g.
+        before drawing), so returning the reference is safe and significantly
+        reduces RAM pressure when navigating through frames.
+        """
         if frame_index in self._cache:
             # Move to end (most recently used)
             frame = self._cache.pop(frame_index)
             self._cache[frame_index] = frame
-            return frame.copy()  # Return copy to prevent modifications
+            return frame  # No extra copy – improves performance & memory
         return None
     
     def put(self, frame_index: int, frame: np.ndarray):
@@ -872,7 +879,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """
         Update cached label size *without* immediately redrawing the frame.
         Calling show_frame() synchronously inside resizeEvent can create
-        a feedback loop: the freshly scaled pixmap changes the label’s
+        a feedback loop: the freshly scaled pixmap changes the label's
         sizeHint, Qt recalculates the layout, and another resizeEvent fires.
         By deferring the redraw with QTimer.singleShot(0, …) we let the
         resize settle first and repaint exactly once.
@@ -925,7 +932,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.frame = frame
             self.frame_cache.put(0, frame)  # Cache first frame
 
-            # Ensure the pixmap scales to the label’s current size the first time we draw it
+            # Ensure the pixmap scales to the label's current size the first time we draw it
             self._current_image_size = self.image_label.size()
             
             # Update UI elements for the loaded video
@@ -1110,24 +1117,35 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         brightness_mean_values = []
         brightness_median_values = []
-        fh, fw = self.frame.shape[:2]
+
+        # Convert once per frame rather than per-ROI (substantial speed-up)
+        lab = cv2.cvtColor(self.frame, cv2.COLOR_BGR2LAB)
+        l_star_full = lab[:, :, 0].astype(np.float32) * 100.0 / 255.0
+
+        fh, fw = l_star_full.shape[:2]
         for idx, (pt1, pt2) in enumerate(self.rects):
             # Skip background ROI from measurements
             if idx == self.background_roi_idx:
                 continue
-                
+
             # Ensure ROI coordinates are valid within the frame
             x1 = max(0, min(pt1[0], fw - 1))
             y1 = max(0, min(pt1[1], fh - 1))
             x2 = max(0, min(pt2[0], fw - 1))
             y2 = max(0, min(pt2[1], fh - 1))
 
-            if x2 > x1 and y2 > y1: # Check for valid ROI area
-                roi = self.frame[y1:y2, x1:x2]
-                mean_val, median_val = self._compute_brightness_stats(roi)
+            if x2 > x1 and y2 > y1:  # Valid ROI area
+                roi_lstar = l_star_full[y1:y2, x1:x2]
+                mask = roi_lstar > self.manual_threshold
+                if np.any(mask):
+                    filtered = roi_lstar[mask]
+                    mean_val = float(np.mean(filtered))
+                    median_val = float(np.median(filtered))
+                else:
+                    mean_val = median_val = 0.0
                 brightness_mean_values.append((idx, mean_val, median_val))
             else:
-                brightness_mean_values.append((idx, 0.0, 0.0)) # Append 0 if ROI is invalid/empty
+                brightness_mean_values.append((idx, 0.0, 0.0))
 
         if brightness_mean_values:
             # Display both mean and median brightness for each ROI
@@ -1897,15 +1915,25 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
                     break
 
-                fh, fw = frame.shape[:2]
+                # Precompute L* channel once for the entire frame
+                lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+                l_star_full = lab[:, :, 0].astype(np.float32) * 100.0 / 255.0
+
+                fh, fw = l_star_full.shape[:2]
                 for data_idx, roi_idx in enumerate(non_background_rois):
                     pt1, pt2 = self.rects[roi_idx]
                     x1, y1 = max(0, pt1[0]), max(0, pt1[1])
                     x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
 
                     if x2 > x1 and y2 > y1:
-                        roi = frame[y1:y2, x1:x2]
-                        mean_val, median_val = self._compute_brightness_stats(roi)
+                        roi_lstar = l_star_full[y1:y2, x1:x2]
+                        mask = roi_lstar > self.manual_threshold
+                        if np.any(mask):
+                            filtered = roi_lstar[mask]
+                            mean_val = float(np.mean(filtered))
+                            median_val = float(np.median(filtered))
+                        else:
+                            mean_val = median_val = 0.0
                         brightness_mean_data[data_idx].append(mean_val)
                         brightness_median_data[data_idx].append(median_val)
                     else:
@@ -2032,6 +2060,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _generate_enhanced_plot(self, df, base_filename, save_dir, r_idx, analysis_name, base_video_name):
         """Generate enhanced plots with better styling and information."""
+        # Lazy-load matplotlib only when this method is called to keep initial
+        # application load times low and reduce the size of one-file bundles.
+        import matplotlib.pyplot as plt
         try:
             frames = df['frame']
             brightness_mean = df['brightness_mean']
