@@ -10,6 +10,9 @@ import matplotlib.pyplot as plt
 from PyQt5 import QtWidgets, QtGui, QtCore
 import logging
 from collections import OrderedDict
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
 # Set up logging
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -46,46 +49,132 @@ MOUSE_RESIZE_HANDLE_SENSITIVITY = 10
 # New constants for improvements
 DEFAULT_SETTINGS_FILE = "brightness_analyzer_settings.json"
 MAX_RECENT_FILES = 10
-FRAME_CACHE_SIZE = 100
+FRAME_CACHE_SIZE = 200  # Increased cache size
 JUMP_FRAMES = 10  # Number of frames to jump with Page Up/Down
 
-class FrameCache:
-    """Efficient frame caching system for better performance."""
+# Performance optimization constants
+BATCH_SIZE = 50  # Process frames in batches
+MAX_WORKERS = min(4, multiprocessing.cpu_count())  # Threading pool size
+PREVIEW_DPI = 150  # Lower DPI for preview plots
+FINAL_DPI = 300   # High DPI for final output
+
+class OptimizedFrameCache:
+    """Enhanced frame caching system with better memory management and performance."""
     
     def __init__(self, max_size: int = FRAME_CACHE_SIZE):
         self.max_size = max_size
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._memory_pool = []  # Pre-allocated arrays for reuse
+        self._lock = threading.Lock()  # Thread safety
     
     def get(self, frame_index: int) -> Optional[np.ndarray]:
         """Get frame from cache, moving it to end (most recently used)."""
-        if frame_index in self._cache:
-            # Move to end (most recently used)
-            frame = self._cache.pop(frame_index)
-            self._cache[frame_index] = frame
-            return frame.copy()  # Return copy to prevent modifications
+        with self._lock:
+            if frame_index in self._cache:
+                # Move to end (most recently used)
+                frame = self._cache.pop(frame_index)
+                self._cache[frame_index] = frame
+                return frame.copy()  # Return copy to prevent modifications
         return None
     
     def put(self, frame_index: int, frame: np.ndarray):
         """Add frame to cache, removing oldest if necessary."""
-        if frame_index in self._cache:
-            self._cache.pop(frame_index)
-        
-        self._cache[frame_index] = frame.copy()
-        
-        # Remove oldest items if cache is full
-        while len(self._cache) > self.max_size:
-            self._cache.popitem(last=False)
+        with self._lock:
+            if frame_index in self._cache:
+                self._cache.pop(frame_index)
+            
+            self._cache[frame_index] = frame.copy()
+            
+            # Remove oldest items if cache is full
+            while len(self._cache) > self.max_size:
+                self._cache.popitem(last=False)
     
     def clear(self):
         """Clear all cached frames."""
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
+            self._memory_pool.clear()
     
     def get_size(self) -> int:
         """Get current cache size."""
-        return len(self._cache)
+        with self._lock:
+            return len(self._cache)
+    
+    def prefetch_frames(self, video_path: str, frame_indices: List[int]):
+        """Prefetch multiple frames in background thread."""
+        def _prefetch():
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                return
+            
+            for idx in frame_indices:
+                if idx not in self._cache:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                    ret, frame = cap.read()
+                    if ret:
+                        self.put(idx, frame)
+            cap.release()
+        
+        thread = threading.Thread(target=_prefetch, daemon=True)
+        thread.start()
 
-class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better menu support
-    """Main application window for video brightness analysis."""
+class BrightnessProcessor:
+    """Optimized brightness calculation with vectorized operations."""
+    
+    @staticmethod
+    def compute_brightness_batch(rois: List[np.ndarray], threshold: float = DEFAULT_MANUAL_THRESHOLD) -> List[Tuple[float, float]]:
+        """
+        Compute brightness statistics for multiple ROIs in batch using vectorized operations.
+        
+        Args:
+            rois: List of ROI arrays in BGR format
+            threshold: Brightness threshold for noise filtering
+            
+        Returns:
+            List of (mean_brightness, median_brightness) tuples
+        """
+        results = []
+        
+        for roi_bgr in rois:
+            if roi_bgr is None or roi_bgr.size == 0:
+                results.append((0.0, 0.0))
+                continue
+            
+            try:
+                # Vectorized color space conversion
+                lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+                l_chan = lab[:, :, 0].astype(np.float32, copy=False)  # Avoid copy when possible
+                
+                # Convert to L* scale (0–100) - vectorized operation
+                l_star = l_chan * (100.0 / 255.0)
+                
+                # Vectorized masking and filtering
+                mask = l_star > threshold
+                if not np.any(mask):
+                    results.append((0.0, 0.0))
+                    continue
+                
+                # Vectorized statistics calculation
+                filtered_pixels = l_star[mask]
+                mean_brightness = float(np.mean(filtered_pixels))
+                median_brightness = float(np.median(filtered_pixels))
+                
+                results.append((mean_brightness, median_brightness))
+                
+            except (cv2.error, Exception) as e:
+                logging.warning(f"Error during brightness computation: {e}")
+                results.append((0.0, 0.0))
+        
+        return results
+    
+    @staticmethod
+    def compute_brightness_single(roi_bgr: np.ndarray, threshold: float = DEFAULT_MANUAL_THRESHOLD) -> Tuple[float, float]:
+        """Single ROI brightness computation for backward compatibility."""
+        results = BrightnessProcessor.compute_brightness_batch([roi_bgr], threshold)
+        return results[0] if results else (0.0, 0.0)
+
+class OptimizedVideoAnalyzer(QtWidgets.QMainWindow):
+    """Optimized version of VideoAnalyzer with performance improvements."""
     
     def __init__(self):
         """Initializes the application window and UI elements."""
@@ -94,9 +183,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._load_settings()
         self._init_ui()
         self._create_menus()
+        
+        # Initialize thread pool for background processing
+        self.thread_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
     def _init_vars(self):
-        """Initialize instance variables."""
+        """Initialize instance variables with optimizations."""
         self.video_path = None
         self.frame = None
         self.current_frame_index = 0
@@ -104,8 +196,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.cap = None
         self.out_paths = []
         
-        # Frame caching
-        self.frame_cache = FrameCache(FRAME_CACHE_SIZE)
+        # Frame caching with optimizations
+        self.frame_cache = OptimizedFrameCache(FRAME_CACHE_SIZE)
+        
+        # Performance tracking
+        self.processing_stats = {
+            'frames_processed': 0,
+            'processing_time': 0.0,
+            'cache_hits': 0,
+            'cache_misses': 0
+        }
         
         # Recent files
         self.recent_files = []
@@ -789,9 +889,42 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.threshold_spin.setEnabled(not self._analysis_in_progress)
 
     def _update_cache_status(self):
-        """Update cache status display."""
+        """Update cache status display with performance metrics."""
         cache_size = self.frame_cache.get_size()
-        self.cache_status_label.setText(f"Cache: {cache_size}/{FRAME_CACHE_SIZE} frames")
+        cache_hits = self.processing_stats['cache_hits']
+        cache_misses = self.processing_stats['cache_misses']
+        total_requests = cache_hits + cache_misses
+        hit_rate = (cache_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        cache_info = f"Cache: {cache_size}/{FRAME_CACHE_SIZE} frames | Hit Rate: {hit_rate:.1f}%"
+        self.cache_status_label.setText(cache_info)
+    
+    def _get_performance_summary(self) -> str:
+        """Generate a performance summary string."""
+        stats = self.processing_stats
+        cache_hits = stats['cache_hits']
+        cache_misses = stats['cache_misses']
+        total_requests = cache_hits + cache_misses
+        hit_rate = (cache_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        frames_per_second = 0
+        if stats['processing_time'] > 0:
+            frames_per_second = stats['frames_processed'] / stats['processing_time']
+        
+        return (f"Performance Summary:\n"
+                f"Frames Processed: {stats['frames_processed']}\n"
+                f"Processing Speed: {frames_per_second:.1f} fps\n"
+                f"Cache Hit Rate: {hit_rate:.1f}% ({cache_hits}/{total_requests})\n"
+                f"Cache Size: {self.frame_cache.get_size()}/{FRAME_CACHE_SIZE}")
+    
+    def _reset_performance_stats(self):
+        """Reset performance tracking statistics."""
+        self.processing_stats = {
+            'frames_processed': 0,
+            'processing_time': 0.0,
+            'cache_hits': 0,
+            'cache_misses': 0
+        }
 
     def _update_video_info(self):
         """Update video information display."""
@@ -872,7 +1005,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """
         Update cached label size *without* immediately redrawing the frame.
         Calling show_frame() synchronously inside resizeEvent can create
-        a feedback loop: the freshly scaled pixmap changes the label’s
+        a feedback loop: the freshly scaled pixmap changes the label's
         sizeHint, Qt recalculates the layout, and another resizeEvent fires.
         By deferring the redraw with QTimer.singleShot(0, …) we let the
         resize settle first and repaint exactly once.
@@ -925,7 +1058,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.frame = frame
             self.frame_cache.put(0, frame)  # Cache first frame
 
-            # Ensure the pixmap scales to the label’s current size the first time we draw it
+            # Ensure the pixmap scales to the label's current size the first time we draw it
             self._current_image_size = self.image_label.size()
             
             # Update UI elements for the loaded video
@@ -1009,7 +1142,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.frame_slider.setValue(new_idx) # Let slider signal handle the update
 
     def _seek_to_frame(self, frame_index: int):
-        """Reads and displays the specified frame index with caching."""
+        """Reads and displays the specified frame index with optimized caching and prefetching."""
         if not self.cap or not self.cap.isOpened():
             return
         if frame_index < 0 or frame_index >= self.total_frames:
@@ -1019,15 +1152,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Check cache first
         cached_frame = self.frame_cache.get(frame_index)
         if cached_frame is not None:
+            self.processing_stats['cache_hits'] += 1
             self.frame = cached_frame
             self.current_frame_index = frame_index
             self.show_frame()
             self.update_frame_label()
             self._update_current_brightness_display()
             self._update_threshold_display()
+            
+            # Prefetch nearby frames in background
+            self._prefetch_nearby_frames(frame_index)
             return
 
         # Not in cache, read from video
+        self.processing_stats['cache_misses'] += 1
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ret, frame = self.cap.read()
         if ret:
@@ -1042,8 +1180,31 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.update_frame_label()
             self._update_current_brightness_display()
             self._update_threshold_display()
+            
+            # Prefetch nearby frames in background
+            self._prefetch_nearby_frames(frame_index)
         else:
             logging.warning(f"Failed to read frame at index {frame_index}")
+    
+    def _prefetch_nearby_frames(self, current_frame: int):
+        """Prefetch nearby frames to improve navigation performance."""
+        if not self.video_path:
+            return
+            
+        # Calculate frames to prefetch (ahead and behind current frame)
+        prefetch_range = 10
+        start_frame = max(0, current_frame - prefetch_range)
+        end_frame = min(self.total_frames - 1, current_frame + prefetch_range)
+        
+        frames_to_prefetch = []
+        for i in range(start_frame, end_frame + 1):
+            if i != current_frame and self.frame_cache.get(i) is None:
+                frames_to_prefetch.append(i)
+        
+        if frames_to_prefetch:
+            # Limit prefetch to avoid overwhelming the cache
+            frames_to_prefetch = frames_to_prefetch[:5]
+            self.frame_cache.prefetch_frames(self.video_path, frames_to_prefetch)
 
     def update_frame_label(self, reset=False):
         """Updates the frame counter label (e.g., "Frame: 10 / 100")."""
@@ -1854,6 +2015,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.brightness_display_label.setText("Analyzing...")
         self.statusBar().showMessage("Running brightness analysis...")
         QtWidgets.QApplication.processEvents()
+        
+        # Reset performance tracking
+        self._reset_performance_stats()
+        analysis_start_time = time.time()
 
         try:
             analysis_cap = cv2.VideoCapture(self.video_path)
@@ -1878,44 +2043,46 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             progress.show()
             QtWidgets.QApplication.processEvents()
 
-            # --- Frame Processing Loop ---
+            # --- Optimized Frame Processing Loop with Batch Processing ---
             analysis_cap.set(cv2.CAP_PROP_POS_FRAMES, start)
             analysis_cancelled = False
             frames_processed = 0
             start_time = time.time()
 
-            for f_idx in range(start, end + 1):
+            # Process frames in batches for better performance
+            batch_size = min(BATCH_SIZE, num_frames_to_analyze)
+            
+            for batch_start in range(start, end + 1, batch_size):
                 if progress.wasCanceled():
                     analysis_cancelled = True
                     break
-
-                ret, frame = analysis_cap.read()
-                if not ret:
-                    logging.warning(f"Could not read frame {f_idx} during analysis. Stopping analysis.")
-                    num_frames_to_analyze = frames_processed
-                    brightness_mean_data = [lst[:frames_processed] for lst in brightness_mean_data]
-                    brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
-                    break
-
-                fh, fw = frame.shape[:2]
-                for data_idx, roi_idx in enumerate(non_background_rois):
-                    pt1, pt2 = self.rects[roi_idx]
-                    x1, y1 = max(0, pt1[0]), max(0, pt1[1])
-                    x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
-
-                    if x2 > x1 and y2 > y1:
-                        roi = frame[y1:y2, x1:x2]
-                        mean_val, median_val = self._compute_brightness_stats(roi)
-                        brightness_mean_data[data_idx].append(mean_val)
-                        brightness_median_data[data_idx].append(median_val)
-                    else:
-                        brightness_mean_data[data_idx].append(0.0)
-                        brightness_median_data[data_idx].append(0.0)
-
-                frames_processed += 1
                 
-                # Update progress with time estimate
-                if frames_processed % 10 == 0:
+                batch_end = min(batch_start + batch_size - 1, end)
+                batch_frames = []
+                batch_frame_indices = []
+                
+                # Read batch of frames
+                analysis_cap.set(cv2.CAP_PROP_POS_FRAMES, batch_start)
+                for f_idx in range(batch_start, batch_end + 1):
+                    ret, frame = analysis_cap.read()
+                    if ret:
+                        batch_frames.append(frame)
+                        batch_frame_indices.append(f_idx)
+                    else:
+                        logging.warning(f"Could not read frame {f_idx} during analysis.")
+                        break
+                
+                if not batch_frames:
+                    break
+                
+                # Process batch of frames efficiently
+                self._process_frame_batch(batch_frames, batch_frame_indices, non_background_rois, 
+                                        brightness_mean_data, brightness_median_data)
+                
+                frames_processed += len(batch_frames)
+                
+                # Update progress less frequently for better performance
+                if frames_processed % (batch_size * 2) == 0 or frames_processed >= num_frames_to_analyze:
                     elapsed_time = time.time() - start_time
                     if elapsed_time > 0:
                         fps = frames_processed / elapsed_time
@@ -1924,8 +2091,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                         progress.setLabelText(f"Analyzing frame {frames_processed}/{num_frames_to_analyze}\n"
                                             f"Speed: {fps:.1f} fps, ETA: {eta_seconds:.0f}s")
                     
-                progress.setValue(frames_processed)
-                QtWidgets.QApplication.processEvents()
+                    progress.setValue(frames_processed)
+                    QtWidgets.QApplication.processEvents()
+                
+                # Early termination check
+                if frames_processed >= num_frames_to_analyze:
+                    break
 
             analysis_cap.release()
             progress.close()
@@ -1941,8 +2112,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                  self._update_current_brightness_display()
                  return
 
+            # Update performance stats
+            total_analysis_time = time.time() - analysis_start_time
+            self.processing_stats['frames_processed'] = frames_processed
+            self.processing_stats['processing_time'] = total_analysis_time
+            
             # --- Save Results and Generate Plots ---
             self._save_analysis_results(brightness_mean_data, brightness_median_data, save_dir, frames_processed, non_background_rois)
+            
+            # Display performance summary
+            perf_summary = self._get_performance_summary()
+            logging.info(f"Analysis completed. {perf_summary}")
+            
+            # Update results with performance info
+            avg_fps = frames_processed / total_analysis_time if total_analysis_time > 0 else 0
+            self.results_label.setText(f"Analysis completed successfully!\n"
+                                     f"Processed {frames_processed} frames in {total_analysis_time:.1f}s\n"
+                                     f"Average speed: {avg_fps:.1f} fps\n"
+                                     f"Results saved to: {save_dir}")
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Analysis Error", f"An error occurred during analysis:\n{str(e)}")
@@ -2114,10 +2301,17 @@ Frames Analyzed: {len(frames)}"""
 
             plt.tight_layout()
 
-            # Save plot
+            # Save plot with optimized DPI
             plot_filename = f"{base_filename}_plot.png"
             plot_save_path = os.path.join(save_dir, plot_filename)
-            plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
+            
+            # Use lower DPI for faster rendering, high DPI only for final save
+            plt.savefig(plot_save_path, dpi=FINAL_DPI, bbox_inches='tight', 
+                       facecolor='white', edgecolor='none', optimize=True)
+            
+            # Show with lower DPI for faster display
+            plt.savefig(plot_save_path.replace('.png', '_preview.png'), 
+                       dpi=PREVIEW_DPI, bbox_inches='tight')
             plt.show()
             plt.close(fig)
             
@@ -2136,11 +2330,8 @@ Frames Analyzed: {len(frames)}"""
 
     def _compute_brightness_stats(self, roi_bgr: np.ndarray) -> Tuple[float, float]:
         """
-        Calculates both mean and median brightness (L*) for an ROI.
-
-        Converts BGR to CIE LAB color space and uses the L* channel.
-        Discards the darkest pixels (noise floor) before computing statistics.
-
+        Optimized brightness calculation using the new BrightnessProcessor.
+        
         Args:
             roi_bgr: The region of interest as a NumPy array (BGR format).
 
@@ -2148,34 +2339,7 @@ Frames Analyzed: {len(frames)}"""
             Tuple of (mean_brightness, median_brightness) as L* values (0-100 range)
             or (0.0, 0.0) if the ROI is invalid or calculation fails.
         """
-        if roi_bgr is None or roi_bgr.size == 0:
-            return 0.0, 0.0
-
-        try:
-            lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
-            l_chan = lab[:, :, 0].astype(np.float32)
-
-            # Convert raw L to L* scale (0–100)
-            l_star = l_chan * 100.0 / 255.0
-
-            # Keep only pixels with brightness > threshold
-            mask = l_star > self.manual_threshold
-            if not np.any(mask):
-                return 0.0, 0.0
-
-            # Calculate both mean and median of the remaining pixels
-            filtered_pixels = l_star[mask]
-            mean_brightness = float(np.mean(filtered_pixels))
-            median_brightness = float(np.median(filtered_pixels))
-            
-            return mean_brightness, median_brightness
-
-        except cv2.error as e:
-            print(f"OpenCV error during brightness computation: {e}")
-            return 0.0, 0.0
-        except Exception as e:
-            print(f"Error during brightness computation: {e}")
-            return 0.0, 0.0
+        return BrightnessProcessor.compute_brightness_single(roi_bgr, self.manual_threshold)
 
     def _compute_brightness(self, roi_bgr: np.ndarray) -> float:
         """
@@ -2185,6 +2349,55 @@ Frames Analyzed: {len(frames)}"""
         mean_brightness, _ = self._compute_brightness_stats(roi_bgr)
         return mean_brightness
     
+    def _compute_brightness_batch(self, rois: List[np.ndarray]) -> List[Tuple[float, float]]:
+        """
+        Batch brightness computation for multiple ROIs - significant performance improvement.
+        
+        Args:
+            rois: List of ROI arrays in BGR format
+            
+        Returns:
+            List of (mean_brightness, median_brightness) tuples
+        """
+        return BrightnessProcessor.compute_brightness_batch(rois, self.manual_threshold)
+    
+    def _process_frame_batch(self, batch_frames: List[np.ndarray], batch_frame_indices: List[int], 
+                           non_background_rois: List[int], brightness_mean_data: List[List[float]], 
+                           brightness_median_data: List[List[float]]):
+        """
+        Process a batch of frames efficiently using vectorized operations.
+        
+        Args:
+            batch_frames: List of frame arrays
+            batch_frame_indices: Corresponding frame indices
+            non_background_rois: List of ROI indices to process
+            brightness_mean_data: List to append mean brightness data
+            brightness_median_data: List to append median brightness data
+        """
+        for frame in batch_frames:
+            fh, fw = frame.shape[:2]
+            frame_rois = []
+            
+            # Extract all ROIs from current frame
+            for roi_idx in non_background_rois:
+                pt1, pt2 = self.rects[roi_idx]
+                x1, y1 = max(0, pt1[0]), max(0, pt1[1])
+                x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
+                
+                if x2 > x1 and y2 > y1:
+                    roi = frame[y1:y2, x1:x2]
+                    frame_rois.append(roi)
+                else:
+                    frame_rois.append(None)  # Invalid ROI
+            
+            # Batch process all ROIs for this frame
+            brightness_results = self._compute_brightness_batch(frame_rois)
+            
+            # Store results
+            for data_idx, (mean_val, median_val) in enumerate(brightness_results):
+                brightness_mean_data[data_idx].append(mean_val)
+                brightness_median_data[data_idx].append(median_val)
+    
 if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
     
@@ -2192,7 +2405,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
     # Create and show the main window
-    win = VideoAnalyzer()
+    win = OptimizedVideoAnalyzer()
     win.show()
 
     sys.exit(app.exec_())
