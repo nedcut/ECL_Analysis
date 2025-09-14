@@ -31,17 +31,18 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # --- Constants ---
 DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif"
-COLOR_BACKGROUND = "#2d2d2d"
-COLOR_FOREGROUND = "#cccccc"
-COLOR_ACCENT = "#5a9bd5"
-COLOR_ACCENT_HOVER = "#7ab3e0"
-COLOR_SECONDARY = "#404040"
-COLOR_SECONDARY_LIGHT = "#555555"
-COLOR_SUCCESS = "#70ad47"
-COLOR_WARNING = "#ed7d31"
-COLOR_ERROR = "#ff0000"
-COLOR_INFO = "#ffc000"
-COLOR_BRIGHTNESS_LABEL = "#ffeb3b"
+# Modern color palette with improved contrast and visual appeal
+COLOR_BACKGROUND = "#1a1a1a"          # Deeper, richer dark background
+COLOR_FOREGROUND = "#e0e0e0"          # Softer white for better readability
+COLOR_ACCENT = "#4f9cf9"              # Modern blue with better saturation
+COLOR_ACCENT_HOVER = "#6bb3ff"        # Brighter blue for interactions
+COLOR_SECONDARY = "#2d2d2d"           # Elevated surface color
+COLOR_SECONDARY_LIGHT = "#404040"     # Lighter surface for borders/dividers
+COLOR_SUCCESS = "#10b981"             # Modern emerald green
+COLOR_WARNING = "#f59e0b"             # Warm amber
+COLOR_ERROR = "#ef4444"               # Modern red with better contrast
+COLOR_INFO = "#06b6d4"                # Cyan for info states
+COLOR_BRIGHTNESS_LABEL = "#fbbf24"    # Golden yellow for brightness display
 
 ROI_COLORS = [
     (255, 50, 50), (50, 200, 50), (50, 150, 255), (255, 150, 50),
@@ -438,6 +439,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Fixed mask across frames
         self.use_fixed_mask = False
         self.fixed_roi_masks: List[Optional[np.ndarray]] = []  # aligned with self.rects
+
+        # Noise filtering parameters (adjustable via UI)
+        self.morphological_kernel_size = MORPHOLOGICAL_KERNEL_SIZE
+        self.background_percentile = 90.0  # For background ROI threshold calculation
+        self.noise_floor_threshold = 0.0   # Additional noise floor filtering
         
         # Video playback
         self.is_playing = False
@@ -868,42 +874,67 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 border-radius: 3px;
             }}
             QPushButton {{
-                background-color: {COLOR_SECONDARY_LIGHT};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
                 color: {COLOR_FOREGROUND};
                 border: 1px solid {COLOR_SECONDARY};
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 8px 15px;
                 font-size: 14px;
                 min-height: 20px;
             }}
             QPushButton:hover {{
-                background-color: {COLOR_ACCENT};
-                color: {COLOR_BACKGROUND};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
                 border: 1px solid {COLOR_ACCENT_HOVER};
+                padding: 9px 16px;
             }}
             QPushButton:pressed {{
-                background-color: {COLOR_ACCENT_HOVER};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
+                padding: 7px 14px;
+                border: 1px solid {COLOR_ACCENT};
             }}
             QPushButton:disabled {{
-                background-color: {COLOR_SECONDARY};
+                background: {COLOR_SECONDARY};
                 color: #888888;
                 border: 1px solid {COLOR_SECONDARY};
             }}
             QPushButton:checked {{
-                background-color: {COLOR_ACCENT};
-                color: {COLOR_BACKGROUND};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
                 border: 1px solid {COLOR_ACCENT_HOVER};
             }}
             QListWidget {{
-                background: {COLOR_BACKGROUND};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_BACKGROUND}, stop: 1 {COLOR_SECONDARY});
                 border: 1px solid {COLOR_SECONDARY_LIGHT};
                 color: {COLOR_FOREGROUND};
                 font-size: 13px;
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QListWidget::item {{
                 border-radius: 4px;
+                padding: 4px 8px;
+                margin: 1px;
+            }}
+            QListWidget::item:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
+                border: 1px solid {COLOR_ACCENT};
             }}
             QListWidget::item:selected {{
-                background: {COLOR_ACCENT};
-                color: {COLOR_BACKGROUND};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
+                border: 1px solid {COLOR_ACCENT_HOVER};
+            }}
+            QListWidget::item:selected:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT_HOVER}, stop: 1 {COLOR_ACCENT});
             }}
             QSlider::groove:horizontal {{
                 border: 1px solid {COLOR_SECONDARY};
@@ -927,14 +958,25 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 border-radius: 3px;
             }}
             QLineEdit, QSpinBox {{
-                background-color: {COLOR_BACKGROUND};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_BACKGROUND}, stop: 1 {COLOR_SECONDARY});
                 border: 1px solid {COLOR_SECONDARY_LIGHT};
-                padding: 4px;
-                border-radius: 4px;
+                padding: 6px 8px;
+                border-radius: 6px;
                 min-height: 20px;
+                color: {COLOR_FOREGROUND};
+            }}
+            QLineEdit:hover, QSpinBox:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_SECONDARY_LIGHT});
+                border: 1px solid {COLOR_ACCENT};
             }}
             QLineEdit:focus, QSpinBox:focus {{
-                border: 1px solid {COLOR_ACCENT};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 white, stop: 1 #f8f9fa);
+                border: 2px solid {COLOR_ACCENT};
+                color: #1a1a1a;
+                padding: 5px 7px;
             }}
             QSpinBox::up-button, QSpinBox::down-button {{
                 subcontrol-origin: border;
@@ -972,6 +1014,229 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 background-color: {COLOR_SUCCESS};
                 border-radius: 3px;
             }}
+
+            /* Modern Video Control Styling */
+            QPushButton#playButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
+                border: 2px solid {COLOR_ACCENT_HOVER};
+                border-radius: 20px;
+                font-size: 16px;
+                font-weight: bold;
+                min-width: 44px;
+                min-height: 36px;
+            }}
+            QPushButton#playButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT_HOVER}, stop: 1 {COLOR_ACCENT});
+                border: 2px solid #8fc8ff;
+                transform: scale(1.05);
+            }}
+            QPushButton#playButton:pressed {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
+                border: 2px solid {COLOR_ACCENT};
+            }}
+
+            QPushButton#mediaButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
+                color: {COLOR_FOREGROUND};
+                border: 1px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 20px;
+                font-size: 14px;
+                font-weight: bold;
+                min-width: 36px;
+                min-height: 36px;
+            }}
+            QPushButton#mediaButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
+                border: 1px solid {COLOR_ACCENT_HOVER};
+            }}
+            QPushButton#mediaButton:pressed {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
+            }}
+
+            QPushButton#jumpButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
+                color: {COLOR_FOREGROUND};
+                border: 1px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 500;
+                padding: 6px 12px;
+            }}
+            QPushButton#jumpButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_INFO}, stop: 1 #059aa8);
+                color: white;
+                border: 1px solid {COLOR_INFO};
+            }}
+
+            QPushButton#analysisButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
+                color: {COLOR_FOREGROUND};
+                border: 1px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 500;
+                padding: 6px 12px;
+            }}
+            QPushButton#analysisButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SUCCESS}, stop: 1 #0d9488);
+                color: white;
+                border: 1px solid {COLOR_SUCCESS};
+            }}
+
+            QSlider#timelineSlider::groove:horizontal {{
+                border: none;
+                height: 8px;
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_BACKGROUND});
+                border-radius: 4px;
+            }}
+            QSlider#timelineSlider::handle:horizontal {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 white, stop: 1 {COLOR_ACCENT});
+                border: 2px solid {COLOR_ACCENT_HOVER};
+                width: 20px;
+                margin: -8px 0;
+                border-radius: 10px;
+            }}
+            QSlider#timelineSlider::handle:horizontal:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 white, stop: 1 {COLOR_ACCENT_HOVER});
+                border: 2px solid #8fc8ff;
+                width: 24px;
+                margin: -10px 0;
+            }}
+            QSlider#timelineSlider::sub-page:horizontal {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SUCCESS}, stop: 1 #059669);
+                border-radius: 4px;
+            }}
+
+            /* Enhanced ComboBox Styling */
+            QComboBox {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
+                border: 1px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-height: 20px;
+                color: {COLOR_FOREGROUND};
+            }}
+            QComboBox:hover {{
+                border: 1px solid {COLOR_ACCENT};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left: 1px solid {COLOR_SECONDARY_LIGHT};
+            }}
+            QComboBox::down-arrow {{
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 6px solid {COLOR_FOREGROUND};
+                margin: 0px 6px;
+            }}
+            QComboBox:hover::down-arrow {{
+                border-top: 6px solid white;
+            }}
+
+            /* Enhanced Frame Separator */
+            QFrame[frameShape="5"] {{ /* VLine */
+                color: {COLOR_SECONDARY_LIGHT};
+                background-color: {COLOR_SECONDARY_LIGHT};
+                max-width: 1px;
+                margin: 4px 8px;
+            }}
+
+            /* Improved GroupBox styling */
+            QGroupBox {{
+                border: 2px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 8px;
+                margin-top: 12px;
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_BACKGROUND});
+                font-weight: bold;
+                font-size: 14px;
+                padding-top: 12px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 4px 8px;
+                color: {COLOR_ACCENT};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_BACKGROUND}, stop: 1 {COLOR_SECONDARY});
+                border: 1px solid {COLOR_ACCENT};
+                border-radius: 4px;
+            }}
+
+            /* Primary Button Styles */
+            QPushButton#primaryButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
+                border: 1px solid {COLOR_ACCENT_HOVER};
+                border-radius: 6px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 8px 16px;
+                min-height: 28px;
+            }}
+            QPushButton#primaryButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT_HOVER}, stop: 1 {COLOR_ACCENT});
+                border: 1px solid #8fc8ff;
+            }}
+            QPushButton#primaryButton:pressed {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
+            }}
+
+            QPushButton#primaryActionButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SUCCESS}, stop: 1 #059669);
+                color: white;
+                border: 2px solid {COLOR_SUCCESS};
+                border-radius: 8px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 10px 20px;
+                min-height: 32px;
+            }}
+            QPushButton#primaryActionButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #22c55e, stop: 1 {COLOR_SUCCESS});
+                border: 2px solid #22c55e;
+                transform: scale(1.02);
+            }}
+            QPushButton#primaryActionButton:pressed {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #15803d, stop: 1 #059669);
+            }}
+            QPushButton#primaryActionButton:disabled {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_BACKGROUND});
+                color: #888888;
+                border: 2px solid {COLOR_SECONDARY};
+            }}
         """)
 
     def _create_layouts(self):
@@ -998,41 +1263,71 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.right_scroll.setWidget(self.right_content)
         self.splitter.addWidget(self.right_scroll)
 
-        # Set sensible default sizes
+        # Enhanced responsive sizing
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 1)
-        self.right_scroll.setMinimumWidth(340)
+        self.right_scroll.setMinimumWidth(320)  # Slightly reduced for smaller screens
+        self.right_scroll.setMaximumWidth(480)  # Prevent right panel from being too wide
+
         # Prevent either pane from collapsing to zero
         self.splitter.setCollapsible(0, False)
         self.splitter.setCollapsible(1, False)
 
+        # Set minimum size for main window to ensure usability
+        self.setMinimumSize(800, 600)
+
     def _set_default_splitter_sizes(self):
-        """Set initial splitter sizes based on current window width for sane defaults."""
+        """Set responsive splitter sizes based on current window width and screen size."""
         try:
             total = max(1, self.width())
-            left = int(total * 0.68)
-            right = max(320, total - left)
+
+            # Adaptive split ratio based on window size
+            if total <= 1000:
+                # Smaller screens: give more space to video
+                ratio = 0.72
+            elif total <= 1400:
+                # Medium screens: balanced layout
+                ratio = 0.68
+            else:
+                # Large screens: slightly more space for side panel
+                ratio = 0.65
+
+            left = int(total * ratio)
+            right = max(320, min(480, total - left))  # Clamp right panel size
             self.splitter.setSizes([left, right])
         except Exception:
-            # Fallback sizes
-            self.splitter.setSizes([900, 420])
+            # Fallback sizes for different screen types
+            total = max(1, self.width())
+            if total <= 1000:
+                self.splitter.setSizes([720, 320])
+            else:
+                self.splitter.setSizes([900, 420])
 
     def _create_widgets(self):
         """Create all the widgets and add them to layouts."""
         # --- Left Layout Widgets ---
+        # Header section with improved spacing
+        header_layout = QtWidgets.QVBoxLayout()
+        header_layout.setSpacing(8)
+        header_layout.setContentsMargins(8, 8, 8, 16)
+
         self.title_label = QtWidgets.QLabel("Brightness Sorcerer", self)
         self.title_label.setObjectName("titleLabel")
-        self.left_layout.addWidget(self.title_label)
+        header_layout.addWidget(self.title_label)
 
         # File info label
         self.file_info_label = QtWidgets.QLabel("No video loaded")
         self.file_info_label.setObjectName("statusLabel")
-        self.left_layout.addWidget(self.file_info_label)
+        header_layout.addWidget(self.file_info_label)
 
-        # Open-file button
-        self.open_btn = QtWidgets.QPushButton("Open Video… (Ctrl+O)")    
+        # Open-file button with better styling
+        self.open_btn = QtWidgets.QPushButton("📁 Open Video… (Ctrl+O)")
+        self.open_btn.setObjectName("primaryButton")
         self.open_btn.setToolTip("Choose a video file from disk")
-        self.left_layout.addWidget(self.open_btn)
+        self.open_btn.setFixedHeight(36)
+        header_layout.addWidget(self.open_btn)
+
+        self.left_layout.addLayout(header_layout)
 
         self.image_label = QtWidgets.QLabel(self)
         self.image_label.setObjectName("imageLabel")
@@ -1043,100 +1338,145 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.image_label.setText("Drag & Drop Video File Here")
         self.left_layout.addWidget(self.image_label, stretch=1)
 
-        # Video Controls Groupbox for better organization
+        # Modern Video Controls with consolidated layout
         self.video_controls_groupbox = QtWidgets.QGroupBox("Video Controls")
         controls_layout = QtWidgets.QVBoxLayout()
-        controls_layout.setContentsMargins(8, 8, 8, 8)
-        controls_layout.setSpacing(6)
-        
-        # Timeline and Frame Info
-        timeline_layout = QtWidgets.QHBoxLayout()
+        controls_layout.setContentsMargins(12, 16, 12, 16)
+        controls_layout.setSpacing(12)
+
+        # Main Timeline Row - consolidated playback controls
+        main_timeline_layout = QtWidgets.QHBoxLayout()
+        main_timeline_layout.setSpacing(8)
+
+        # Previous frame button
+        self.prev_frame_btn = QtWidgets.QPushButton("⏮")
+        self.prev_frame_btn.setToolTip("Previous Frame (Left Arrow)")
+        self.prev_frame_btn.setFixedSize(40, 40)
+        self.prev_frame_btn.setObjectName("mediaButton")
+        main_timeline_layout.addWidget(self.prev_frame_btn)
+
+        # Play/Pause button - larger and more prominent
+        self.play_pause_btn = QtWidgets.QPushButton("⏵")
+        self.play_pause_btn.setToolTip("Play/Pause video (Spacebar)")
+        self.play_pause_btn.setFixedSize(48, 40)
+        self.play_pause_btn.setObjectName("playButton")
+        main_timeline_layout.addWidget(self.play_pause_btn)
+
+        # Next frame button
+        self.next_frame_btn = QtWidgets.QPushButton("⏭")
+        self.next_frame_btn.setToolTip("Next Frame (Right Arrow)")
+        self.next_frame_btn.setFixedSize(40, 40)
+        self.next_frame_btn.setObjectName("mediaButton")
+        main_timeline_layout.addWidget(self.next_frame_btn)
+
+        # Timeline slider with frame info
+        timeline_container = QtWidgets.QVBoxLayout()
+        timeline_container.setSpacing(4)
+
+        # Frame slider (main timeline)
         self.frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.frame_slider.setToolTip("Drag to navigate frames or click to seek")
-        timeline_layout.addWidget(self.frame_slider)
-        
-        # Frame info and input
-        frame_info_layout = QtWidgets.QVBoxLayout()
+        self.frame_slider.setMinimumHeight(24)
+        self.frame_slider.setObjectName("timelineSlider")
+        timeline_container.addWidget(self.frame_slider)
+
+        # Frame info row
+        frame_info_layout = QtWidgets.QHBoxLayout()
+        frame_info_layout.setSpacing(8)
+
         self.frame_label = QtWidgets.QLabel("Frame: 0 / 0")
-        self.frame_label.setMinimumWidth(100)
-        self.frame_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.frame_label.setMinimumWidth(120)
+        self.frame_label.setAlignment(QtCore.Qt.AlignLeft)
         frame_info_layout.addWidget(self.frame_label)
-        
+
+        frame_info_layout.addStretch()
+
+        # Frame input
+        frame_input_layout = QtWidgets.QHBoxLayout()
+        frame_input_layout.setSpacing(4)
+        frame_input_layout.addWidget(QtWidgets.QLabel("Go to:"))
         self.frame_spinbox = QtWidgets.QSpinBox()
-        self.frame_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
+        self.frame_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         self.frame_spinbox.setToolTip("Enter frame number directly")
         self.frame_spinbox.setAlignment(QtCore.Qt.AlignCenter)
-        frame_info_layout.addWidget(self.frame_spinbox)
-        timeline_layout.addLayout(frame_info_layout)
-        
-        controls_layout.addLayout(timeline_layout)
-        
-        # Playback Controls Row
-        playback_layout = QtWidgets.QHBoxLayout()
-        
-        # Play/Pause button
-        self.play_pause_btn = QtWidgets.QPushButton("▶ Play")
-        self.play_pause_btn.setToolTip("Play/Pause video (Spacebar)")
-        self.play_pause_btn.setMinimumWidth(80)
-        playback_layout.addWidget(self.play_pause_btn)
-        
-        # Speed control
-        speed_label = QtWidgets.QLabel("Speed:")
-        playback_layout.addWidget(speed_label)
+        self.frame_spinbox.setFixedWidth(80)
+        frame_input_layout.addWidget(self.frame_spinbox)
+
+        frame_info_layout.addLayout(frame_input_layout)
+        timeline_container.addLayout(frame_info_layout)
+
+        main_timeline_layout.addLayout(timeline_container)
+
+        # Speed control - compact design
+        speed_container = QtWidgets.QVBoxLayout()
+        speed_container.setSpacing(4)
+        speed_label = QtWidgets.QLabel("Speed")
+        speed_label.setAlignment(QtCore.Qt.AlignCenter)
+        speed_container.addWidget(speed_label)
         self.speed_combo = QtWidgets.QComboBox()
-        self.speed_combo.addItems(["0.25x", "0.5x", "1x", "2x", "4x"])
-        self.speed_combo.setCurrentText("1x")
+        self.speed_combo.addItems(["0.25×", "0.5×", "1×", "2×", "4×"])
+        self.speed_combo.setCurrentText("1×")
         self.speed_combo.setToolTip("Playback speed")
-        playback_layout.addWidget(self.speed_combo)
-        
-        playback_layout.addStretch()
-        controls_layout.addLayout(playback_layout)
-        
-        # Navigation Controls Row  
-        navigation_layout = QtWidgets.QHBoxLayout()
-        
-        self.prev_frame_btn = QtWidgets.QPushButton("◀")
-        self.prev_frame_btn.setToolTip("Previous Frame (Left Arrow)")
-        self.prev_frame_btn.setFixedSize(35, 30)
-        navigation_layout.addWidget(self.prev_frame_btn)
-        
-        self.next_frame_btn = QtWidgets.QPushButton("▶")
-        self.next_frame_btn.setToolTip("Next Frame (Right Arrow)")
-        self.next_frame_btn.setFixedSize(35, 30)
-        navigation_layout.addWidget(self.next_frame_btn)
-        
-        navigation_layout.addWidget(QtWidgets.QLabel("|"))  # Separator
-        
-        self.jump_back_btn = QtWidgets.QPushButton(f"◀◀ {JUMP_FRAMES}")
+        self.speed_combo.setFixedWidth(60)
+        speed_container.addWidget(self.speed_combo)
+        main_timeline_layout.addLayout(speed_container)
+
+        controls_layout.addLayout(main_timeline_layout)
+
+        # Secondary Controls Row - Jump and Analysis
+        secondary_layout = QtWidgets.QHBoxLayout()
+        secondary_layout.setSpacing(12)
+
+        # Jump controls group
+        jump_group = QtWidgets.QHBoxLayout()
+        jump_group.setSpacing(6)
+
+        self.jump_back_btn = QtWidgets.QPushButton(f"⏪ {JUMP_FRAMES}")
         self.jump_back_btn.setToolTip(f"Jump back {JUMP_FRAMES} frames (Page Up)")
-        navigation_layout.addWidget(self.jump_back_btn)
-        
-        self.jump_forward_btn = QtWidgets.QPushButton(f"{JUMP_FRAMES} ▶▶")
+        self.jump_back_btn.setFixedHeight(32)
+        self.jump_back_btn.setObjectName("jumpButton")
+        jump_group.addWidget(self.jump_back_btn)
+
+        self.jump_forward_btn = QtWidgets.QPushButton(f"{JUMP_FRAMES} ⏩")
         self.jump_forward_btn.setToolTip(f"Jump forward {JUMP_FRAMES} frames (Page Down)")
-        navigation_layout.addWidget(self.jump_forward_btn)
-        
-        navigation_layout.addStretch()
-        controls_layout.addLayout(navigation_layout)
-        
-        # Analysis Controls Row
-        analysis_layout = QtWidgets.QHBoxLayout()
-        
+        self.jump_forward_btn.setFixedHeight(32)
+        self.jump_forward_btn.setObjectName("jumpButton")
+        jump_group.addWidget(self.jump_forward_btn)
+
+        secondary_layout.addLayout(jump_group)
+
+        # Separator
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.VLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Sunken)
+        secondary_layout.addWidget(separator)
+
+        # Analysis controls group
+        analysis_group = QtWidgets.QHBoxLayout()
+        analysis_group.setSpacing(6)
+
         self.set_start_btn = QtWidgets.QPushButton("Set Start")
         self.set_start_btn.setToolTip("Set current frame as analysis start")
-        analysis_layout.addWidget(self.set_start_btn)
-        
+        self.set_start_btn.setFixedHeight(32)
+        self.set_start_btn.setObjectName("analysisButton")
+        analysis_group.addWidget(self.set_start_btn)
+
         self.set_end_btn = QtWidgets.QPushButton("Set End")
         self.set_end_btn.setToolTip("Set current frame as analysis end")
-        analysis_layout.addWidget(self.set_end_btn)
-        
-        analysis_layout.addWidget(QtWidgets.QLabel("|"))  # Separator
-        
-        self.auto_detect_btn = QtWidgets.QPushButton("Detect from Audio")
+        self.set_end_btn.setFixedHeight(32)
+        self.set_end_btn.setObjectName("analysisButton")
+        analysis_group.addWidget(self.set_end_btn)
+
+        self.auto_detect_btn = QtWidgets.QPushButton("🎵 Detect from Audio")
         self.auto_detect_btn.setToolTip("Detect completion beeps in audio and calculate frame ranges (Ctrl+D)")
-        analysis_layout.addWidget(self.auto_detect_btn)
-        
-        analysis_layout.addStretch()
-        controls_layout.addLayout(analysis_layout)
+        self.auto_detect_btn.setFixedHeight(32)
+        self.auto_detect_btn.setObjectName("analysisButton")
+        analysis_group.addWidget(self.auto_detect_btn)
+
+        secondary_layout.addLayout(analysis_group)
+        secondary_layout.addStretch()
+
+        controls_layout.addLayout(secondary_layout)
         
         self.video_controls_groupbox.setLayout(controls_layout)
         # Keep controls compact to avoid crowding
@@ -1144,20 +1484,33 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.video_controls_groupbox.setMaximumHeight(210)
         self.left_layout.addWidget(self.video_controls_groupbox)
 
-        # Analysis Name Layout
+        # Analysis Section with improved grouping and spacing
+        analysis_section = QtWidgets.QVBoxLayout()
+        analysis_section.setSpacing(12)
+        analysis_section.setContentsMargins(8, 16, 8, 8)
+
+        # Analysis Name Layout with better spacing
         name_layout = QtWidgets.QHBoxLayout()
-        name_layout.addWidget(QtWidgets.QLabel("Analysis Name:"))
+        name_layout.setSpacing(8)
+        name_label = QtWidgets.QLabel("Analysis Name:")
+        name_label.setMinimumWidth(100)
+        name_layout.addWidget(name_label)
         self.analysis_name_input = QtWidgets.QLineEdit()
         self.analysis_name_input.setPlaceholderText("DefaultAnalysis")
+        self.analysis_name_input.setFixedHeight(32)
         name_layout.addWidget(self.analysis_name_input)
-        self.left_layout.addLayout(name_layout)
+        analysis_section.addLayout(name_layout)
 
-        # Action Buttons Layout
+        # Action Buttons Layout with prominent styling
         action_layout = QtWidgets.QHBoxLayout()
-        self.analyze_btn = QtWidgets.QPushButton('Analyze Brightness (F5)')
+        self.analyze_btn = QtWidgets.QPushButton('🔍 Analyze Brightness (F5)')
+        self.analyze_btn.setObjectName("primaryActionButton")
         self.analyze_btn.setToolTip("Run brightness analysis on the selected frame range and ROIs")
+        self.analyze_btn.setFixedHeight(40)
         action_layout.addWidget(self.analyze_btn)
-        self.left_layout.addLayout(action_layout)
+        analysis_section.addLayout(action_layout)
+
+        self.left_layout.addLayout(analysis_section)
 
         # --- Right Panel Widgets (not yet added to layout; placed into tabs below) ---
         # Video info group
@@ -1240,13 +1593,64 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.capture_mask_btn = QtWidgets.QPushButton("Capture Mask From Current Frame")
         self.capture_mask_btn.setToolTip("Compute the analyzed-pixel mask for each ROI based on the current frame and reuse it for all frames")
         mask_btn_layout.addWidget(self.capture_mask_btn)
+
+        self.auto_brightest_mask_btn = QtWidgets.QPushButton("Auto-Capture from Brightest Frame")
+        self.auto_brightest_mask_btn.setToolTip("Automatically find the brightest frame in the current range and capture masks from it")
+        mask_btn_layout.addWidget(self.auto_brightest_mask_btn)
+
         mask_btn_layout.addStretch()
         viz_layout.addLayout(mask_btn_layout)
 
         self.mask_status_label = QtWidgets.QLabel("Mask: none")
         self.mask_status_label.setObjectName("statusLabel")
         viz_layout.addWidget(self.mask_status_label)
-        
+
+        # Noise filtering controls
+        noise_groupbox = QtWidgets.QGroupBox("Noise Filtering")
+        noise_layout = QtWidgets.QVBoxLayout()
+
+        # Morphological kernel size
+        kernel_layout = QtWidgets.QHBoxLayout()
+        kernel_layout.addWidget(QtWidgets.QLabel("Morphological Kernel:"))
+        self.kernel_size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.kernel_size_slider.setRange(1, 15)
+        self.kernel_size_slider.setValue(self.morphological_kernel_size)
+        self.kernel_size_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.kernel_size_slider.setTickInterval(2)
+        self.kernel_size_label = QtWidgets.QLabel(f"{self.morphological_kernel_size}×{self.morphological_kernel_size}")
+        kernel_layout.addWidget(self.kernel_size_slider)
+        kernel_layout.addWidget(self.kernel_size_label)
+        noise_layout.addLayout(kernel_layout)
+
+        # Background percentile
+        bg_percentile_layout = QtWidgets.QHBoxLayout()
+        bg_percentile_layout.addWidget(QtWidgets.QLabel("Background Percentile:"))
+        self.bg_percentile_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.bg_percentile_slider.setRange(50, 99)
+        self.bg_percentile_slider.setValue(int(self.background_percentile))
+        self.bg_percentile_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.bg_percentile_slider.setTickInterval(10)
+        self.bg_percentile_label = QtWidgets.QLabel(f"{self.background_percentile:.0f}%")
+        bg_percentile_layout.addWidget(self.bg_percentile_slider)
+        bg_percentile_layout.addWidget(self.bg_percentile_label)
+        noise_layout.addLayout(bg_percentile_layout)
+
+        # Noise floor threshold
+        noise_floor_layout = QtWidgets.QHBoxLayout()
+        noise_floor_layout.addWidget(QtWidgets.QLabel("Noise Floor (L*):"))
+        self.noise_floor_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.noise_floor_slider.setRange(0, 20)
+        self.noise_floor_slider.setValue(int(self.noise_floor_threshold * 2))  # 0.5 precision
+        self.noise_floor_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.noise_floor_slider.setTickInterval(4)
+        self.noise_floor_label = QtWidgets.QLabel(f"{self.noise_floor_threshold:.1f}")
+        noise_floor_layout.addWidget(self.noise_floor_slider)
+        noise_floor_layout.addWidget(self.noise_floor_label)
+        noise_layout.addLayout(noise_floor_layout)
+
+        noise_groupbox.setLayout(noise_layout)
+        viz_layout.addWidget(noise_groupbox)
+
         self.viz_groupbox.setLayout(viz_layout)
 
         # Rectangle Controls
@@ -1269,7 +1673,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.clear_rect_btn = QtWidgets.QPushButton("Clear All")
         self.clear_rect_btn.setToolTip("Remove all ROIs")
         rect_btn_layout.addWidget(self.clear_rect_btn)
+
+        # Second row of buttons
+        rect_btn_layout2 = QtWidgets.QHBoxLayout()
+        self.set_bg_roi_btn = QtWidgets.QPushButton("Set as Background")
+        self.set_bg_roi_btn.setToolTip("Set the selected ROI as the background reference for threshold calculation")
+        rect_btn_layout2.addWidget(self.set_bg_roi_btn)
+        rect_btn_layout2.addStretch()  # Push button to the left
+
         rect_groupbox_layout.addLayout(rect_btn_layout)
+        rect_groupbox_layout.addLayout(rect_btn_layout2)
         self.rect_groupbox.setLayout(rect_groupbox_layout)
         # Cache status
         self.cache_status_label = QtWidgets.QLabel("Cache: 0 frames")
@@ -1354,6 +1767,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.add_rect_btn.clicked.connect(self.toggle_add_rectangle_mode)
         self.del_rect_btn.clicked.connect(self.delete_selected_rectangle)
         self.clear_rect_btn.clicked.connect(self.clear_all_rectangles)
+        self.set_bg_roi_btn.clicked.connect(self._set_background_roi)
 
         # Connect mouse events directly
         self.image_label.mousePressEvent = self.image_mouse_press
@@ -1365,6 +1779,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.show_mask_checkbox.toggled.connect(self._on_mask_checkbox_toggled)
         self.use_fixed_mask_checkbox.toggled.connect(self._on_use_fixed_mask_toggled)
         self.capture_mask_btn.clicked.connect(self._capture_fixed_masks)
+        self.auto_brightest_mask_btn.clicked.connect(self._auto_capture_brightest_frame_masks)
+
+        # Noise filtering slider connections
+        self.kernel_size_slider.valueChanged.connect(self._on_kernel_size_changed)
+        self.bg_percentile_slider.valueChanged.connect(self._on_bg_percentile_changed)
+        self.noise_floor_slider.valueChanged.connect(self._on_noise_floor_changed)
 
     def _update_widget_states(self, video_loaded=False, rois_exist=False):
         """Enable/disable widgets based on application state."""
@@ -1386,12 +1806,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.clear_rect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
         self.set_bg_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        self.set_bg_roi_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.threshold_spin.setEnabled(not self._analysis_in_progress)
         # Fixed mask controls
         if hasattr(self, 'use_fixed_mask_checkbox'):
             self.use_fixed_mask_checkbox.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
         if hasattr(self, 'capture_mask_btn'):
             self.capture_mask_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        if hasattr(self, 'auto_brightest_mask_btn'):
+            self.auto_brightest_mask_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
 
     def _update_cache_status(self):
         """Update cache status display."""
@@ -1486,9 +1909,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def resizeEvent(self, event: QtGui.QResizeEvent):
         """
+        Enhanced resize event handler with responsive layout updates.
         Update cached label size *without* immediately redrawing the frame.
         Calling show_frame() synchronously inside resizeEvent can create
-        a feedback loop: the freshly scaled pixmap changes the label’s
+        a feedback loop: the freshly scaled pixmap changes the label's
         sizeHint, Qt recalculates the layout, and another resizeEvent fires.
         By deferring the redraw with QTimer.singleShot(0, …) we let the
         resize settle first and repaint exactly once.
@@ -1500,6 +1924,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if self.frame is not None:
                 QtCore.QTimer.singleShot(0, self.show_frame)
 
+        # Update splitter sizes responsively when window is resized significantly
+        if hasattr(self, "splitter") and event:
+            old_size = event.oldSize()
+            new_size = event.size()
+            if old_size.isValid():
+                # Only update if resize is significant (more than 100px change)
+                width_change = abs(new_size.width() - old_size.width())
+                if width_change > 100:
+                    QtCore.QTimer.singleShot(100, self._set_default_splitter_sizes)
+
         # Call base-class handler last (standard Qt practice)
         super().resizeEvent(event)
 
@@ -1507,6 +1941,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def load_video(self):
         """Loads the video specified by self.video_path."""
+        # Show loading feedback
+        self.statusBar().showMessage("📂 Loading video...")
+        self.file_info_label.setText("📂 Loading video file...")
+        QtWidgets.QApplication.processEvents()
+
         if self.cap:
             self.cap.release()
             self.cap = None
@@ -1515,6 +1954,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             QtWidgets.QMessageBox.critical(self, 'Error', 'Video path is invalid or file does not exist.')
             self._reset_state()
             return
+
+        self.statusBar().showMessage("⚙️ Initializing video decoder...")
+        QtWidgets.QApplication.processEvents()
 
         self.cap = cv2.VideoCapture(self.video_path)
         if not self.cap.isOpened():
@@ -1562,11 +2004,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Add to recent files
             self._add_recent_file(self.video_path)
             
-            self.results_label.setText(f"Loaded: {os.path.basename(self.video_path)}\n"
-                                       f"Frames: {self.total_frames}\n"
-                                       "Draw ROIs or use Auto-Detect.")
+            self.results_label.setText(f"✅ Loaded: {os.path.basename(self.video_path)}\n"
+                                       f"📊 Frames: {self.total_frames:,} | ⏱️ FPS: {self.playback_fps:.1f}\n"
+                                       f"⏳ Duration: {self.total_frames/self.playback_fps:.1f}s\n"
+                                       "🎯 Draw ROIs or use Auto-Detect to begin!")
             self._update_widget_states(video_loaded=True, rois_exist=bool(self.rects))
-            self.statusBar().showMessage(f"Loaded: {os.path.basename(self.video_path)}")
+            self.statusBar().showMessage(f"✅ Successfully loaded: {os.path.basename(self.video_path)}")
 
             # Reset fixed masks on new video load
             self.fixed_roi_masks = [None for _ in self.rects]
@@ -1654,7 +2097,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
         
         self.is_playing = True
-        self.play_pause_btn.setText("⏸ Pause")
+        self.play_pause_btn.setText("⏸")
         
         # Calculate timer interval based on FPS and speed
         if hasattr(self, 'playback_fps') and self.playback_fps > 0:
@@ -1667,7 +2110,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def stop_playback(self):
         """Stop video playback."""
         self.is_playing = False
-        self.play_pause_btn.setText("▶ Play")
+        self.play_pause_btn.setText("⏵")
         self.playback_timer.stop()
     
     def advance_frame(self):
@@ -2147,7 +2590,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                         mask = l_star > background_brightness
                         # Morphological cleanup similar to analysis
                         if np.any(mask):
-                            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MORPHOLOGICAL_KERNEL_SIZE, MORPHOLOGICAL_KERNEL_SIZE))
+                            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.morphological_kernel_size, self.morphological_kernel_size))
                             mask_uint8 = mask.astype(np.uint8) * 255
                             cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
                             mask = cleaned > 0
@@ -2171,6 +2614,129 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         else:
             self.mask_status_label.setText("Mask: none (could not capture)")
         if self.frame is not None:
+            self.show_frame()
+
+    def _auto_capture_brightest_frame_masks(self):
+        """Find the brightest frame in the current range and capture masks from it."""
+        if self.cap is None or not self.rects:
+            QtWidgets.QMessageBox.information(self, "Auto-Capture Masks",
+                                            "Load a video and define at least one ROI first.")
+            return
+
+        if not self.rects:
+            QtWidgets.QMessageBox.information(self, "Auto-Capture Masks",
+                                            "Define at least one ROI before capturing masks.")
+            return
+
+        # Use current frame range or full video if not set
+        start_frame = max(0, self.start_frame)
+        end_frame = min(self.total_frames - 1, self.end_frame if self.end_frame is not None else self.total_frames - 1)
+
+        if start_frame >= end_frame:
+            QtWidgets.QMessageBox.information(self, "Auto-Capture Masks",
+                                            "Invalid frame range for analysis.")
+            return
+
+        # Show progress dialog
+        progress = QtWidgets.QProgressDialog("Finding brightest frame...", "Cancel", 0, end_frame - start_frame, self)
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.show()
+
+        brightest_frame_idx = start_frame
+        max_brightness = 0.0
+
+        # Sample every 10th frame for performance, or all frames if range is small
+        step = max(1, (end_frame - start_frame) // 100)
+
+        try:
+            for frame_idx in range(start_frame, end_frame + 1, step):
+                if progress.wasCanceled():
+                    return
+
+                progress.setValue(frame_idx - start_frame)
+                QtWidgets.QApplication.processEvents()
+
+                # Get frame from cache or video
+                frame = self.frame_cache.get(frame_idx)
+                if frame is None:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    ret, frame = self.cap.read()
+                    if not ret or frame is None:
+                        continue
+                    self.frame_cache.put(frame_idx, frame)
+
+                # Calculate average brightness of all non-background ROIs
+                frame_brightness = 0.0
+                roi_count = 0
+
+                for roi_idx, (pt1, pt2) in enumerate(self.rects):
+                    if roi_idx == self.background_roi_idx:
+                        continue
+
+                    fh, fw = frame.shape[:2]
+                    x1 = max(0, min(pt1[0], fw - 1))
+                    y1 = max(0, min(pt1[1], fh - 1))
+                    x2 = max(0, min(pt2[0], fw - 1))
+                    y2 = max(0, min(pt2[1], fh - 1))
+
+                    if x2 > x1 and y2 > y1:
+                        roi = frame[y1:y2, x1:x2]
+                        l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
+                        frame_brightness += l_raw_mean
+                        roi_count += 1
+
+                if roi_count > 0:
+                    frame_brightness /= roi_count
+                    if frame_brightness > max_brightness:
+                        max_brightness = frame_brightness
+                        brightest_frame_idx = frame_idx
+
+        except Exception as e:
+            progress.close()
+            QtWidgets.QMessageBox.warning(self, "Error", f"Error finding brightest frame: {str(e)}")
+            return
+
+        progress.close()
+
+        # Navigate to the brightest frame and capture masks
+        self.frame_slider.setValue(brightest_frame_idx)
+
+        # Capture masks from the brightest frame
+        self._capture_fixed_masks()
+
+        # Show result to user
+        QtWidgets.QMessageBox.information(self, "Auto-Capture Complete",
+                                        f"Captured masks from frame {brightest_frame_idx} "
+                                        f"(brightness: {max_brightness:.1f} L*)")
+
+    def _on_kernel_size_changed(self, value: int):
+        """Handle morphological kernel size slider change."""
+        self.morphological_kernel_size = max(1, value if value % 2 == 1 else value - 1)  # Ensure odd value
+        self.kernel_size_label.setText(f"{self.morphological_kernel_size}×{self.morphological_kernel_size}")
+        # Update display and invalidate cached masks since filtering changed
+        self._invalidate_fixed_masks("noise parameters changed")
+        if self.frame is not None:
+            self._update_current_brightness_display()
+            self.show_frame()
+
+    def _on_bg_percentile_changed(self, value: int):
+        """Handle background percentile slider change."""
+        self.background_percentile = float(value)
+        self.bg_percentile_label.setText(f"{self.background_percentile:.0f}%")
+        # Update display since background calculation changed
+        if self.frame is not None:
+            self._update_current_brightness_display()
+            self._update_threshold_display()
+            self.show_frame()
+
+    def _on_noise_floor_changed(self, value: int):
+        """Handle noise floor threshold slider change."""
+        self.noise_floor_threshold = value / 2.0  # Convert back from 0.5 precision
+        self.noise_floor_label.setText(f"{self.noise_floor_threshold:.1f}")
+        # Update display since noise filtering changed
+        self._invalidate_fixed_masks("noise parameters changed")
+        if self.frame is not None:
+            self._update_current_brightness_display()
             self.show_frame()
 
     # --- Mouse Interaction on Image Label ---
@@ -2718,12 +3284,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
 
         # --- Setup ---
-        self.results_label.setText("Starting analysis...")
-        self.brightness_display_label.setText("Analyzing...")
-        
+        self.results_label.setText("⚙️ Initializing analysis...")
+        self.brightness_display_label.setText("📊 Preparing...")
+
         # Play analysis start sound
         self.audio_manager.play_analysis_start()
-        self.statusBar().showMessage("Running brightness analysis...")
+        self.statusBar().showMessage("🔍 Starting brightness analysis...")
         QtWidgets.QApplication.processEvents()
 
         try:
@@ -2744,10 +3310,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             blue_median_data = [[] for _ in non_background_rois]
             background_values_per_frame = []  # Track background brightness for each frame
 
-            # --- Progress Dialog ---
-            progress = QtWidgets.QProgressDialog("Analyzing video frames...", "Cancel", 0, num_frames_to_analyze, self)
+            # --- Enhanced Progress Dialog ---
+            progress = QtWidgets.QProgressDialog(f"🔍 Analyzing {num_frames_to_analyze} video frames...\nROIs: {len(non_background_rois)} | Frames: {start+1}-{end+1}",
+                                                "Cancel", 0, num_frames_to_analyze, self)
             progress.setWindowModality(QtCore.Qt.WindowModal)
-            progress.setWindowTitle("Analyzing Brightness")
+            progress.setWindowTitle("📊 Brightness Analysis")
+            progress.setMinimumWidth(400)
             progress.setValue(0)
             progress.show()
             QtWidgets.QApplication.processEvents()
@@ -2818,8 +3386,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                         fps = frames_processed / elapsed_time
                         remaining_frames = num_frames_to_analyze - frames_processed
                         eta_seconds = remaining_frames / fps if fps > 0 else 0
-                        progress.setLabelText(f"Analyzing frame {frames_processed}/{num_frames_to_analyze}\n"
-                                            f"Speed: {fps:.1f} fps, ETA: {eta_seconds:.0f}s")
+                        progress.setLabelText(f"🔍 Analyzing frame {frames_processed}/{num_frames_to_analyze}\n"
+                                            f"⚡ Speed: {fps:.1f} fps | ⏱️ ETA: {eta_seconds:.0f}s | 📊 ROIs: {len(non_background_rois)}")
                     
                 progress.setValue(frames_processed)
                 QtWidgets.QApplication.processEvents()
@@ -3203,8 +3771,8 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                 # Apply morphological operations to clean up the mask (remove noise/stray pixels)
                 if np.any(above_background_mask):
                     # Create structuring element for morphological operations
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
-                                                     (MORPHOLOGICAL_KERNEL_SIZE, MORPHOLOGICAL_KERNEL_SIZE))
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                                     (self.morphological_kernel_size, self.morphological_kernel_size))
                     
                     # Convert boolean mask to uint8 for morphological operations
                     mask_uint8 = above_background_mask.astype(np.uint8) * 255
@@ -3216,9 +3784,24 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                     above_background_mask = cleaned_mask > 0
                 
                 if np.any(above_background_mask):
-                    # Only analyze pixels above background threshold
-                    filtered_l_pixels = l_star[above_background_mask]
-                    filtered_b_pixels = blue_chan[above_background_mask]
+                    # Apply additional noise floor filtering if enabled
+                    if self.noise_floor_threshold > 0:
+                        noise_floor_mask = l_star > self.noise_floor_threshold
+                        combined_mask = above_background_mask & noise_floor_mask
+                    else:
+                        combined_mask = above_background_mask
+
+                    if np.any(combined_mask):
+                        # Only analyze pixels above both background and noise floor thresholds
+                        filtered_l_pixels = l_star[combined_mask]
+                        filtered_b_pixels = blue_chan[combined_mask]
+                    else:
+                        # No pixels pass both filters
+                        l_bg_sub_mean = 0.0
+                        l_bg_sub_median = 0.0
+                        b_bg_sub_mean = 0.0
+                        b_bg_sub_median = 0.0
+                        return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
                     
                     # Background-subtracted L* statistics
                     bg_subtracted_l_pixels = filtered_l_pixels - background_brightness
@@ -3276,7 +3859,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             l_chan = lab[:, :, 0].astype(np.float32)
             l_star = l_chan * 100.0 / 255.0
             
-            return float(np.percentile(l_star, 90))
+            return float(np.percentile(l_star, self.background_percentile))
             
         except Exception as e:
             print(f"Error computing background brightness: {e}")
