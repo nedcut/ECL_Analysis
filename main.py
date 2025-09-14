@@ -435,6 +435,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Pixel visualization
         self.show_pixel_mask = False
+        # Fixed mask across frames
+        self.use_fixed_mask = False
+        self.fixed_roi_masks: List[Optional[np.ndarray]] = []  # aligned with self.rects
         
         # Video playback
         self.is_playing = False
@@ -496,6 +499,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._connect_signals()
         self._setup_shortcuts()
         self._update_widget_states()
+        # After widgets exist, set a sensible initial split
+        self._set_default_splitter_sizes()
 
     def _create_menus(self):
         """Create application menus."""
@@ -539,6 +544,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         auto_detect_action.triggered.connect(self.auto_detect_range)
         analysis_menu.addAction(auto_detect_action)
         
+        # View menu
+        view_menu = menubar.addMenu('&View')
+        reset_layout_action = QtWidgets.QAction('&Reset Layout', self)
+        reset_layout_action.setStatusTip('Reset splitter sizes and panel widths')
+        reset_layout_action.triggered.connect(self._set_default_splitter_sizes)
+        view_menu.addAction(reset_layout_action)
+
         # Settings menu
         settings_menu = menubar.addMenu('&Settings')
         
@@ -765,6 +777,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 font-family: {DEFAULT_FONT_FAMILY};
                 font-size: 14px;
             }}
+            QSplitter::handle {{ background: {COLOR_SECONDARY_LIGHT}; }}
             QMenuBar {{
                 background-color: {COLOR_SECONDARY};
                 color: {COLOR_FOREGROUND};
@@ -796,6 +809,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 font-family: {DEFAULT_FONT_FAMILY};
                 font-size: 14px;
             }}
+            QScrollArea, QScrollArea > QWidget > QWidget {{
+                background-color: {COLOR_BACKGROUND};
+            }}
+            QTabWidget::pane {{ border: 1px solid {COLOR_SECONDARY_LIGHT}; border-radius: 6px; }}
+            QTabBar::tab {{ padding: 6px 10px; }}
             QLabel#titleLabel {{
                 font-size: 24px;
                 font-weight: bold;
@@ -957,11 +975,47 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """)
 
     def _create_layouts(self):
-        """Create the main horizontal and vertical layouts."""
-        self.left_layout = QtWidgets.QVBoxLayout()
-        self.right_layout = QtWidgets.QVBoxLayout()
-        self.main_layout.addLayout(self.left_layout, stretch=3)
-        self.main_layout.addLayout(self.right_layout, stretch=1)
+        """Create resizable panes with a splitter and add scrollable side panel."""
+        # Main horizontal splitter between left (video + controls) and right (side panel)
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.main_layout.addWidget(self.splitter)
+
+        # Left container widget (keeps existing left_layout semantics)
+        self.left_container = QtWidgets.QWidget()
+        self.left_layout = QtWidgets.QVBoxLayout(self.left_container)
+        self.left_layout.setContentsMargins(0, 0, 0, 0)
+        self.left_layout.setSpacing(8)
+        self.splitter.addWidget(self.left_container)
+
+        # Right container inside a scroll area (prevents off‑screen controls)
+        self.right_scroll = QtWidgets.QScrollArea()
+        self.right_scroll.setWidgetResizable(True)
+        self.right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.right_content = QtWidgets.QWidget()
+        self.right_layout = QtWidgets.QVBoxLayout(self.right_content)
+        self.right_layout.setContentsMargins(8, 8, 8, 8)
+        self.right_layout.setSpacing(10)
+        self.right_scroll.setWidget(self.right_content)
+        self.splitter.addWidget(self.right_scroll)
+
+        # Set sensible default sizes
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 1)
+        self.right_scroll.setMinimumWidth(340)
+        # Prevent either pane from collapsing to zero
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setCollapsible(1, False)
+
+    def _set_default_splitter_sizes(self):
+        """Set initial splitter sizes based on current window width for sane defaults."""
+        try:
+            total = max(1, self.width())
+            left = int(total * 0.68)
+            right = max(320, total - left)
+            self.splitter.setSizes([left, right])
+        except Exception:
+            # Fallback sizes
+            self.splitter.setSizes([900, 420])
 
     def _create_widgets(self):
         """Create all the widgets and add them to layouts."""
@@ -983,13 +1037,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.image_label = QtWidgets.QLabel(self)
         self.image_label.setObjectName("imageLabel")
         self.image_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+        # Let image scale down responsively but not push controls off-screen
+        self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.image_label.setMinimumHeight(240)
         self.image_label.setText("Drag & Drop Video File Here")
         self.left_layout.addWidget(self.image_label, stretch=1)
 
         # Video Controls Groupbox for better organization
         self.video_controls_groupbox = QtWidgets.QGroupBox("Video Controls")
         controls_layout = QtWidgets.QVBoxLayout()
+        controls_layout.setContentsMargins(8, 8, 8, 8)
+        controls_layout.setSpacing(6)
         
         # Timeline and Frame Info
         timeline_layout = QtWidgets.QHBoxLayout()
@@ -1081,6 +1139,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         controls_layout.addLayout(analysis_layout)
         
         self.video_controls_groupbox.setLayout(controls_layout)
+        # Keep controls compact to avoid crowding
+        self.video_controls_groupbox.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        self.video_controls_groupbox.setMaximumHeight(210)
         self.left_layout.addWidget(self.video_controls_groupbox)
 
         # Analysis Name Layout
@@ -1098,7 +1159,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         action_layout.addWidget(self.analyze_btn)
         self.left_layout.addLayout(action_layout)
 
-        # --- Right Layout Widgets ---
+        # --- Right Panel Widgets (not yet added to layout; placed into tabs below) ---
         # Video info group
         self.video_info_groupbox = QtWidgets.QGroupBox("Video Information")
         video_info_layout = QtWidgets.QVBoxLayout()
@@ -1106,7 +1167,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.video_info_label.setWordWrap(True)
         video_info_layout.addWidget(self.video_info_label)
         self.video_info_groupbox.setLayout(video_info_layout)
-        self.right_layout.addWidget(self.video_info_groupbox)
 
         # Brightness Display
         self.brightness_groupbox = QtWidgets.QGroupBox("ROI Brightness: Mean±Median (Current Frame)")
@@ -1115,7 +1175,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.brightness_display_label.setObjectName("brightnessDisplayLabel")
         brightness_groupbox_layout.addWidget(self.brightness_display_label)
         self.brightness_groupbox.setLayout(brightness_groupbox_layout)
-        self.right_layout.addWidget(self.brightness_groupbox)
 
         # -- Run Duration Settings
         self.run_duration_groupbox = QtWidgets.QGroupBox("Run Duration (Optional)")
@@ -1162,7 +1221,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         th_layout.addWidget(self.threshold_display_label)
         
         self.threshold_groupbox.setLayout(th_layout)
-        self.right_layout.addWidget(self.threshold_groupbox)
 
         # Visualization Controls
         self.viz_groupbox = QtWidgets.QGroupBox("Visualization")
@@ -1172,9 +1230,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.show_mask_checkbox.setToolTip("Highlight analyzed pixels in red overlay")
         self.show_mask_checkbox.setChecked(self.show_pixel_mask)
         viz_layout.addWidget(self.show_mask_checkbox)
+
+        # Fixed mask controls
+        self.use_fixed_mask_checkbox = QtWidgets.QCheckBox("Use Fixed Mask (from frame)")
+        self.use_fixed_mask_checkbox.setToolTip("Apply a pixel mask captured on a specific frame to all frames during analysis and visualization")
+        viz_layout.addWidget(self.use_fixed_mask_checkbox)
+
+        mask_btn_layout = QtWidgets.QHBoxLayout()
+        self.capture_mask_btn = QtWidgets.QPushButton("Capture Mask From Current Frame")
+        self.capture_mask_btn.setToolTip("Compute the analyzed-pixel mask for each ROI based on the current frame and reuse it for all frames")
+        mask_btn_layout.addWidget(self.capture_mask_btn)
+        mask_btn_layout.addStretch()
+        viz_layout.addLayout(mask_btn_layout)
+
+        self.mask_status_label = QtWidgets.QLabel("Mask: none")
+        self.mask_status_label.setObjectName("statusLabel")
+        viz_layout.addWidget(self.mask_status_label)
         
         self.viz_groupbox.setLayout(viz_layout)
-        self.right_layout.addWidget(self.viz_groupbox)
 
         # Rectangle Controls
         self.rect_groupbox = QtWidgets.QGroupBox("Regions of Interest (ROI)")
@@ -1198,12 +1271,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         rect_btn_layout.addWidget(self.clear_rect_btn)
         rect_groupbox_layout.addLayout(rect_btn_layout)
         self.rect_groupbox.setLayout(rect_groupbox_layout)
-        self.right_layout.addWidget(self.rect_groupbox)
-
         # Cache status
         self.cache_status_label = QtWidgets.QLabel("Cache: 0 frames")
         self.cache_status_label.setObjectName("statusLabel")
-        self.right_layout.addWidget(self.cache_status_label)
 
         # Results/Status Label
         self.results_label = QtWidgets.QLabel("Load a video to begin analysis.")
@@ -1211,7 +1281,52 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.results_label.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
         self.results_label.setWordWrap(True)
         self.results_label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-        self.right_layout.addWidget(self.results_label, stretch=1)
+
+        # Organize right panel into tabs for clarity and prevent overflow with a scroll area (added in _create_layouts)
+        self.side_tabs = QtWidgets.QTabWidget()
+        self.side_tabs.setDocumentMode(True)
+        self.side_tabs.setTabPosition(QtWidgets.QTabWidget.North)
+        self.side_tabs.setMinimumWidth(360)
+
+        # Info tab
+        info_tab = QtWidgets.QWidget()
+        info_layout = QtWidgets.QVBoxLayout(info_tab)
+        info_layout.addWidget(self.video_info_groupbox)
+        info_layout.addWidget(self.brightness_groupbox)
+        info_layout.addWidget(self.cache_status_label)
+        info_layout.addStretch()
+        self.side_tabs.addTab(info_tab, "Info")
+
+        # Analysis tab
+        analysis_tab = QtWidgets.QWidget()
+        analysis_tab_layout = QtWidgets.QVBoxLayout(analysis_tab)
+        analysis_tab_layout.addWidget(self.run_duration_groupbox)
+        analysis_tab_layout.addWidget(self.threshold_groupbox)
+        analysis_tab_layout.addStretch()
+        self.side_tabs.addTab(analysis_tab, "Analysis")
+
+        # Visualization tab
+        viz_tab = QtWidgets.QWidget()
+        viz_tab_layout = QtWidgets.QVBoxLayout(viz_tab)
+        viz_tab_layout.addWidget(self.viz_groupbox)
+        viz_tab_layout.addStretch()
+        self.side_tabs.addTab(viz_tab, "Visualization")
+
+        # ROIs tab
+        roi_tab = QtWidgets.QWidget()
+        roi_tab_layout = QtWidgets.QVBoxLayout(roi_tab)
+        roi_tab_layout.addWidget(self.rect_groupbox)
+        roi_tab_layout.addStretch()
+        self.side_tabs.addTab(roi_tab, "ROIs")
+
+        # Status tab
+        status_tab = QtWidgets.QWidget()
+        status_layout = QtWidgets.QVBoxLayout(status_tab)
+        status_layout.addWidget(self.results_label)
+        self.side_tabs.addTab(status_tab, "Status")
+
+        # Add the tab widget to the right layout (scroll area content)
+        self.right_layout.addWidget(self.side_tabs)
 
     def _connect_signals(self):
         """Connect widget signals to their corresponding slots."""
@@ -1248,6 +1363,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.threshold_spin.valueChanged.connect(self._on_threshold_changed)
         self.set_bg_btn.clicked.connect(self._set_background_roi)
         self.show_mask_checkbox.toggled.connect(self._on_mask_checkbox_toggled)
+        self.use_fixed_mask_checkbox.toggled.connect(self._on_use_fixed_mask_toggled)
+        self.capture_mask_btn.clicked.connect(self._capture_fixed_masks)
 
     def _update_widget_states(self, video_loaded=False, rois_exist=False):
         """Enable/disable widgets based on application state."""
@@ -1270,11 +1387,27 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.clear_rect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
         self.set_bg_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
         self.threshold_spin.setEnabled(not self._analysis_in_progress)
+        # Fixed mask controls
+        if hasattr(self, 'use_fixed_mask_checkbox'):
+            self.use_fixed_mask_checkbox.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        if hasattr(self, 'capture_mask_btn'):
+            self.capture_mask_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
 
     def _update_cache_status(self):
         """Update cache status display."""
         cache_size = self.frame_cache.get_size()
         self.cache_status_label.setText(f"Cache: {cache_size}/{FRAME_CACHE_SIZE} frames")
+
+    def _invalidate_fixed_masks(self, reason: str = ""):
+        """Clear captured fixed masks when ROIs change or become invalid.
+        Optionally provide a reason for UI feedback.
+        """
+        if self.fixed_roi_masks:
+            self.fixed_roi_masks = [None for _ in self.rects]
+            if reason:
+                self.mask_status_label.setText(f"Mask: cleared ({reason})")
+            else:
+                self.mask_status_label.setText("Mask: cleared")
 
     def _update_video_info(self):
         """Update video information display."""
@@ -1434,6 +1567,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                                        "Draw ROIs or use Auto-Detect.")
             self._update_widget_states(video_loaded=True, rois_exist=bool(self.rects))
             self.statusBar().showMessage(f"Loaded: {os.path.basename(self.video_path)}")
+
+            # Reset fixed masks on new video load
+            self.fixed_roi_masks = [None for _ in self.rects]
+            self.use_fixed_mask_checkbox.setChecked(False)
+            self.mask_status_label.setText("Mask: none")
 
             # Attempt auto-detection if ROIs already exist
             if self.rects:
@@ -1682,7 +1820,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             if x2 > x1 and y2 > y1: # Check for valid ROI area
                 roi = self.frame[y1:y2, x1:x2]
-                brightness_stats = self._compute_brightness_stats(roi, background_brightness)
+                roi_mask = None
+                if self.use_fixed_mask and idx < len(self.fixed_roi_masks):
+                    roi_mask = self.fixed_roi_masks[idx]
+                    if isinstance(roi_mask, np.ndarray) and roi_mask.shape[:2] != roi.shape[:2]:
+                        roi_mask = None
+                brightness_stats = self._compute_brightness_stats(roi, background_brightness, roi_mask)
                 l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median = brightness_stats[:6]
                 roi_data.append((idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median))
             else:
@@ -1745,6 +1888,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
              self.selected_rect_idx = None # No items, no selection
 
         self.rect_list.blockSignals(False)
+        # Keep fixed masks list aligned with rects
+        if len(self.fixed_roi_masks) != len(self.rects):
+            # Resize/realign masks; default to None for new or mismatched entries
+            new_masks: List[Optional[np.ndarray]] = []
+            for i in range(len(self.rects)):
+                if i < len(self.fixed_roi_masks):
+                    new_masks.append(self.fixed_roi_masks[i])
+                else:
+                    new_masks.append(None)
+            self.fixed_roi_masks = new_masks
+
         self._update_widget_states(video_loaded=bool(self.cap), rois_exist=bool(self.rects))
         self._update_threshold_display()
 
@@ -1777,6 +1931,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Deletes the currently selected ROI."""
         if self.selected_rect_idx is not None and 0 <= self.selected_rect_idx < len(self.rects):
             del self.rects[self.selected_rect_idx]
+            # Remove corresponding fixed mask and invalidate
+            if self.selected_rect_idx is not None and self.selected_rect_idx < len(self.fixed_roi_masks):
+                del self.fixed_roi_masks[self.selected_rect_idx]
+            self._invalidate_fixed_masks("ROI deleted")
             
             # Handle background ROI index adjustment
             if self.background_roi_idx == self.selected_rect_idx:
@@ -1804,6 +1962,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.rects.clear()
             self.selected_rect_idx = None
             self.background_roi_idx = None
+            self.fixed_roi_masks = []
+            self.use_fixed_mask_checkbox.setChecked(False)
+            self.mask_status_label.setText("Mask: none")
             self.update_rect_list()
             self.show_frame()
 
@@ -1905,17 +2066,25 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 # Extract ROI and convert to LAB
                 roi = frame[y1:y2, x1:x2]
                 try:
-                    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-                    l_chan = lab[:, :, 0].astype(np.float32)
-                    l_star = l_chan * 100.0 / 255.0
-                    
-                    # Create mask for analyzed pixels
-                    if background_brightness is not None:
-                        # Show only pixels above background threshold
-                        mask = l_star > background_brightness
-                    else:
-                        # Show all pixels (unthresholded analysis)
-                        mask = np.ones_like(l_star, dtype=bool)
+                    use_fixed = self.use_fixed_mask and roi_idx < len(self.fixed_roi_masks) and isinstance(self.fixed_roi_masks[roi_idx], np.ndarray)
+                    mask = None
+                    if use_fixed:
+                        fixed_mask = self.fixed_roi_masks[roi_idx]
+                        if fixed_mask is not None and fixed_mask.shape[:2] == roi.shape[:2]:
+                            mask = fixed_mask.astype(bool)
+                        else:
+                            # Shape mismatch - ignore fixed mask
+                            mask = None
+
+                    if mask is None:
+                        # Derive mask from current frame
+                        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+                        l_chan = lab[:, :, 0].astype(np.float32)
+                        l_star = l_chan * 100.0 / 255.0
+                        if background_brightness is not None:
+                            mask = l_star > background_brightness
+                        else:
+                            mask = np.ones_like(l_star, dtype=bool)
                     
                     # Apply red overlay to analyzed pixels
                     roi_overlay = roi.copy()
@@ -1934,6 +2103,75 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Handle changes to the manual threshold spinbox."""
         self.manual_threshold = value
         self._update_threshold_display()
+
+    def _on_use_fixed_mask_toggled(self, checked: bool):
+        """Enable/disable using a fixed mask across frames."""
+        self.use_fixed_mask = checked
+        if checked and (not self.fixed_roi_masks or all(m is None for m in self.fixed_roi_masks)):
+            self.mask_status_label.setText("Mask: none (capture from a frame)")
+        elif checked:
+            self.mask_status_label.setText("Mask: active")
+        else:
+            self.mask_status_label.setText("Mask: disabled")
+        if self.frame is not None:
+            self.show_frame()
+
+    def _capture_fixed_masks(self):
+        """Capture analyzed-pixel masks for all ROIs based on the current frame."""
+        if self.frame is None or not self.rects:
+            QtWidgets.QMessageBox.information(self, "Capture Mask", "Load a video and define at least one ROI.")
+            return
+        
+        frame = self.frame
+        fh, fw = frame.shape[:2]
+        # Determine background brightness once from current frame
+        background_brightness = self._compute_background_brightness(frame)
+        
+        masks: List[Optional[np.ndarray]] = []
+        created_any = False
+        for roi_idx, (pt1, pt2) in enumerate(self.rects):
+            if roi_idx == self.background_roi_idx:
+                masks.append(None)
+                continue
+            x1 = max(0, min(pt1[0], fw - 1))
+            y1 = max(0, min(pt1[1], fh - 1))
+            x2 = max(0, min(pt2[0], fw - 1))
+            y2 = max(0, min(pt2[1], fh - 1))
+            if x2 > x1 and y2 > y1:
+                roi = frame[y1:y2, x1:x2]
+                try:
+                    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+                    l_chan = lab[:, :, 0].astype(np.float32)
+                    l_star = l_chan * 100.0 / 255.0
+                    if background_brightness is not None:
+                        mask = l_star > background_brightness
+                        # Morphological cleanup similar to analysis
+                        if np.any(mask):
+                            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MORPHOLOGICAL_KERNEL_SIZE, MORPHOLOGICAL_KERNEL_SIZE))
+                            mask_uint8 = mask.astype(np.uint8) * 255
+                            cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+                            mask = cleaned > 0
+                    else:
+                        # If no background brightness, default to full ROI
+                        mask = np.ones(l_star.shape, dtype=bool)
+                    masks.append(mask)
+                    created_any = True
+                except Exception as e:
+                    logging.warning(f"Failed to capture mask for ROI {roi_idx+1}: {e}")
+                    masks.append(None)
+            else:
+                masks.append(None)
+        
+        self.fixed_roi_masks = masks
+        if created_any:
+            self.mask_status_label.setText("Mask: captured from current frame")
+            if not self.use_fixed_mask:
+                # Auto-enable usage for convenience
+                self.use_fixed_mask_checkbox.setChecked(True)
+        else:
+            self.mask_status_label.setText("Mask: none (could not capture)")
+        if self.frame is not None:
+            self.show_frame()
 
     # --- Mouse Interaction on Image Label ---
 
@@ -2127,6 +2365,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.start_point = None
             # Optional: Recalculate brightness display for the final position
             self._update_current_brightness_display()
+            # Moving ROI invalidates any captured masks (shape/position may change)
+            self._invalidate_fixed_masks("ROI moved")
             self.show_frame() # Redraw in final state
 
         elif self.resizing:
@@ -2137,6 +2377,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.end_point = None
             # Optional: Recalculate brightness display for the final size
             self._update_current_brightness_display()
+            # Resizing ROI invalidates any captured masks (shape changed)
+            self._invalidate_fixed_masks("ROI resized")
             self.show_frame() # Redraw in final state
 
     def _get_pixmap_rect_in_label(self) -> Optional[QtCore.QRect]:
@@ -2543,7 +2785,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
                     if x2 > x1 and y2 > y1:
                         roi = frame[y1:y2, x1:x2]
-                        l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(roi, background_brightness)
+                        roi_mask = None
+                        if self.use_fixed_mask and roi_idx < len(self.fixed_roi_masks):
+                            roi_mask = self.fixed_roi_masks[roi_idx]
+                            # Ensure shape matches current ROI, else ignore
+                            if isinstance(roi_mask, np.ndarray) and roi_mask.shape[:2] != roi.shape[:2]:
+                                roi_mask = None
+                        l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(roi, background_brightness, roi_mask)
                         # Store background-subtracted values if background ROI defined, otherwise raw values
                         if background_brightness is not None:
                             brightness_mean_data[data_idx].append(l_bg_sub_mean)
@@ -2882,7 +3130,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
         
         return confidence
 
-    def _compute_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None) -> Tuple[float, float, float, float, float, float, float, float]:
+    def _compute_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None, roi_mask: Optional[np.ndarray] = None) -> Tuple[float, float, float, float, float, float, float, float]:
         """
         Calculates brightness statistics for an ROI with optional background subtraction.
 
@@ -2892,6 +3140,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
         Args:
             roi_bgr: The region of interest as a NumPy array (BGR format).
             background_brightness: Optional background L* value to subtract from all pixels.
+            roi_mask: Optional boolean mask selecting pixels to analyze within ROI.
 
         Returns:
             Tuple of (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, 
@@ -2905,6 +3154,32 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
         try:
             lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
             l_chan = lab[:, :, 0].astype(np.float32)
+
+            # If a fixed ROI mask is provided, use it directly
+            if roi_mask is not None:
+                mask_bool = roi_mask.astype(bool)
+                if mask_bool.shape[:2] != roi_bgr.shape[:2] or not np.any(mask_bool):
+                    return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+                l_star = l_chan * 100.0 / 255.0
+                blue_chan = roi_bgr[:, :, 0].astype(np.float32)
+                l_pixels = l_star[mask_bool]
+                b_pixels = blue_chan[mask_bool]
+                l_raw_mean = float(np.mean(l_pixels))
+                l_raw_median = float(np.median(l_pixels))
+                b_raw_mean = float(np.mean(b_pixels))
+                b_raw_median = float(np.median(b_pixels))
+                if background_brightness is not None:
+                    l_bg = l_pixels - background_brightness
+                    l_bg_sub_mean = float(np.mean(l_bg))
+                    l_bg_sub_median = float(np.median(l_bg))
+                    b_bg_sub_mean = b_raw_mean
+                    b_bg_sub_median = b_raw_median
+                else:
+                    l_bg_sub_mean = l_raw_mean
+                    l_bg_sub_median = l_raw_median
+                    b_bg_sub_mean = b_raw_mean
+                    b_bg_sub_median = b_raw_median
+                return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
 
             # Convert raw L to L* scale (0–100)
             l_star = l_chan * 100.0 / 255.0
