@@ -1,32 +1,48 @@
-import sys
-import pandas as pd
-import numpy as np
-import cv2
-import os
 import json
-import time
-from typing import Optional, Tuple, List, Union, Dict
-import matplotlib.pyplot as plt
-from PyQt5 import QtWidgets, QtGui, QtCore
 import logging
+import os
+import sys
+import time
 from collections import OrderedDict
+from typing import Dict, List, Optional, Tuple, Union
+
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from PyQt5 import QtCore, QtGui, QtWidgets
+try:
+    import pygame
+    PYGAME_AVAILABLE = True
+except ImportError:
+    PYGAME_AVAILABLE = False
+    logging.warning("pygame not available - audio features disabled")
+
+try:
+    import librosa
+    import soundfile as sf
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    LIBROSA_AVAILABLE = False
+    logging.warning("librosa not available - audio analysis disabled")
 
 # Set up logging
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Constants ---
 DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif"
-COLOR_BACKGROUND = "#2d2d2d"
-COLOR_FOREGROUND = "#cccccc"
-COLOR_ACCENT = "#5a9bd5"
-COLOR_ACCENT_HOVER = "#7ab3e0"
-COLOR_SECONDARY = "#404040"
-COLOR_SECONDARY_LIGHT = "#555555"
-COLOR_SUCCESS = "#70ad47"
-COLOR_WARNING = "#ed7d31"
-COLOR_ERROR = "#ff0000"
-COLOR_INFO = "#ffc000"
-COLOR_BRIGHTNESS_LABEL = "#ffeb3b"
+# Modern color palette with improved contrast and visual appeal
+COLOR_BACKGROUND = "#1a1a1a"          # Deeper, richer dark background
+COLOR_FOREGROUND = "#e0e0e0"          # Softer white for better readability
+COLOR_ACCENT = "#4f9cf9"              # Modern blue with better saturation
+COLOR_ACCENT_HOVER = "#6bb3ff"        # Brighter blue for interactions
+COLOR_SECONDARY = "#2d2d2d"           # Elevated surface color
+COLOR_SECONDARY_LIGHT = "#404040"     # Lighter surface for borders/dividers
+COLOR_SUCCESS = "#10b981"             # Modern emerald green
+COLOR_WARNING = "#f59e0b"             # Warm amber
+COLOR_ERROR = "#ef4444"               # Modern red with better contrast
+COLOR_INFO = "#06b6d4"                # Cyan for info states
+COLOR_BRIGHTNESS_LABEL = "#fbbf24"    # Golden yellow for brightness display
 
 ROI_COLORS = [
     (255, 50, 50), (50, 200, 50), (50, 150, 255), (255, 150, 50),
@@ -40,6 +56,7 @@ ROI_LABEL_THICKNESS = 2
 AUTO_DETECT_BASELINE_PERCENTILE = 5
 BRIGHTNESS_NOISE_FLOOR_PERCENTILE = 2
 DEFAULT_MANUAL_THRESHOLD = 5.0
+MORPHOLOGICAL_KERNEL_SIZE = 3
 
 MOUSE_RESIZE_HANDLE_SENSITIVITY = 10
 
@@ -84,6 +101,283 @@ class FrameCache:
         """Get current cache size."""
         return len(self._cache)
 
+class AudioManager:
+    """Handle all audio feedback in the application."""
+    
+    def __init__(self, enabled: bool = True, volume: float = 0.7):
+        """Initialize audio manager with pygame mixer."""
+        self.enabled = enabled and PYGAME_AVAILABLE
+        self.volume = max(0.0, min(1.0, volume))
+        self._initialized = False
+        
+        if self.enabled:
+            try:
+                pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+                self._initialized = True
+            except (ImportError, OSError, RuntimeError) as e:
+                logging.warning(f"Failed to initialize audio: {e}")
+                self.enabled = False
+    
+    def play_analysis_start(self):
+        """Play sound when analysis starts."""
+        if not self._can_play():
+            return
+        try:
+            # Generate a simple ascending tone sequence
+            self._play_tone_sequence([440, 554, 659], duration=0.15)
+        except (RuntimeError, OSError) as e:
+            logging.warning(f"Failed to play analysis start sound: {e}")
+    
+    def play_analysis_complete(self):
+        """Play sound when analysis completes."""
+        if not self._can_play():
+            return
+        try:
+            # Generate a completion chord
+            self._play_tone_sequence([523, 659, 783], duration=0.3)
+        except (RuntimeError, OSError) as e:
+            logging.warning(f"Failed to play analysis complete sound: {e}")
+    
+    def play_run_detected(self):
+        """Play sound when a run is detected within expected duration."""
+        if not self._can_play():
+            return
+        try:
+            # Generate a quick notification beep
+            self._play_tone_sequence([880, 1109], duration=0.1)
+        except (RuntimeError, OSError) as e:
+            logging.warning(f"Failed to play run detected sound: {e}")
+    
+    def set_enabled(self, enabled: bool):
+        """Enable or disable audio."""
+        self.enabled = enabled and PYGAME_AVAILABLE and self._initialized
+    
+    def set_volume(self, volume: float):
+        """Set audio volume (0.0 to 1.0)."""
+        self.volume = max(0.0, min(1.0, volume))
+    
+    def _can_play(self) -> bool:
+        """Check if audio can be played."""
+        return self.enabled and self._initialized and PYGAME_AVAILABLE
+    
+    def _play_tone_sequence(self, frequencies: List[float], duration: float = 0.2):
+        """Play a sequence of tones."""
+        if not self._can_play():
+            return
+        
+        try:
+            sample_rate = 22050
+            samples_per_tone = int(sample_rate * duration)
+            
+            for freq in frequencies:
+                # Generate sine wave
+                t = np.linspace(0, duration, samples_per_tone, False)
+                wave = np.sin(2 * np.pi * freq * t)
+                
+                # Apply envelope to avoid clicks
+                envelope = np.exp(-t * 3)  # Exponential decay
+                wave = wave * envelope * self.volume
+                
+                # Convert to 16-bit integers
+                wave = (wave * 32767).astype(np.int16)
+                
+                # Create stereo sound
+                stereo_wave = np.zeros((samples_per_tone, 2), dtype=np.int16)
+                stereo_wave[:, 0] = wave  # Left channel
+                stereo_wave[:, 1] = wave  # Right channel
+                
+                # Play the sound
+                sound = pygame.sndarray.make_sound(stereo_wave)
+                sound.play()
+                
+                # Wait for tone to finish
+                pygame.time.wait(int(duration * 1000))
+        
+        except (RuntimeError, OSError, AttributeError) as e:
+            logging.warning(f"Failed to generate tone sequence: {e}")
+
+class AudioAnalyzer:
+    """Analyze video audio to detect completion beeps and calculate frame ranges."""
+    
+    def __init__(self):
+        """Initialize audio analyzer."""
+        self.available = LIBROSA_AVAILABLE
+        self.sample_rate = 44100
+        self.hop_length = 512
+        self.n_fft = 2048  # Larger FFT window for better frequency resolution
+        
+    def extract_audio_from_video(self, video_path: str) -> Tuple[Optional[np.ndarray], Optional[float]]:
+        """
+        Extract audio from video file.
+        
+        Args:
+            video_path: Path to video file
+            
+        Returns:
+            Tuple of (audio_data, sample_rate) or (None, None) if failed
+        """
+        if not self.available:
+            logging.warning("librosa not available - cannot extract audio")
+            return None, None
+        
+        try:
+            # Use librosa to load audio from video
+            audio_data, sr = librosa.load(video_path, sr=self.sample_rate, mono=True)
+            logging.info(f"Extracted audio: {len(audio_data)/sr:.2f} seconds at {sr} Hz")
+            return audio_data, sr
+        except Exception as e:
+            logging.error(f"Failed to extract audio from video: {e}")
+            return None, None
+    
+    def detect_beeps(self, audio_data: np.ndarray, sample_rate: float, 
+                     target_frequency: float = 7000.0, frequency_tolerance: float = 50.0,
+                     threshold_percentile: float = 95.0, min_duration: float = 0.1) -> List[float]:
+        """
+        Detect beeps/tones in audio data targeting a specific frequency.
+        
+        Args:
+            audio_data: Audio waveform data
+            sample_rate: Sample rate of audio
+            target_frequency: Target frequency to detect (Hz) - default 7000Hz
+            frequency_tolerance: Tolerance around target frequency (Hz) - default ±500Hz
+            threshold_percentile: Percentile threshold for detection
+            min_duration: Minimum duration of beep (seconds)
+            
+        Returns:
+            List of timestamps (in seconds) where beeps were detected
+        """
+        if not self.available or audio_data is None:
+            return []
+        
+        try:
+            # Compute STFT to get frequency domain representation
+            stft = librosa.stft(audio_data, hop_length=self.hop_length, n_fft=self.n_fft)
+            magnitude = np.abs(stft)
+            
+            # Get frequency bins
+            freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=self.n_fft)
+            freq_resolution = freqs[1] - freqs[0]
+            
+            # Find frequency bins around our target frequency
+            min_frequency = target_frequency - frequency_tolerance
+            max_frequency = target_frequency + frequency_tolerance
+            freq_mask = (freqs >= min_frequency) & (freqs <= max_frequency)
+            target_magnitude = magnitude[freq_mask, :]
+            
+            logging.info(f"Targeting {target_frequency}Hz ±{frequency_tolerance}Hz ({min_frequency:.1f}-{max_frequency:.1f}Hz)")
+            logging.info(f"Frequency resolution: {freq_resolution:.1f}Hz, {np.sum(freq_mask)} bins selected")
+            
+            # Use maximum energy instead of sum to focus on the strongest signal in our frequency range
+            # This helps when the beep is very pure tone at 7000Hz
+            energy_per_frame = np.max(target_magnitude, axis=0)
+            
+            # Calculate threshold based on percentile
+            threshold = np.percentile(energy_per_frame, threshold_percentile)
+            
+            # Also calculate some statistics for better insight
+            mean_energy = np.mean(energy_per_frame)
+            max_energy = np.max(energy_per_frame)
+            
+            logging.info(f"Energy stats: mean={mean_energy:.2f}, max={max_energy:.2f}, threshold={threshold:.2f}")
+            
+            # Find frames above threshold
+            above_threshold = energy_per_frame > threshold
+            
+            # Convert frame indices to time stamps
+            times = librosa.frames_to_time(np.arange(len(energy_per_frame)), 
+                                         sr=sample_rate, hop_length=self.hop_length)
+            
+            # Find start and end of continuous regions above threshold
+            beep_times = []
+            in_beep = False
+            beep_start = 0.0
+            
+            for i, (time, is_above) in enumerate(zip(times, above_threshold)):
+                if is_above and not in_beep:
+                    # Start of beep
+                    in_beep = True
+                    beep_start = time
+                elif not is_above and in_beep:
+                    # End of beep
+                    in_beep = False
+                    beep_duration = time - beep_start
+                    if beep_duration >= min_duration:
+                        # Use middle of beep as detection time
+                        beep_times.append(beep_start + beep_duration / 2)
+            
+            # Handle case where beep continues to end of audio
+            if in_beep:
+                beep_duration = times[-1] - beep_start
+                if beep_duration >= min_duration:
+                    beep_times.append(beep_start + beep_duration / 2)
+            
+            logging.info(f"Detected {len(beep_times)} beeps at: {beep_times}")
+            return beep_times
+            
+        except Exception as e:
+            logging.error(f"Failed to detect beeps: {e}")
+            return []
+    
+    def find_completion_beeps(self, video_path: str, expected_run_duration: float = 0.0) -> List[Tuple[float, int]]:
+        """
+        Find completion beeps in video audio and calculate corresponding frame ranges.
+        
+        Args:
+            video_path: Path to video file
+            expected_run_duration: Expected run duration in seconds (0 = no filtering)
+            
+        Returns:
+            List of (beep_time_seconds, frame_number) tuples
+        """
+        if not self.available:
+            return []
+        
+        # Extract audio from video
+        audio_data, sample_rate = self.extract_audio_from_video(video_path)
+        if audio_data is None:
+            return []
+        
+        # Detect beeps
+        beep_times = self.detect_beeps(audio_data, sample_rate)
+        if not beep_times:
+            return []
+        
+        # Get video properties to convert times to frames
+        try:
+            cap = cv2.VideoCapture(video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            
+            if fps <= 0:
+                logging.error("Invalid FPS from video")
+                return []
+            
+            # Convert beep times to frame numbers
+            results = []
+            for beep_time in beep_times:
+                frame_number = int(beep_time * fps)
+                if 0 <= frame_number < total_frames:
+                    results.append((beep_time, frame_number))
+            
+            # Filter by expected run duration if provided
+            if expected_run_duration > 0.0:
+                filtered_results = []
+                for beep_time, frame_number in results:
+                    # Check if there's enough time before this beep for a run of expected duration
+                    if beep_time >= expected_run_duration:
+                        filtered_results.append((beep_time, frame_number))
+                
+                if filtered_results:
+                    logging.info(f"Filtered {len(results)} beeps to {len(filtered_results)} based on run duration")
+                    results = filtered_results
+            
+            return results
+            
+        except Exception as e:
+            logging.error(f"Failed to process video for beep detection: {e}")
+            return []
+
 class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better menu support
     """Main application window for video brightness analysis."""
     
@@ -106,6 +400,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Frame caching
         self.frame_cache = FrameCache(FRAME_CACHE_SIZE)
+        
+        # Audio system
+        self.audio_manager = AudioManager()
+        self.audio_analyzer = AudioAnalyzer()
         
         # Recent files
         self.recent_files = []
@@ -135,6 +433,23 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Threshold / background
         self.manual_threshold = DEFAULT_MANUAL_THRESHOLD
         self.background_roi_idx = None       # index into self.rects
+        
+        # Pixel visualization
+        self.show_pixel_mask = False
+        # Fixed mask across frames
+        self.use_fixed_mask = False
+        self.fixed_roi_masks: List[Optional[np.ndarray]] = []  # aligned with self.rects
+
+        # Noise filtering parameters (adjustable via UI)
+        self.morphological_kernel_size = MORPHOLOGICAL_KERNEL_SIZE
+        self.background_percentile = 90.0  # For background ROI threshold calculation
+        self.noise_floor_threshold = 0.0   # Additional noise floor filtering
+        
+        # Video playback
+        self.is_playing = False
+        self.playback_timer = QtCore.QTimer()
+        self.playback_fps = 30.0  # Default playback FPS
+        self.playback_speed = 1.0  # Playback speed multiplier
 
     def _load_settings(self):
         """Load application settings from file."""
@@ -143,6 +458,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 with open(DEFAULT_SETTINGS_FILE, 'r') as f:
                     self.settings = json.load(f)
                     self.recent_files = self.settings.get('recent_files', [])
+                    
+                    # Load audio settings
+                    audio_enabled = self.settings.get('audio_enabled', True)
+                    audio_volume = self.settings.get('audio_volume', 0.7)
+                    self.audio_manager.set_enabled(audio_enabled)
+                    self.audio_manager.set_volume(audio_volume)
         except Exception as e:
             logging.warning(f"Could not load settings: {e}")
             self.settings = {}
@@ -152,6 +473,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Save application settings to file."""
         try:
             self.settings['recent_files'] = self.recent_files
+            self.settings['audio_enabled'] = self.audio_manager.enabled
+            self.settings['audio_volume'] = self.audio_manager.volume
             with open(DEFAULT_SETTINGS_FILE, 'w') as f:
                 json.dump(self.settings, f, indent=2)
         except Exception as e:
@@ -182,6 +505,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._connect_signals()
         self._setup_shortcuts()
         self._update_widget_states()
+        # After widgets exist, set a sensible initial split
+        self._set_default_splitter_sizes()
 
     def _create_menus(self):
         """Create application menus."""
@@ -219,11 +544,26 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         analyze_action.triggered.connect(self.analyze_video)
         analysis_menu.addAction(analyze_action)
         
-        auto_detect_action = QtWidgets.QAction('&Auto-Detect Range', self)
+        auto_detect_action = QtWidgets.QAction('&Detect from Audio', self)
         auto_detect_action.setShortcut('Ctrl+D')
-        auto_detect_action.setStatusTip('Automatically detect frame range')
+        auto_detect_action.setStatusTip('Detect completion beeps in audio and calculate frame ranges')
         auto_detect_action.triggered.connect(self.auto_detect_range)
         analysis_menu.addAction(auto_detect_action)
+        
+        # View menu
+        view_menu = menubar.addMenu('&View')
+        reset_layout_action = QtWidgets.QAction('&Reset Layout', self)
+        reset_layout_action.setStatusTip('Reset splitter sizes and panel widths')
+        reset_layout_action.triggered.connect(self._set_default_splitter_sizes)
+        view_menu.addAction(reset_layout_action)
+
+        # Settings menu
+        settings_menu = menubar.addMenu('&Settings')
+        
+        audio_settings_action = QtWidgets.QAction('&Audio Settings...', self)
+        audio_settings_action.setStatusTip('Configure audio feedback settings')
+        audio_settings_action.triggered.connect(self._show_audio_settings_dialog)
+        settings_menu.addAction(audio_settings_action)
         
         # Help menu
         help_menu = menubar.addMenu('&Help')
@@ -253,7 +593,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if os.path.exists(file_path):
                 action = QtWidgets.QAction(os.path.basename(file_path), self)
                 action.setStatusTip(file_path)
-                action.triggered.connect(lambda checked, path=file_path: self._open_recent_file(path))
+                action.triggered.connect(lambda _checked, path=file_path: self._open_recent_file(path))
                 self.recent_files_menu.addAction(action)
 
     def _open_recent_file(self, file_path: str):
@@ -269,8 +609,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _setup_shortcuts(self):
         """Setup keyboard shortcuts."""
-        # Frame navigation shortcuts
+        # Playback shortcuts
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Space), self, 
+                          self.toggle_playback)
+        
+        # Frame navigation shortcuts
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left), self, 
+                          lambda: self.step_frames(-1))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right), self, 
                           lambda: self.step_frames(1))
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Backspace), self, 
                           lambda: self.step_frames(-1))
@@ -316,16 +662,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         layout = QtWidgets.QVBoxLayout(dialog)
         
         shortcuts_text = """
+<h3>Playback Shortcuts:</h3>
+<b>Space:</b> Play/Pause video<br>
+
 <h3>Navigation Shortcuts:</h3>
 <b>Left/Right Arrow:</b> Previous/Next frame<br>
-<b>Space:</b> Next frame<br>
 <b>Backspace:</b> Previous frame<br>
 <b>Page Down/Up:</b> Jump 10 frames<br>
 <b>Home/End:</b> Go to first/last frame<br>
 
 <h3>Analysis Shortcuts:</h3>
 <b>F5:</b> Run analysis<br>
-<b>Ctrl+D:</b> Auto-detect range<br>
+<b>Ctrl+D:</b> Detect from audio<br>
 
 <h3>ROI Shortcuts:</h3>
 <b>Delete:</b> Delete selected ROI<br>
@@ -362,6 +710,70 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             <li>Frame caching for smooth navigation</li>
             </ul>""")
 
+    def _show_audio_settings_dialog(self):
+        """Show audio settings dialog."""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('Audio Settings')
+        dialog.setModal(True)
+        dialog.resize(350, 200)
+        
+        layout = QtWidgets.QVBoxLayout(dialog)
+        
+        # Audio enabled checkbox
+        enabled_checkbox = QtWidgets.QCheckBox("Enable Audio Feedback")
+        enabled_checkbox.setChecked(self.audio_manager.enabled)
+        layout.addWidget(enabled_checkbox)
+        
+        # Volume slider
+        volume_group = QtWidgets.QGroupBox("Volume")
+        volume_layout = QtWidgets.QVBoxLayout(volume_group)
+        
+        volume_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        volume_slider.setRange(0, 100)
+        volume_slider.setValue(int(self.audio_manager.volume * 100))
+        volume_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        volume_slider.setTickInterval(25)
+        
+        volume_label = QtWidgets.QLabel(f"Volume: {int(self.audio_manager.volume * 100)}%")
+        
+        def update_volume_label(value):
+            volume_label.setText(f"Volume: {value}%")
+        
+        volume_slider.valueChanged.connect(update_volume_label)
+        
+        volume_layout.addWidget(volume_label)
+        volume_layout.addWidget(volume_slider)
+        layout.addWidget(volume_group)
+        
+        # Test button
+        test_layout = QtWidgets.QHBoxLayout()
+        test_btn = QtWidgets.QPushButton("Test Audio")
+        test_btn.clicked.connect(lambda: self.audio_manager.play_analysis_start())
+        test_layout.addWidget(test_btn)
+        test_layout.addStretch()
+        layout.addLayout(test_layout)
+        
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        ok_btn = QtWidgets.QPushButton("OK")
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        
+        button_layout.addStretch()
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+        def accept_settings():
+            self.audio_manager.set_enabled(enabled_checkbox.isChecked())
+            self.audio_manager.set_volume(volume_slider.value() / 100.0)
+            self._save_settings()
+            dialog.accept()
+        
+        ok_btn.clicked.connect(accept_settings)
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        dialog.exec_()
+
     def _apply_stylesheet(self):
         """Apply a modern, clean stylesheet to the application."""
         self.setStyleSheet(f"""
@@ -371,6 +783,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 font-family: {DEFAULT_FONT_FAMILY};
                 font-size: 14px;
             }}
+            QSplitter::handle {{ background: {COLOR_SECONDARY_LIGHT}; }}
             QMenuBar {{
                 background-color: {COLOR_SECONDARY};
                 color: {COLOR_FOREGROUND};
@@ -402,6 +815,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 font-family: {DEFAULT_FONT_FAMILY};
                 font-size: 14px;
             }}
+            QScrollArea, QScrollArea > QWidget > QWidget {{
+                background-color: {COLOR_BACKGROUND};
+            }}
+            QTabWidget::pane {{ border: 1px solid {COLOR_SECONDARY_LIGHT}; border-radius: 6px; }}
+            QTabBar::tab {{ padding: 6px 10px; }}
             QLabel#titleLabel {{
                 font-size: 24px;
                 font-weight: bold;
@@ -456,42 +874,67 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 border-radius: 3px;
             }}
             QPushButton {{
-                background-color: {COLOR_SECONDARY_LIGHT};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
                 color: {COLOR_FOREGROUND};
                 border: 1px solid {COLOR_SECONDARY};
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 8px 15px;
                 font-size: 14px;
                 min-height: 20px;
             }}
             QPushButton:hover {{
-                background-color: {COLOR_ACCENT};
-                color: {COLOR_BACKGROUND};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
                 border: 1px solid {COLOR_ACCENT_HOVER};
+                padding: 9px 16px;
             }}
             QPushButton:pressed {{
-                background-color: {COLOR_ACCENT_HOVER};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
+                padding: 7px 14px;
+                border: 1px solid {COLOR_ACCENT};
             }}
             QPushButton:disabled {{
-                background-color: {COLOR_SECONDARY};
+                background: {COLOR_SECONDARY};
                 color: #888888;
                 border: 1px solid {COLOR_SECONDARY};
             }}
             QPushButton:checked {{
-                background-color: {COLOR_ACCENT};
-                color: {COLOR_BACKGROUND};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
                 border: 1px solid {COLOR_ACCENT_HOVER};
             }}
             QListWidget {{
-                background: {COLOR_BACKGROUND};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_BACKGROUND}, stop: 1 {COLOR_SECONDARY});
                 border: 1px solid {COLOR_SECONDARY_LIGHT};
                 color: {COLOR_FOREGROUND};
                 font-size: 13px;
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QListWidget::item {{
                 border-radius: 4px;
+                padding: 4px 8px;
+                margin: 1px;
+            }}
+            QListWidget::item:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
+                border: 1px solid {COLOR_ACCENT};
             }}
             QListWidget::item:selected {{
-                background: {COLOR_ACCENT};
-                color: {COLOR_BACKGROUND};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
+                border: 1px solid {COLOR_ACCENT_HOVER};
+            }}
+            QListWidget::item:selected:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT_HOVER}, stop: 1 {COLOR_ACCENT});
             }}
             QSlider::groove:horizontal {{
                 border: 1px solid {COLOR_SECONDARY};
@@ -515,14 +958,25 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 border-radius: 3px;
             }}
             QLineEdit, QSpinBox {{
-                background-color: {COLOR_BACKGROUND};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_BACKGROUND}, stop: 1 {COLOR_SECONDARY});
                 border: 1px solid {COLOR_SECONDARY_LIGHT};
-                padding: 4px;
-                border-radius: 4px;
+                padding: 6px 8px;
+                border-radius: 6px;
                 min-height: 20px;
+                color: {COLOR_FOREGROUND};
+            }}
+            QLineEdit:hover, QSpinBox:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_SECONDARY_LIGHT});
+                border: 1px solid {COLOR_ACCENT};
             }}
             QLineEdit:focus, QSpinBox:focus {{
-                border: 1px solid {COLOR_ACCENT};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 white, stop: 1 #f8f9fa);
+                border: 2px solid {COLOR_ACCENT};
+                color: #1a1a1a;
+                padding: 5px 7px;
             }}
             QSpinBox::up-button, QSpinBox::down-button {{
                 subcontrol-origin: border;
@@ -560,102 +1014,505 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 background-color: {COLOR_SUCCESS};
                 border-radius: 3px;
             }}
+
+            /* Modern Video Control Styling */
+            QPushButton#playButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
+                border: 2px solid {COLOR_ACCENT_HOVER};
+                border-radius: 20px;
+                font-size: 16px;
+                font-weight: bold;
+                min-width: 44px;
+                min-height: 36px;
+            }}
+            QPushButton#playButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT_HOVER}, stop: 1 {COLOR_ACCENT});
+                border: 2px solid #8fc8ff;
+                transform: scale(1.05);
+            }}
+            QPushButton#playButton:pressed {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
+                border: 2px solid {COLOR_ACCENT};
+            }}
+
+            QPushButton#mediaButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
+                color: {COLOR_FOREGROUND};
+                border: 1px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 20px;
+                font-size: 14px;
+                font-weight: bold;
+                min-width: 36px;
+                min-height: 36px;
+            }}
+            QPushButton#mediaButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
+                border: 1px solid {COLOR_ACCENT_HOVER};
+            }}
+            QPushButton#mediaButton:pressed {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
+            }}
+
+            QPushButton#jumpButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
+                color: {COLOR_FOREGROUND};
+                border: 1px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 500;
+                padding: 6px 12px;
+            }}
+            QPushButton#jumpButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_INFO}, stop: 1 #059aa8);
+                color: white;
+                border: 1px solid {COLOR_INFO};
+            }}
+
+            QPushButton#analysisButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
+                color: {COLOR_FOREGROUND};
+                border: 1px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 6px;
+                font-size: 12px;
+                font-weight: 500;
+                padding: 6px 12px;
+            }}
+            QPushButton#analysisButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SUCCESS}, stop: 1 #0d9488);
+                color: white;
+                border: 1px solid {COLOR_SUCCESS};
+            }}
+
+            QSlider#timelineSlider::groove:horizontal {{
+                border: none;
+                height: 8px;
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_BACKGROUND});
+                border-radius: 4px;
+            }}
+            QSlider#timelineSlider::handle:horizontal {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 white, stop: 1 {COLOR_ACCENT});
+                border: 2px solid {COLOR_ACCENT_HOVER};
+                width: 20px;
+                margin: -8px 0;
+                border-radius: 10px;
+            }}
+            QSlider#timelineSlider::handle:horizontal:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 white, stop: 1 {COLOR_ACCENT_HOVER});
+                border: 2px solid #8fc8ff;
+                width: 24px;
+                margin: -10px 0;
+            }}
+            QSlider#timelineSlider::sub-page:horizontal {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SUCCESS}, stop: 1 #059669);
+                border-radius: 4px;
+            }}
+
+            /* Enhanced ComboBox Styling */
+            QComboBox {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
+                border: 1px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-height: 20px;
+                color: {COLOR_FOREGROUND};
+            }}
+            QComboBox:hover {{
+                border: 1px solid {COLOR_ACCENT};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left: 1px solid {COLOR_SECONDARY_LIGHT};
+            }}
+            QComboBox::down-arrow {{
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 6px solid {COLOR_FOREGROUND};
+                margin: 0px 6px;
+            }}
+            QComboBox:hover::down-arrow {{
+                border-top: 6px solid white;
+            }}
+
+            /* Enhanced Frame Separator */
+            QFrame[frameShape="5"] {{ /* VLine */
+                color: {COLOR_SECONDARY_LIGHT};
+                background-color: {COLOR_SECONDARY_LIGHT};
+                max-width: 1px;
+                margin: 4px 8px;
+            }}
+
+            /* Improved GroupBox styling */
+            QGroupBox {{
+                border: 2px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 8px;
+                margin-top: 12px;
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_BACKGROUND});
+                font-weight: bold;
+                font-size: 14px;
+                padding-top: 12px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 4px 8px;
+                color: {COLOR_ACCENT};
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_BACKGROUND}, stop: 1 {COLOR_SECONDARY});
+                border: 1px solid {COLOR_ACCENT};
+                border-radius: 4px;
+            }}
+
+            /* Primary Button Styles */
+            QPushButton#primaryButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
+                color: white;
+                border: 1px solid {COLOR_ACCENT_HOVER};
+                border-radius: 6px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 8px 16px;
+                min-height: 28px;
+            }}
+            QPushButton#primaryButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_ACCENT_HOVER}, stop: 1 {COLOR_ACCENT});
+                border: 1px solid #8fc8ff;
+            }}
+            QPushButton#primaryButton:pressed {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
+            }}
+
+            QPushButton#primaryActionButton {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SUCCESS}, stop: 1 #059669);
+                color: white;
+                border: 2px solid {COLOR_SUCCESS};
+                border-radius: 8px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 10px 20px;
+                min-height: 32px;
+            }}
+            QPushButton#primaryActionButton:hover {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #22c55e, stop: 1 {COLOR_SUCCESS});
+                border: 2px solid #22c55e;
+                transform: scale(1.02);
+            }}
+            QPushButton#primaryActionButton:pressed {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 #15803d, stop: 1 #059669);
+            }}
+            QPushButton#primaryActionButton:disabled {{
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_BACKGROUND});
+                color: #888888;
+                border: 2px solid {COLOR_SECONDARY};
+            }}
         """)
 
     def _create_layouts(self):
-        """Create the main horizontal and vertical layouts."""
-        self.left_layout = QtWidgets.QVBoxLayout()
-        self.right_layout = QtWidgets.QVBoxLayout()
-        self.main_layout.addLayout(self.left_layout, stretch=3)
-        self.main_layout.addLayout(self.right_layout, stretch=1)
+        """Create resizable panes with a splitter and add scrollable side panel."""
+        # Main horizontal splitter between left (video + controls) and right (side panel)
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.main_layout.addWidget(self.splitter)
+
+        # Left container widget (keeps existing left_layout semantics)
+        self.left_container = QtWidgets.QWidget()
+        self.left_layout = QtWidgets.QVBoxLayout(self.left_container)
+        self.left_layout.setContentsMargins(0, 0, 0, 0)
+        self.left_layout.setSpacing(8)
+        self.splitter.addWidget(self.left_container)
+
+        # Right container inside a scroll area (prevents off‑screen controls)
+        self.right_scroll = QtWidgets.QScrollArea()
+        self.right_scroll.setWidgetResizable(True)
+        self.right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.right_content = QtWidgets.QWidget()
+        self.right_layout = QtWidgets.QVBoxLayout(self.right_content)
+        self.right_layout.setContentsMargins(8, 8, 8, 8)
+        self.right_layout.setSpacing(10)
+        self.right_scroll.setWidget(self.right_content)
+        self.splitter.addWidget(self.right_scroll)
+
+        # Enhanced responsive sizing
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 1)
+        self.right_scroll.setMinimumWidth(320)  # Slightly reduced for smaller screens
+        self.right_scroll.setMaximumWidth(480)  # Prevent right panel from being too wide
+
+        # Prevent either pane from collapsing to zero
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setCollapsible(1, False)
+
+        # Set minimum size for main window to ensure usability
+        self.setMinimumSize(800, 600)
+
+    def _set_default_splitter_sizes(self):
+        """Set responsive splitter sizes based on current window width and screen size."""
+        try:
+            total = max(1, self.width())
+
+            # Adaptive split ratio based on window size
+            if total <= 1000:
+                # Smaller screens: give more space to video
+                ratio = 0.72
+            elif total <= 1400:
+                # Medium screens: balanced layout
+                ratio = 0.68
+            else:
+                # Large screens: slightly more space for side panel
+                ratio = 0.65
+
+            left = int(total * ratio)
+            right = max(320, min(480, total - left))  # Clamp right panel size
+            self.splitter.setSizes([left, right])
+        except Exception:
+            # Fallback sizes for different screen types
+            total = max(1, self.width())
+            if total <= 1000:
+                self.splitter.setSizes([720, 320])
+            else:
+                self.splitter.setSizes([900, 420])
 
     def _create_widgets(self):
         """Create all the widgets and add them to layouts."""
         # --- Left Layout Widgets ---
+        # Header section with improved spacing
+        header_layout = QtWidgets.QVBoxLayout()
+        header_layout.setSpacing(8)
+        header_layout.setContentsMargins(8, 8, 8, 16)
+
         self.title_label = QtWidgets.QLabel("Brightness Sorcerer", self)
         self.title_label.setObjectName("titleLabel")
-        self.left_layout.addWidget(self.title_label)
+        header_layout.addWidget(self.title_label)
 
         # File info label
         self.file_info_label = QtWidgets.QLabel("No video loaded")
         self.file_info_label.setObjectName("statusLabel")
-        self.left_layout.addWidget(self.file_info_label)
+        header_layout.addWidget(self.file_info_label)
 
-        # Open-file button
-        self.open_btn = QtWidgets.QPushButton("Open Video… (Ctrl+O)")    
+        # Open-file button with better styling
+        self.open_btn = QtWidgets.QPushButton("📁 Open Video… (Ctrl+O)")
+        self.open_btn.setObjectName("primaryButton")
         self.open_btn.setToolTip("Choose a video file from disk")
-        self.left_layout.addWidget(self.open_btn)
+        self.open_btn.setFixedHeight(36)
+        header_layout.addWidget(self.open_btn)
+
+        self.left_layout.addLayout(header_layout)
 
         self.image_label = QtWidgets.QLabel(self)
         self.image_label.setObjectName("imageLabel")
         self.image_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+        # Let image scale down responsively but not push controls off-screen
+        self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.image_label.setMinimumHeight(240)
         self.image_label.setText("Drag & Drop Video File Here")
         self.left_layout.addWidget(self.image_label, stretch=1)
 
-        # Slider and Frame Label Layout
-        slider_frame_layout = QtWidgets.QHBoxLayout()
+        # Modern Video Controls with consolidated layout
+        self.video_controls_groupbox = QtWidgets.QGroupBox("Video Controls")
+        controls_layout = QtWidgets.QVBoxLayout()
+        controls_layout.setContentsMargins(12, 16, 12, 16)
+        controls_layout.setSpacing(12)
+
+        # Main Timeline Row - consolidated playback controls
+        main_timeline_layout = QtWidgets.QHBoxLayout()
+        main_timeline_layout.setSpacing(8)
+
+        # Previous frame button
+        self.prev_frame_btn = QtWidgets.QPushButton("⏮")
+        self.prev_frame_btn.setToolTip("Previous Frame (Left Arrow)")
+        self.prev_frame_btn.setFixedSize(40, 40)
+        self.prev_frame_btn.setObjectName("mediaButton")
+        main_timeline_layout.addWidget(self.prev_frame_btn)
+
+        # Play/Pause button - larger and more prominent
+        self.play_pause_btn = QtWidgets.QPushButton("⏵")
+        self.play_pause_btn.setToolTip("Play/Pause video (Spacebar)")
+        self.play_pause_btn.setFixedSize(48, 40)
+        self.play_pause_btn.setObjectName("playButton")
+        main_timeline_layout.addWidget(self.play_pause_btn)
+
+        # Next frame button
+        self.next_frame_btn = QtWidgets.QPushButton("⏭")
+        self.next_frame_btn.setToolTip("Next Frame (Right Arrow)")
+        self.next_frame_btn.setFixedSize(40, 40)
+        self.next_frame_btn.setObjectName("mediaButton")
+        main_timeline_layout.addWidget(self.next_frame_btn)
+
+        # Timeline slider with frame info
+        timeline_container = QtWidgets.QVBoxLayout()
+        timeline_container.setSpacing(4)
+
+        # Frame slider (main timeline)
         self.frame_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.frame_slider.setToolTip("Drag to navigate frames")
-        slider_frame_layout.addWidget(self.frame_slider)
+        self.frame_slider.setToolTip("Drag to navigate frames or click to seek")
+        self.frame_slider.setMinimumHeight(24)
+        self.frame_slider.setObjectName("timelineSlider")
+        timeline_container.addWidget(self.frame_slider)
+
+        # Frame info row
+        frame_info_layout = QtWidgets.QHBoxLayout()
+        frame_info_layout.setSpacing(8)
 
         self.frame_label = QtWidgets.QLabel("Frame: 0 / 0")
         self.frame_label.setMinimumWidth(120)
-        slider_frame_layout.addWidget(self.frame_label)
+        self.frame_label.setAlignment(QtCore.Qt.AlignLeft)
+        frame_info_layout.addWidget(self.frame_label)
 
+        frame_info_layout.addStretch()
+
+        # Frame input
+        frame_input_layout = QtWidgets.QHBoxLayout()
+        frame_input_layout.setSpacing(4)
+        frame_input_layout.addWidget(QtWidgets.QLabel("Go to:"))
         self.frame_spinbox = QtWidgets.QSpinBox()
-        self.frame_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.PlusMinus)
+        self.frame_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         self.frame_spinbox.setToolTip("Enter frame number directly")
-        slider_frame_layout.addWidget(self.frame_spinbox)
-        self.left_layout.addLayout(slider_frame_layout)
+        self.frame_spinbox.setAlignment(QtCore.Qt.AlignCenter)
+        self.frame_spinbox.setFixedWidth(80)
+        frame_input_layout.addWidget(self.frame_spinbox)
 
-        # Frame Control Buttons Layout
-        frame_control_layout = QtWidgets.QHBoxLayout()
-        self.prev_frame_btn = QtWidgets.QPushButton("◀")
-        self.prev_frame_btn.setToolTip("Previous Frame (Left Arrow, Backspace)")
-        frame_control_layout.addWidget(self.prev_frame_btn)
+        frame_info_layout.addLayout(frame_input_layout)
+        timeline_container.addLayout(frame_info_layout)
 
-        self.next_frame_btn = QtWidgets.QPushButton("▶")
-        self.next_frame_btn.setToolTip("Next Frame (Right Arrow, Space)")
-        frame_control_layout.addWidget(self.next_frame_btn)
+        main_timeline_layout.addLayout(timeline_container)
 
-        self.jump_back_btn = QtWidgets.QPushButton(f"◀◀ {JUMP_FRAMES}")
+        # Speed control - compact design
+        speed_container = QtWidgets.QVBoxLayout()
+        speed_container.setSpacing(4)
+        speed_label = QtWidgets.QLabel("Speed")
+        speed_label.setAlignment(QtCore.Qt.AlignCenter)
+        speed_container.addWidget(speed_label)
+        self.speed_combo = QtWidgets.QComboBox()
+        self.speed_combo.addItems(["0.25×", "0.5×", "1×", "2×", "4×"])
+        self.speed_combo.setCurrentText("1×")
+        self.speed_combo.setToolTip("Playback speed")
+        self.speed_combo.setFixedWidth(60)
+        speed_container.addWidget(self.speed_combo)
+        main_timeline_layout.addLayout(speed_container)
+
+        controls_layout.addLayout(main_timeline_layout)
+
+        # Secondary Controls Row - Jump and Analysis
+        secondary_layout = QtWidgets.QHBoxLayout()
+        secondary_layout.setSpacing(12)
+
+        # Jump controls group
+        jump_group = QtWidgets.QHBoxLayout()
+        jump_group.setSpacing(6)
+
+        self.jump_back_btn = QtWidgets.QPushButton(f"⏪ {JUMP_FRAMES}")
         self.jump_back_btn.setToolTip(f"Jump back {JUMP_FRAMES} frames (Page Up)")
-        frame_control_layout.addWidget(self.jump_back_btn)
+        self.jump_back_btn.setFixedHeight(32)
+        self.jump_back_btn.setObjectName("jumpButton")
+        jump_group.addWidget(self.jump_back_btn)
 
-        self.jump_forward_btn = QtWidgets.QPushButton(f"{JUMP_FRAMES} ▶▶")
+        self.jump_forward_btn = QtWidgets.QPushButton(f"{JUMP_FRAMES} ⏩")
         self.jump_forward_btn.setToolTip(f"Jump forward {JUMP_FRAMES} frames (Page Down)")
-        frame_control_layout.addWidget(self.jump_forward_btn)
+        self.jump_forward_btn.setFixedHeight(32)
+        self.jump_forward_btn.setObjectName("jumpButton")
+        jump_group.addWidget(self.jump_forward_btn)
+
+        secondary_layout.addLayout(jump_group)
+
+        # Separator
+        separator = QtWidgets.QFrame()
+        separator.setFrameShape(QtWidgets.QFrame.VLine)
+        separator.setFrameShadow(QtWidgets.QFrame.Sunken)
+        secondary_layout.addWidget(separator)
+
+        # Analysis controls group
+        analysis_group = QtWidgets.QHBoxLayout()
+        analysis_group.setSpacing(6)
 
         self.set_start_btn = QtWidgets.QPushButton("Set Start")
         self.set_start_btn.setToolTip("Set current frame as analysis start")
-        frame_control_layout.addWidget(self.set_start_btn)
+        self.set_start_btn.setFixedHeight(32)
+        self.set_start_btn.setObjectName("analysisButton")
+        analysis_group.addWidget(self.set_start_btn)
 
         self.set_end_btn = QtWidgets.QPushButton("Set End")
         self.set_end_btn.setToolTip("Set current frame as analysis end")
-        frame_control_layout.addWidget(self.set_end_btn)
+        self.set_end_btn.setFixedHeight(32)
+        self.set_end_btn.setObjectName("analysisButton")
+        analysis_group.addWidget(self.set_end_btn)
 
-        self.auto_detect_btn = QtWidgets.QPushButton("Auto-Detect (Ctrl+D)")
-        self.auto_detect_btn.setToolTip("Automatically detect start/end frames based on ROI brightness")
-        frame_control_layout.addWidget(self.auto_detect_btn)
-        self.left_layout.addLayout(frame_control_layout)
+        self.auto_detect_btn = QtWidgets.QPushButton("🎵 Detect from Audio")
+        self.auto_detect_btn.setToolTip("Detect completion beeps in audio and calculate frame ranges (Ctrl+D)")
+        self.auto_detect_btn.setFixedHeight(32)
+        self.auto_detect_btn.setObjectName("analysisButton")
+        analysis_group.addWidget(self.auto_detect_btn)
 
-        # Analysis Name Layout
+        secondary_layout.addLayout(analysis_group)
+        secondary_layout.addStretch()
+
+        controls_layout.addLayout(secondary_layout)
+        
+        self.video_controls_groupbox.setLayout(controls_layout)
+        # Keep controls compact to avoid crowding
+        self.video_controls_groupbox.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        self.video_controls_groupbox.setMaximumHeight(210)
+        self.left_layout.addWidget(self.video_controls_groupbox)
+
+        # Analysis Section with improved grouping and spacing
+        analysis_section = QtWidgets.QVBoxLayout()
+        analysis_section.setSpacing(12)
+        analysis_section.setContentsMargins(8, 16, 8, 8)
+
+        # Analysis Name Layout with better spacing
         name_layout = QtWidgets.QHBoxLayout()
-        name_layout.addWidget(QtWidgets.QLabel("Analysis Name:"))
+        name_layout.setSpacing(8)
+        name_label = QtWidgets.QLabel("Analysis Name:")
+        name_label.setMinimumWidth(100)
+        name_layout.addWidget(name_label)
         self.analysis_name_input = QtWidgets.QLineEdit()
         self.analysis_name_input.setPlaceholderText("DefaultAnalysis")
+        self.analysis_name_input.setFixedHeight(32)
         name_layout.addWidget(self.analysis_name_input)
-        self.left_layout.addLayout(name_layout)
+        analysis_section.addLayout(name_layout)
 
-        # Action Buttons Layout
+        # Action Buttons Layout with prominent styling
         action_layout = QtWidgets.QHBoxLayout()
-        self.analyze_btn = QtWidgets.QPushButton('Analyze Brightness (F5)')
+        self.analyze_btn = QtWidgets.QPushButton('🔍 Analyze Brightness (F5)')
+        self.analyze_btn.setObjectName("primaryActionButton")
         self.analyze_btn.setToolTip("Run brightness analysis on the selected frame range and ROIs")
+        self.analyze_btn.setFixedHeight(40)
         action_layout.addWidget(self.analyze_btn)
-        self.left_layout.addLayout(action_layout)
+        analysis_section.addLayout(action_layout)
 
-        # --- Right Layout Widgets ---
+        self.left_layout.addLayout(analysis_section)
+
+        # --- Right Panel Widgets (not yet added to layout; placed into tabs below) ---
         # Video info group
         self.video_info_groupbox = QtWidgets.QGroupBox("Video Information")
         video_info_layout = QtWidgets.QVBoxLayout()
@@ -663,7 +1520,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.video_info_label.setWordWrap(True)
         video_info_layout.addWidget(self.video_info_label)
         self.video_info_groupbox.setLayout(video_info_layout)
-        self.right_layout.addWidget(self.video_info_groupbox)
 
         # Brightness Display
         self.brightness_groupbox = QtWidgets.QGroupBox("ROI Brightness: Mean±Median (Current Frame)")
@@ -672,7 +1528,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.brightness_display_label.setObjectName("brightnessDisplayLabel")
         brightness_groupbox_layout.addWidget(self.brightness_display_label)
         self.brightness_groupbox.setLayout(brightness_groupbox_layout)
-        self.right_layout.addWidget(self.brightness_groupbox)
+
+        # -- Run Duration Settings
+        self.run_duration_groupbox = QtWidgets.QGroupBox("Run Duration (Optional)")
+        run_duration_layout = QtWidgets.QVBoxLayout()
+        
+        duration_input_layout = QtWidgets.QHBoxLayout()
+        duration_input_layout.addWidget(QtWidgets.QLabel("Expected Duration (sec):"))
+        self.run_duration_spin = QtWidgets.QDoubleSpinBox()
+        self.run_duration_spin.setDecimals(1)
+        self.run_duration_spin.setRange(0.0, 3600.0)  # 0 to 1 hour
+        self.run_duration_spin.setSingleStep(0.5)
+        self.run_duration_spin.setValue(0.0)  # 0 = disabled
+        self.run_duration_spin.setToolTip("Expected run duration for validation (0 = disabled)")
+        duration_input_layout.addWidget(self.run_duration_spin)
+        run_duration_layout.addLayout(duration_input_layout)
+        
+        self.run_duration_groupbox.setLayout(run_duration_layout)
+        self.right_layout.addWidget(self.run_duration_groupbox)
 
         # -- Threshold groupbox
         self.threshold_groupbox = QtWidgets.QGroupBox("Threshold Settings")
@@ -701,7 +1574,84 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         th_layout.addWidget(self.threshold_display_label)
         
         self.threshold_groupbox.setLayout(th_layout)
-        self.right_layout.addWidget(self.threshold_groupbox)
+
+        # Visualization Controls
+        self.viz_groupbox = QtWidgets.QGroupBox("Visualization")
+        viz_layout = QtWidgets.QVBoxLayout()
+        
+        self.show_mask_checkbox = QtWidgets.QCheckBox("Show Pixel Mask")
+        self.show_mask_checkbox.setToolTip("Highlight analyzed pixels in red overlay")
+        self.show_mask_checkbox.setChecked(self.show_pixel_mask)
+        viz_layout.addWidget(self.show_mask_checkbox)
+
+        # Fixed mask controls
+        self.use_fixed_mask_checkbox = QtWidgets.QCheckBox("Use Fixed Mask (from frame)")
+        self.use_fixed_mask_checkbox.setToolTip("Apply a pixel mask captured on a specific frame to all frames during analysis and visualization")
+        viz_layout.addWidget(self.use_fixed_mask_checkbox)
+
+        mask_btn_layout = QtWidgets.QHBoxLayout()
+        self.capture_mask_btn = QtWidgets.QPushButton("Capture Mask From Current Frame")
+        self.capture_mask_btn.setToolTip("Compute the analyzed-pixel mask for each ROI based on the current frame and reuse it for all frames")
+        mask_btn_layout.addWidget(self.capture_mask_btn)
+
+        self.auto_brightest_mask_btn = QtWidgets.QPushButton("Auto-Capture from Brightest Frame")
+        self.auto_brightest_mask_btn.setToolTip("Automatically find the brightest frame in the current range and capture masks from it")
+        mask_btn_layout.addWidget(self.auto_brightest_mask_btn)
+
+        mask_btn_layout.addStretch()
+        viz_layout.addLayout(mask_btn_layout)
+
+        self.mask_status_label = QtWidgets.QLabel("Mask: none")
+        self.mask_status_label.setObjectName("statusLabel")
+        viz_layout.addWidget(self.mask_status_label)
+
+        # Noise filtering controls
+        noise_groupbox = QtWidgets.QGroupBox("Noise Filtering")
+        noise_layout = QtWidgets.QVBoxLayout()
+
+        # Morphological kernel size
+        kernel_layout = QtWidgets.QHBoxLayout()
+        kernel_layout.addWidget(QtWidgets.QLabel("Morphological Kernel:"))
+        self.kernel_size_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.kernel_size_slider.setRange(1, 15)
+        self.kernel_size_slider.setValue(self.morphological_kernel_size)
+        self.kernel_size_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.kernel_size_slider.setTickInterval(2)
+        self.kernel_size_label = QtWidgets.QLabel(f"{self.morphological_kernel_size}×{self.morphological_kernel_size}")
+        kernel_layout.addWidget(self.kernel_size_slider)
+        kernel_layout.addWidget(self.kernel_size_label)
+        noise_layout.addLayout(kernel_layout)
+
+        # Background percentile
+        bg_percentile_layout = QtWidgets.QHBoxLayout()
+        bg_percentile_layout.addWidget(QtWidgets.QLabel("Background Percentile:"))
+        self.bg_percentile_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.bg_percentile_slider.setRange(50, 99)
+        self.bg_percentile_slider.setValue(int(self.background_percentile))
+        self.bg_percentile_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.bg_percentile_slider.setTickInterval(10)
+        self.bg_percentile_label = QtWidgets.QLabel(f"{self.background_percentile:.0f}%")
+        bg_percentile_layout.addWidget(self.bg_percentile_slider)
+        bg_percentile_layout.addWidget(self.bg_percentile_label)
+        noise_layout.addLayout(bg_percentile_layout)
+
+        # Noise floor threshold
+        noise_floor_layout = QtWidgets.QHBoxLayout()
+        noise_floor_layout.addWidget(QtWidgets.QLabel("Noise Floor (L*):"))
+        self.noise_floor_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.noise_floor_slider.setRange(0, 20)
+        self.noise_floor_slider.setValue(int(self.noise_floor_threshold * 2))  # 0.5 precision
+        self.noise_floor_slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.noise_floor_slider.setTickInterval(4)
+        self.noise_floor_label = QtWidgets.QLabel(f"{self.noise_floor_threshold:.1f}")
+        noise_floor_layout.addWidget(self.noise_floor_slider)
+        noise_floor_layout.addWidget(self.noise_floor_label)
+        noise_layout.addLayout(noise_floor_layout)
+
+        noise_groupbox.setLayout(noise_layout)
+        viz_layout.addWidget(noise_groupbox)
+
+        self.viz_groupbox.setLayout(viz_layout)
 
         # Rectangle Controls
         self.rect_groupbox = QtWidgets.QGroupBox("Regions of Interest (ROI)")
@@ -723,14 +1673,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.clear_rect_btn = QtWidgets.QPushButton("Clear All")
         self.clear_rect_btn.setToolTip("Remove all ROIs")
         rect_btn_layout.addWidget(self.clear_rect_btn)
-        rect_groupbox_layout.addLayout(rect_btn_layout)
-        self.rect_groupbox.setLayout(rect_groupbox_layout)
-        self.right_layout.addWidget(self.rect_groupbox)
 
+        # Second row of buttons
+        rect_btn_layout2 = QtWidgets.QHBoxLayout()
+        self.set_bg_roi_btn = QtWidgets.QPushButton("Set as Background")
+        self.set_bg_roi_btn.setToolTip("Set the selected ROI as the background reference for threshold calculation")
+        rect_btn_layout2.addWidget(self.set_bg_roi_btn)
+        rect_btn_layout2.addStretch()  # Push button to the left
+
+        rect_groupbox_layout.addLayout(rect_btn_layout)
+        rect_groupbox_layout.addLayout(rect_btn_layout2)
+        self.rect_groupbox.setLayout(rect_groupbox_layout)
         # Cache status
         self.cache_status_label = QtWidgets.QLabel("Cache: 0 frames")
         self.cache_status_label.setObjectName("statusLabel")
-        self.right_layout.addWidget(self.cache_status_label)
 
         # Results/Status Label
         self.results_label = QtWidgets.QLabel("Load a video to begin analysis.")
@@ -738,7 +1694,52 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.results_label.setAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
         self.results_label.setWordWrap(True)
         self.results_label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-        self.right_layout.addWidget(self.results_label, stretch=1)
+
+        # Organize right panel into tabs for clarity and prevent overflow with a scroll area (added in _create_layouts)
+        self.side_tabs = QtWidgets.QTabWidget()
+        self.side_tabs.setDocumentMode(True)
+        self.side_tabs.setTabPosition(QtWidgets.QTabWidget.North)
+        self.side_tabs.setMinimumWidth(360)
+
+        # Info tab
+        info_tab = QtWidgets.QWidget()
+        info_layout = QtWidgets.QVBoxLayout(info_tab)
+        info_layout.addWidget(self.video_info_groupbox)
+        info_layout.addWidget(self.brightness_groupbox)
+        info_layout.addWidget(self.cache_status_label)
+        info_layout.addStretch()
+        self.side_tabs.addTab(info_tab, "Info")
+
+        # Analysis tab
+        analysis_tab = QtWidgets.QWidget()
+        analysis_tab_layout = QtWidgets.QVBoxLayout(analysis_tab)
+        analysis_tab_layout.addWidget(self.run_duration_groupbox)
+        analysis_tab_layout.addWidget(self.threshold_groupbox)
+        analysis_tab_layout.addStretch()
+        self.side_tabs.addTab(analysis_tab, "Analysis")
+
+        # Visualization tab
+        viz_tab = QtWidgets.QWidget()
+        viz_tab_layout = QtWidgets.QVBoxLayout(viz_tab)
+        viz_tab_layout.addWidget(self.viz_groupbox)
+        viz_tab_layout.addStretch()
+        self.side_tabs.addTab(viz_tab, "Visualization")
+
+        # ROIs tab
+        roi_tab = QtWidgets.QWidget()
+        roi_tab_layout = QtWidgets.QVBoxLayout(roi_tab)
+        roi_tab_layout.addWidget(self.rect_groupbox)
+        roi_tab_layout.addStretch()
+        self.side_tabs.addTab(roi_tab, "ROIs")
+
+        # Status tab
+        status_tab = QtWidgets.QWidget()
+        status_layout = QtWidgets.QVBoxLayout(status_tab)
+        status_layout.addWidget(self.results_label)
+        self.side_tabs.addTab(status_tab, "Status")
+
+        # Add the tab widget to the right layout (scroll area content)
+        self.right_layout.addWidget(self.side_tabs)
 
     def _connect_signals(self):
         """Connect widget signals to their corresponding slots."""
@@ -754,6 +1755,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.set_start_btn.clicked.connect(self.set_start_frame)
         self.set_end_btn.clicked.connect(self.set_end_frame)
         self.auto_detect_btn.clicked.connect(self.auto_detect_range)
+        
+        # Playback controls
+        self.play_pause_btn.clicked.connect(self.toggle_playback)
+        self.speed_combo.currentTextChanged.connect(self.on_speed_changed)
+        self.playback_timer.timeout.connect(self.advance_frame)
 
         self.analyze_btn.clicked.connect(self.analyze_video)
 
@@ -761,6 +1767,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.add_rect_btn.clicked.connect(self.toggle_add_rectangle_mode)
         self.del_rect_btn.clicked.connect(self.delete_selected_rectangle)
         self.clear_rect_btn.clicked.connect(self.clear_all_rectangles)
+        self.set_bg_roi_btn.clicked.connect(self._set_background_roi)
 
         # Connect mouse events directly
         self.image_label.mousePressEvent = self.image_mouse_press
@@ -769,6 +1776,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         self.threshold_spin.valueChanged.connect(self._on_threshold_changed)
         self.set_bg_btn.clicked.connect(self._set_background_roi)
+        self.show_mask_checkbox.toggled.connect(self._on_mask_checkbox_toggled)
+        self.use_fixed_mask_checkbox.toggled.connect(self._on_use_fixed_mask_toggled)
+        self.capture_mask_btn.clicked.connect(self._capture_fixed_masks)
+        self.auto_brightest_mask_btn.clicked.connect(self._auto_capture_brightest_frame_masks)
+
+        # Noise filtering slider connections
+        self.kernel_size_slider.valueChanged.connect(self._on_kernel_size_changed)
+        self.bg_percentile_slider.valueChanged.connect(self._on_bg_percentile_changed)
+        self.noise_floor_slider.valueChanged.connect(self._on_noise_floor_changed)
 
     def _update_widget_states(self, video_loaded=False, rois_exist=False):
         """Enable/disable widgets based on application state."""
@@ -780,18 +1796,41 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.jump_forward_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.set_start_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.set_end_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.auto_detect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        self.auto_detect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.analyze_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        
+        # Playback controls
+        self.play_pause_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.speed_combo.setEnabled(video_loaded and not self._analysis_in_progress)
         self.add_rect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.clear_rect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
         self.set_bg_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        self.set_bg_roi_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.threshold_spin.setEnabled(not self._analysis_in_progress)
+        # Fixed mask controls
+        if hasattr(self, 'use_fixed_mask_checkbox'):
+            self.use_fixed_mask_checkbox.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        if hasattr(self, 'capture_mask_btn'):
+            self.capture_mask_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        if hasattr(self, 'auto_brightest_mask_btn'):
+            self.auto_brightest_mask_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
 
     def _update_cache_status(self):
         """Update cache status display."""
         cache_size = self.frame_cache.get_size()
         self.cache_status_label.setText(f"Cache: {cache_size}/{FRAME_CACHE_SIZE} frames")
+
+    def _invalidate_fixed_masks(self, reason: str = ""):
+        """Clear captured fixed masks when ROIs change or become invalid.
+        Optionally provide a reason for UI feedback.
+        """
+        if self.fixed_roi_masks:
+            self.fixed_roi_masks = [None for _ in self.rects]
+            if reason:
+                self.mask_status_label.setText(f"Mask: cleared ({reason})")
+            else:
+                self.mask_status_label.setText("Mask: cleared")
 
     def _update_video_info(self):
         """Update video information display."""
@@ -870,9 +1909,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def resizeEvent(self, event: QtGui.QResizeEvent):
         """
+        Enhanced resize event handler with responsive layout updates.
         Update cached label size *without* immediately redrawing the frame.
         Calling show_frame() synchronously inside resizeEvent can create
-        a feedback loop: the freshly scaled pixmap changes the label’s
+        a feedback loop: the freshly scaled pixmap changes the label's
         sizeHint, Qt recalculates the layout, and another resizeEvent fires.
         By deferring the redraw with QTimer.singleShot(0, …) we let the
         resize settle first and repaint exactly once.
@@ -884,6 +1924,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if self.frame is not None:
                 QtCore.QTimer.singleShot(0, self.show_frame)
 
+        # Update splitter sizes responsively when window is resized significantly
+        if hasattr(self, "splitter") and event:
+            old_size = event.oldSize()
+            new_size = event.size()
+            if old_size.isValid():
+                # Only update if resize is significant (more than 100px change)
+                width_change = abs(new_size.width() - old_size.width())
+                if width_change > 100:
+                    QtCore.QTimer.singleShot(100, self._set_default_splitter_sizes)
+
         # Call base-class handler last (standard Qt practice)
         super().resizeEvent(event)
 
@@ -891,6 +1941,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def load_video(self):
         """Loads the video specified by self.video_path."""
+        # Show loading feedback
+        self.statusBar().showMessage("📂 Loading video...")
+        self.file_info_label.setText("📂 Loading video file...")
+        QtWidgets.QApplication.processEvents()
+
         if self.cap:
             self.cap.release()
             self.cap = None
@@ -900,6 +1955,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._reset_state()
             return
 
+        self.statusBar().showMessage("⚙️ Initializing video decoder...")
+        QtWidgets.QApplication.processEvents()
+
         self.cap = cv2.VideoCapture(self.video_path)
         if not self.cap.isOpened():
             QtWidgets.QMessageBox.critical(self, 'Error', f'Could not open video file: {os.path.basename(self.video_path)}')
@@ -907,6 +1965,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
 
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.playback_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if self.playback_fps <= 0:
+            self.playback_fps = 30.0  # Default fallback
+            
         if self.total_frames <= 0:
              QtWidgets.QMessageBox.warning(self, 'Warning', 'Video file appears to have no frames.')
              self._reset_state()
@@ -942,11 +2004,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Add to recent files
             self._add_recent_file(self.video_path)
             
-            self.results_label.setText(f"Loaded: {os.path.basename(self.video_path)}\n"
-                                       f"Frames: {self.total_frames}\n"
-                                       "Draw ROIs or use Auto-Detect.")
+            self.results_label.setText(f"✅ Loaded: {os.path.basename(self.video_path)}\n"
+                                       f"📊 Frames: {self.total_frames:,} | ⏱️ FPS: {self.playback_fps:.1f}\n"
+                                       f"⏳ Duration: {self.total_frames/self.playback_fps:.1f}s\n"
+                                       "🎯 Draw ROIs or use Auto-Detect to begin!")
             self._update_widget_states(video_loaded=True, rois_exist=bool(self.rects))
-            self.statusBar().showMessage(f"Loaded: {os.path.basename(self.video_path)}")
+            self.statusBar().showMessage(f"✅ Successfully loaded: {os.path.basename(self.video_path)}")
+
+            # Reset fixed masks on new video load
+            self.fixed_roi_masks = [None for _ in self.rects]
+            self.use_fixed_mask_checkbox.setChecked(False)
+            self.mask_status_label.setText("Mask: none")
 
             # Attempt auto-detection if ROIs already exist
             if self.rects:
@@ -970,6 +2038,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.end_frame = None
         self.out_paths = []
         self.frame_cache.clear()
+        
+        # Stop playback and reset controls
+        self.stop_playback()
+        self.speed_combo.setCurrentText("1x")
+        self.playback_speed = 1.0
         
         self.image_label.setText("Drag & Drop Video File Here")
         self.image_label.setPixmap(QtGui.QPixmap())
@@ -1007,6 +2080,64 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         new_idx = max(0, min(self.total_frames - 1, self.current_frame_index + delta))
         if new_idx != self.current_frame_index:
             self.frame_slider.setValue(new_idx) # Let slider signal handle the update
+
+    def toggle_playback(self):
+        """Toggle video playback on/off."""
+        if not self.cap or not self.cap.isOpened() or self.total_frames == 0:
+            return
+            
+        if self.is_playing:
+            self.stop_playback()
+        else:
+            self.start_playback()
+    
+    def start_playback(self):
+        """Start video playback."""
+        if not self.cap or not self.cap.isOpened() or self.total_frames == 0:
+            return
+        
+        self.is_playing = True
+        self.play_pause_btn.setText("⏸")
+        
+        # Calculate timer interval based on FPS and speed
+        if hasattr(self, 'playback_fps') and self.playback_fps > 0:
+            interval = int(1000 / (self.playback_fps * self.playback_speed))
+        else:
+            interval = int(1000 / (30.0 * self.playback_speed))  # Default 30 FPS
+        
+        self.playback_timer.start(interval)
+    
+    def stop_playback(self):
+        """Stop video playback."""
+        self.is_playing = False
+        self.play_pause_btn.setText("⏵")
+        self.playback_timer.stop()
+    
+    def advance_frame(self):
+        """Advance to next frame during playback."""
+        if not self.is_playing or not self.cap or not self.cap.isOpened():
+            return
+        
+        next_frame = self.current_frame_index + 1
+        if next_frame >= self.total_frames:
+            # Reached end of video, stop playback
+            self.stop_playback()
+            return
+        
+        self.frame_slider.setValue(next_frame)
+    
+    def on_speed_changed(self, speed_text: str):
+        """Handle playback speed change."""
+        try:
+            speed_value = float(speed_text.replace('x', ''))
+            self.playback_speed = speed_value
+            
+            # If currently playing, restart timer with new interval
+            if self.is_playing:
+                self.stop_playback()
+                self.start_playback()
+        except ValueError:
+            logging.warning(f"Invalid speed value: {speed_text}")
 
     def _seek_to_frame(self, frame_index: int):
         """Reads and displays the specified frame index with caching."""
@@ -1056,11 +2187,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def show_frame(self):
         """Displays the current self.frame in the image_label, drawing ROIs."""
         if self.frame is None:
-            # Keep the placeholder text if no frame is loaded
-            # self.image_label.setText("No video loaded")
             return
 
         frame_copy = self.frame.copy()
+        
+        # Apply pixel mask visualization if enabled
+        if self.show_pixel_mask and len(self.rects) > 0:
+            frame_copy = self._apply_pixel_mask_overlay(frame_copy)
+            
         self._draw_rois(frame_copy)
 
         # Convert to QPixmap for display
@@ -1089,7 +2223,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             cv2.rectangle(frame_to_draw_on, pt1, pt2, color, thickness)
             # Draw index label near the top-left corner
             label = f"{idx+1}"
-            (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, ROI_LABEL_FONT_SCALE, ROI_LABEL_THICKNESS)
+            (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, ROI_LABEL_FONT_SCALE, ROI_LABEL_THICKNESS)
             label_pos = (pt1[0] + 5, pt1[1] + text_height + 5)
             # Simple background for label visibility
             cv2.rectangle(frame_to_draw_on, (pt1[0], pt1[1]), (pt1[0] + text_width + 10, pt1[1] + text_height + 10), (0,0,0), cv2.FILLED)
@@ -1103,16 +2237,21 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 cv2.rectangle(frame_to_draw_on, pt1_frame, pt2_frame, (0, 255, 255), ROI_THICKNESS_DEFAULT) # Use a distinct color (cyan)
 
     def _update_current_brightness_display(self):
-        """Calculates and displays the mean and median brightness for the current frame's ROIs."""
+        """Calculates and displays comprehensive brightness information for the current frame's ROIs."""
         if self.frame is None or not self.rects:
             self.brightness_display_label.setText("N/A")
             return
 
-        brightness_mean_values = []
-        brightness_median_values = []
+        roi_data = []
+        background_brightness = None
         fh, fw = self.frame.shape[:2]
+        
+        # Calculate background brightness if background ROI is defined
+        if self.background_roi_idx is not None:
+            background_brightness = self._compute_background_brightness(self.frame)
+        
         for idx, (pt1, pt2) in enumerate(self.rects):
-            # Skip background ROI from measurements
+            # Handle background ROI separately
             if idx == self.background_roi_idx:
                 continue
                 
@@ -1124,17 +2263,44 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             if x2 > x1 and y2 > y1: # Check for valid ROI area
                 roi = self.frame[y1:y2, x1:x2]
-                mean_val, median_val = self._compute_brightness_stats(roi)
-                brightness_mean_values.append((idx, mean_val, median_val))
+                roi_mask = None
+                if self.use_fixed_mask and idx < len(self.fixed_roi_masks):
+                    roi_mask = self.fixed_roi_masks[idx]
+                    if isinstance(roi_mask, np.ndarray) and roi_mask.shape[:2] != roi.shape[:2]:
+                        roi_mask = None
+                brightness_stats = self._compute_brightness_stats(roi, background_brightness, roi_mask)
+                l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median = brightness_stats[:6]
+                roi_data.append((idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median))
             else:
-                brightness_mean_values.append((idx, 0.0, 0.0)) # Append 0 if ROI is invalid/empty
+                roi_data.append((idx, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)) # Append zeros if ROI is invalid/empty
 
-        if brightness_mean_values:
-            # Display both mean and median brightness for each ROI
-            display_parts = []
-            for idx, mean_val, median_val in brightness_mean_values:
-                display_parts.append(f"R{idx+1}: {mean_val:.1f}±{median_val:.1f}")
-            self.brightness_display_label.setText(", ".join(display_parts))
+        if roi_data:
+            # Build comprehensive display
+            display_lines = ["Current Brightness:"]
+            
+            for idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median in roi_data:
+                if self.background_roi_idx is not None:
+                    # Show L* with background subtraction and blue channel
+                    display_lines.append(f"ROI {idx+1}: L* {l_raw_mean:.1f} (BG-Sub: {l_bg_sub_mean:.1f}) | Blue: {b_raw_mean:.0f}")
+                else:
+                    # Show raw L* and blue channel when no background ROI
+                    display_lines.append(f"ROI {idx+1}: L* {l_raw_mean:.1f} | Blue: {b_raw_mean:.0f}")
+            
+            # Add background ROI info if defined
+            if self.background_roi_idx is not None and background_brightness is not None:
+                # Calculate blue channel for background ROI
+                bg_pt1, bg_pt2 = self.rects[self.background_roi_idx]
+                bg_x1 = max(0, min(bg_pt1[0], fw - 1))
+                bg_y1 = max(0, min(bg_pt1[1], fh - 1))
+                bg_x2 = max(0, min(bg_pt2[0], fw - 1))
+                bg_y2 = max(0, min(bg_pt2[1], fh - 1))
+                
+                if bg_x2 > bg_x1 and bg_y2 > bg_y1:
+                    bg_roi = self.frame[bg_y1:bg_y2, bg_x1:bg_x2]
+                    _, _, _, _, bg_b_mean, _, _, _ = self._compute_brightness_stats(bg_roi)
+                    display_lines.append(f"Background: L* {background_brightness:.1f} | Blue: {bg_b_mean:.0f}")
+            
+            self.brightness_display_label.setText("\n".join(display_lines))
         else:
             self.brightness_display_label.setText("N/A")
 
@@ -1165,6 +2331,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
              self.selected_rect_idx = None # No items, no selection
 
         self.rect_list.blockSignals(False)
+        # Keep fixed masks list aligned with rects
+        if len(self.fixed_roi_masks) != len(self.rects):
+            # Resize/realign masks; default to None for new or mismatched entries
+            new_masks: List[Optional[np.ndarray]] = []
+            for i in range(len(self.rects)):
+                if i < len(self.fixed_roi_masks):
+                    new_masks.append(self.fixed_roi_masks[i])
+                else:
+                    new_masks.append(None)
+            self.fixed_roi_masks = new_masks
+
         self._update_widget_states(video_loaded=bool(self.cap), rois_exist=bool(self.rects))
         self._update_threshold_display()
 
@@ -1178,9 +2355,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.image_label.setCursor(QtCore.Qt.CrossCursor) # Change cursor
             self.results_label.setText("Click and drag on the frame to draw a new ROI.")
         else:
-            self.image_label.unsetCursor() # Restore default cursor
-            # Optionally clear the results label or set it back
-            # self.results_label.setText("...")
+            self.image_label.unsetCursor()
         self.show_frame() # Redraw to potentially remove selection highlight
 
     def select_rectangle_from_list(self, row: int):
@@ -1199,6 +2374,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Deletes the currently selected ROI."""
         if self.selected_rect_idx is not None and 0 <= self.selected_rect_idx < len(self.rects):
             del self.rects[self.selected_rect_idx]
+            # Remove corresponding fixed mask and invalidate
+            if self.selected_rect_idx is not None and self.selected_rect_idx < len(self.fixed_roi_masks):
+                del self.fixed_roi_masks[self.selected_rect_idx]
+            self._invalidate_fixed_masks("ROI deleted")
             
             # Handle background ROI index adjustment
             if self.background_roi_idx == self.selected_rect_idx:
@@ -1226,6 +2405,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.rects.clear()
             self.selected_rect_idx = None
             self.background_roi_idx = None
+            self.fixed_roi_masks = []
+            self.use_fixed_mask_checkbox.setChecked(False)
+            self.mask_status_label.setText("Mask: none")
             self.update_rect_list()
             self.show_frame()
 
@@ -1243,7 +2425,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             threshold_value = self._calculate_background_threshold()
             if threshold_value is not None:
                 self.results_label.setText(f"Background ROI set to ROI {self.selected_rect_idx + 1}\n"
-                                         f"Current background threshold: {threshold_value:.1f} L*")
+                                         f"Current background threshold: {threshold_value:.2f} L*")
             else:
                 self.results_label.setText(f"Background ROI set to ROI {self.selected_rect_idx + 1}\n"
                                          f"(Threshold will be calculated during full video scan)")
@@ -1268,8 +2450,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 
                 if x2 > x1 and y2 > y1:
                     roi = self.frame[y1:y2, x1:x2]
-                    mean_brightness, _ = self._compute_brightness_stats(roi)
-                    return mean_brightness
+                    l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
+                    return l_raw_mean
         
         # If no background ROI or calculation failed, return manual threshold
         return None
@@ -1281,19 +2463,281 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if self.frame is not None:
                 threshold_value = self._calculate_background_threshold()
                 if threshold_value is not None:
-                    self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} ({threshold_value:.1f} L*)")
+                    self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} ({threshold_value:.2f} L*)")
                 else:
                     self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} (calculating...)")
             else:
                 self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} (no frame)")
         else:
             # Manual threshold mode
-            self.threshold_display_label.setText(f"Active Threshold: Manual ({self.manual_threshold:.1f} L*)")
+            self.threshold_display_label.setText(f"Active Threshold: Manual ({self.manual_threshold:.2f} L*)")
+
+    def _on_mask_checkbox_toggled(self, checked: bool):
+        """Handle pixel mask visualization checkbox toggle."""
+        self.show_pixel_mask = checked
+        if self.frame is not None:
+            self.show_frame()
+
+    def _apply_pixel_mask_overlay(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Apply red overlay to show which pixels are being analyzed in each ROI.
+        
+        Args:
+            frame: BGR frame to apply overlay to
+            
+        Returns:
+            Frame with red mask overlay applied
+        """
+        overlay = frame.copy()
+        
+        # Get background brightness for current frame
+        background_brightness = self._compute_background_brightness(frame)
+        
+        for roi_idx, (pt1, pt2) in enumerate(self.rects):
+            # Skip background ROI
+            if roi_idx == self.background_roi_idx:
+                continue
+                
+            # Extract ROI bounds
+            fh, fw = frame.shape[:2]
+            x1 = max(0, min(pt1[0], fw - 1))
+            y1 = max(0, min(pt1[1], fh - 1))
+            x2 = max(0, min(pt2[0], fw - 1))
+            y2 = max(0, min(pt2[1], fh - 1))
+            
+            if x2 > x1 and y2 > y1:
+                # Extract ROI and convert to LAB
+                roi = frame[y1:y2, x1:x2]
+                try:
+                    use_fixed = self.use_fixed_mask and roi_idx < len(self.fixed_roi_masks) and isinstance(self.fixed_roi_masks[roi_idx], np.ndarray)
+                    mask = None
+                    if use_fixed:
+                        fixed_mask = self.fixed_roi_masks[roi_idx]
+                        if fixed_mask is not None and fixed_mask.shape[:2] == roi.shape[:2]:
+                            mask = fixed_mask.astype(bool)
+                        else:
+                            # Shape mismatch - ignore fixed mask
+                            mask = None
+
+                    if mask is None:
+                        # Derive mask from current frame
+                        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+                        l_chan = lab[:, :, 0].astype(np.float32)
+                        l_star = l_chan * 100.0 / 255.0
+                        if background_brightness is not None:
+                            mask = l_star > background_brightness
+                        else:
+                            mask = np.ones_like(l_star, dtype=bool)
+                    
+                    # Apply red overlay to analyzed pixels
+                    roi_overlay = roi.copy()
+                    roi_overlay[mask] = roi_overlay[mask] * 0.7 + np.array([0, 0, 255]) * 0.3  # Red tint
+                    
+                    # Apply overlay back to main frame
+                    overlay[y1:y2, x1:x2] = roi_overlay
+                    
+                except Exception as e:
+                    print(f"Error creating pixel mask for ROI {roi_idx+1}: {e}")
+                    continue
+        
+        return overlay
 
     def _on_threshold_changed(self, value: float):
         """Handle changes to the manual threshold spinbox."""
         self.manual_threshold = value
         self._update_threshold_display()
+
+    def _on_use_fixed_mask_toggled(self, checked: bool):
+        """Enable/disable using a fixed mask across frames."""
+        self.use_fixed_mask = checked
+        if checked and (not self.fixed_roi_masks or all(m is None for m in self.fixed_roi_masks)):
+            self.mask_status_label.setText("Mask: none (capture from a frame)")
+        elif checked:
+            self.mask_status_label.setText("Mask: active")
+        else:
+            self.mask_status_label.setText("Mask: disabled")
+        if self.frame is not None:
+            self.show_frame()
+
+    def _capture_fixed_masks(self):
+        """Capture analyzed-pixel masks for all ROIs based on the current frame."""
+        if self.frame is None or not self.rects:
+            QtWidgets.QMessageBox.information(self, "Capture Mask", "Load a video and define at least one ROI.")
+            return
+        
+        frame = self.frame
+        fh, fw = frame.shape[:2]
+        # Determine background brightness once from current frame
+        background_brightness = self._compute_background_brightness(frame)
+        
+        masks: List[Optional[np.ndarray]] = []
+        created_any = False
+        for roi_idx, (pt1, pt2) in enumerate(self.rects):
+            if roi_idx == self.background_roi_idx:
+                masks.append(None)
+                continue
+            x1 = max(0, min(pt1[0], fw - 1))
+            y1 = max(0, min(pt1[1], fh - 1))
+            x2 = max(0, min(pt2[0], fw - 1))
+            y2 = max(0, min(pt2[1], fh - 1))
+            if x2 > x1 and y2 > y1:
+                roi = frame[y1:y2, x1:x2]
+                try:
+                    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+                    l_chan = lab[:, :, 0].astype(np.float32)
+                    l_star = l_chan * 100.0 / 255.0
+                    if background_brightness is not None:
+                        mask = l_star > background_brightness
+                        # Morphological cleanup similar to analysis
+                        if np.any(mask):
+                            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.morphological_kernel_size, self.morphological_kernel_size))
+                            mask_uint8 = mask.astype(np.uint8) * 255
+                            cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+                            mask = cleaned > 0
+                    else:
+                        # If no background brightness, default to full ROI
+                        mask = np.ones(l_star.shape, dtype=bool)
+                    masks.append(mask)
+                    created_any = True
+                except Exception as e:
+                    logging.warning(f"Failed to capture mask for ROI {roi_idx+1}: {e}")
+                    masks.append(None)
+            else:
+                masks.append(None)
+        
+        self.fixed_roi_masks = masks
+        if created_any:
+            self.mask_status_label.setText("Mask: captured from current frame")
+            if not self.use_fixed_mask:
+                # Auto-enable usage for convenience
+                self.use_fixed_mask_checkbox.setChecked(True)
+        else:
+            self.mask_status_label.setText("Mask: none (could not capture)")
+        if self.frame is not None:
+            self.show_frame()
+
+    def _auto_capture_brightest_frame_masks(self):
+        """Find the brightest frame in the current range and capture masks from it."""
+        if self.cap is None or not self.rects:
+            QtWidgets.QMessageBox.information(self, "Auto-Capture Masks",
+                                            "Load a video and define at least one ROI first.")
+            return
+
+        if not self.rects:
+            QtWidgets.QMessageBox.information(self, "Auto-Capture Masks",
+                                            "Define at least one ROI before capturing masks.")
+            return
+
+        # Use current frame range or full video if not set
+        start_frame = max(0, self.start_frame)
+        end_frame = min(self.total_frames - 1, self.end_frame if self.end_frame is not None else self.total_frames - 1)
+
+        if start_frame >= end_frame:
+            QtWidgets.QMessageBox.information(self, "Auto-Capture Masks",
+                                            "Invalid frame range for analysis.")
+            return
+
+        # Show progress dialog
+        progress = QtWidgets.QProgressDialog("Finding brightest frame...", "Cancel", 0, end_frame - start_frame, self)
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.show()
+
+        brightest_frame_idx = start_frame
+        max_brightness = 0.0
+
+        # Sample every 10th frame for performance, or all frames if range is small
+        step = max(1, (end_frame - start_frame) // 100)
+
+        try:
+            for frame_idx in range(start_frame, end_frame + 1, step):
+                if progress.wasCanceled():
+                    return
+
+                progress.setValue(frame_idx - start_frame)
+                QtWidgets.QApplication.processEvents()
+
+                # Get frame from cache or video
+                frame = self.frame_cache.get(frame_idx)
+                if frame is None:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    ret, frame = self.cap.read()
+                    if not ret or frame is None:
+                        continue
+                    self.frame_cache.put(frame_idx, frame)
+
+                # Calculate average brightness of all non-background ROIs
+                frame_brightness = 0.0
+                roi_count = 0
+
+                for roi_idx, (pt1, pt2) in enumerate(self.rects):
+                    if roi_idx == self.background_roi_idx:
+                        continue
+
+                    fh, fw = frame.shape[:2]
+                    x1 = max(0, min(pt1[0], fw - 1))
+                    y1 = max(0, min(pt1[1], fh - 1))
+                    x2 = max(0, min(pt2[0], fw - 1))
+                    y2 = max(0, min(pt2[1], fh - 1))
+
+                    if x2 > x1 and y2 > y1:
+                        roi = frame[y1:y2, x1:x2]
+                        l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
+                        frame_brightness += l_raw_mean
+                        roi_count += 1
+
+                if roi_count > 0:
+                    frame_brightness /= roi_count
+                    if frame_brightness > max_brightness:
+                        max_brightness = frame_brightness
+                        brightest_frame_idx = frame_idx
+
+        except Exception as e:
+            progress.close()
+            QtWidgets.QMessageBox.warning(self, "Error", f"Error finding brightest frame: {str(e)}")
+            return
+
+        progress.close()
+
+        # Navigate to the brightest frame and capture masks
+        self.frame_slider.setValue(brightest_frame_idx)
+
+        # Capture masks from the brightest frame
+        self._capture_fixed_masks()
+
+        # Show result to user
+        QtWidgets.QMessageBox.information(self, "Auto-Capture Complete",
+                                        f"Captured masks from frame {brightest_frame_idx} "
+                                        f"(brightness: {max_brightness:.1f} L*)")
+
+    def _on_kernel_size_changed(self, value: int):
+        """Handle morphological kernel size slider change."""
+        self.morphological_kernel_size = max(1, value if value % 2 == 1 else value - 1)  # Ensure odd value
+        self.kernel_size_label.setText(f"{self.morphological_kernel_size}×{self.morphological_kernel_size}")
+        # Update display and invalidate cached masks since filtering changed
+        self._invalidate_fixed_masks("noise parameters changed")
+        if self.frame is not None:
+            self._update_current_brightness_display()
+            self.show_frame()
+
+    def _on_bg_percentile_changed(self, value: int):
+        """Handle background percentile slider change."""
+        self.background_percentile = float(value)
+        self.bg_percentile_label.setText(f"{self.background_percentile:.0f}%")
+        # Update display since background calculation changed
+        if self.frame is not None:
+            self._update_current_brightness_display()
+            self._update_threshold_display()
+            self.show_frame()
+
+    def _on_noise_floor_changed(self, value: int):
+        """Handle noise floor threshold slider change."""
+        self.noise_floor_threshold = value / 2.0  # Convert back from 0.5 precision
+        self.noise_floor_label.setText(f"{self.noise_floor_threshold:.1f}")
+        # Update display since noise filtering changed
+        self._invalidate_fixed_masks("noise parameters changed")
+        if self.frame is not None:
+            self._update_current_brightness_display()
+            self.show_frame()
 
     # --- Mouse Interaction on Image Label ---
 
@@ -1456,8 +2900,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.frame is None or event.button() != QtCore.Qt.LeftButton:
             return
 
-        pos_in_label = event.pos()
-        self.image_label.unsetCursor() # Reset cursor after action
+        self.image_label.unsetCursor()  # Reset cursor after action
 
         if self.drawing and self.start_point and self.end_point:
             # Finalize drawing a new rectangle
@@ -1488,6 +2931,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.start_point = None
             # Optional: Recalculate brightness display for the final position
             self._update_current_brightness_display()
+            # Moving ROI invalidates any captured masks (shape/position may change)
+            self._invalidate_fixed_masks("ROI moved")
             self.show_frame() # Redraw in final state
 
         elif self.resizing:
@@ -1498,6 +2943,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.end_point = None
             # Optional: Recalculate brightness display for the final size
             self._update_current_brightness_display()
+            # Resizing ROI invalidates any captured masks (shape changed)
+            self._invalidate_fixed_masks("ROI resized")
             self.show_frame() # Redraw in final state
 
     def _get_pixmap_rect_in_label(self) -> Optional[QtCore.QRect]:
@@ -1647,12 +3094,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         # If not hovering over a resize handle, check if hovering over any rectangle
         if not cursor_set:
-            hovering_over_rect = False
             for idx, (pt1, pt2) in enumerate(self.rects):
                 rect_x1, rect_y1 = min(pt1[0], pt2[0]), min(pt1[1], pt2[1])
                 rect_x2, rect_y2 = max(pt1[0], pt2[0]), max(pt1[1], pt2[1])
                 if rect_x1 <= frame_x <= rect_x2 and rect_y1 <= frame_y <= rect_y2:
-                    hovering_over_rect = True
                     if idx == self.selected_rect_idx:
                         # Hovering over the selected rectangle (not on a handle) -> Move cursor
                         self.image_label.setCursor(QtCore.Qt.SizeAllCursor)
@@ -1693,131 +3138,119 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def auto_detect_range(self):
         """
-        Scans the video to automatically find the first and last frames
-        where ROI brightness significantly exceeds a baseline.
+        Analyzes video audio to detect completion beeps and calculates frame ranges 
+        using the expected run duration.
         """
         if not self.video_path:
-             self.results_label.setText("Load a video first.")
-             return
-        if not self.rects:
-            self.results_label.setText("Draw at least one ROI before using Auto-Detect.")
+            self.results_label.setText("Load a video first.")
             return
-
-        # Use a separate capture object for scanning to avoid interfering with main display
-        scan_cap = cv2.VideoCapture(self.video_path)
-        if not scan_cap.isOpened():
-            QtWidgets.QMessageBox.critical(self, "Error", "Could not open video for auto-detection scan.")
+        
+        if not self.audio_analyzer.available:
+            QtWidgets.QMessageBox.warning(self, "Audio Detection", 
+                "Audio analysis not available. Please install librosa:\npip install librosa soundfile")
             return
-
-        total = int(scan_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total <= 0:
-             QtWidgets.QMessageBox.warning(self, "Auto-Detect", "Video appears to have no frames for scanning.")
-             scan_cap.release()
-             return
         
-        brightness_per_frame = np.zeros(total)
-        background_brightness_per_frame = np.zeros(total) if self.background_roi_idx is not None else None
+        # Get expected run duration
+        expected_duration = self.run_duration_spin.value()
+        if expected_duration <= 0.0:
+            QtWidgets.QMessageBox.warning(self, "Audio Detection", 
+                "Please set an expected run duration (> 0 seconds) to calculate start frames from detected completion beeps.")
+            return
         
-        # --- Progress Dialog ---
-        progress = QtWidgets.QProgressDialog("Scanning video for auto-detection...", "Cancel", 0, total, self)
+        # Show progress dialog
+        progress = QtWidgets.QProgressDialog("Analyzing audio for completion beeps...", "Cancel", 0, 0, self)
         progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle("Auto-Detecting Range")
-        progress.setValue(0)
+        progress.setWindowTitle("Audio Detection")
+        progress.setRange(0, 0)  # Indeterminate progress
         progress.show()
-        QtWidgets.QApplication.processEvents() # Ensure dialog shows up
-
-        scan_cancelled = False
-        for idx in range(total):
-            if progress.wasCanceled():
-                scan_cancelled = True
-                break
-
-            ret, frame = scan_cap.read()
-            if not ret:
-                total = idx # Adjust total if read failed early
-                brightness_per_frame = brightness_per_frame[:total] # Trim array
-                if background_brightness_per_frame is not None:
-                    background_brightness_per_frame = background_brightness_per_frame[:total]
-                logging.warning(f"Auto-detect scan stopped early at frame {idx} due to read error.")
-                break
-
-            # Calculate average brightness across ROIs for this frame
-            current_frame_measurement_roi_brightness = []
-            fh, fw = frame.shape[:2]
-            for roi_idx, (pt1, pt2) in enumerate(self.rects):
-                x1, y1 = max(0, pt1[0]), max(0, pt1[1])
-                x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
-                if x2 > x1 and y2 > y1:
-                    roi = frame[y1:y2, x1:x2]
-                    brightness = self._compute_brightness(roi)
-                    
-                    if roi_idx == self.background_roi_idx:
-                        if background_brightness_per_frame is not None:
-                            background_brightness_per_frame[idx] = brightness
-                    else:
-                        current_frame_measurement_roi_brightness.append(brightness)
-
-            # Store the mean brightness of all measurement ROIs for the current frame
-            brightness_per_frame[idx] = np.mean(current_frame_measurement_roi_brightness) if current_frame_measurement_roi_brightness else 0.0
-
-            progress.setValue(idx + 1)
-            if idx % 10 == 0: # Update UI periodically to keep it responsive
-                 QtWidgets.QApplication.processEvents()
-
-        scan_cap.release()
-        progress.close()
-
-        if scan_cancelled:
-            self.results_label.setText("Auto-detect scan cancelled.")
-            return
-
-        if brightness_per_frame.size == 0 and (background_brightness_per_frame is None or background_brightness_per_frame.size == 0):
-            QtWidgets.QMessageBox.warning(self, "Auto-Detect", "Scan completed, but no brightness data was gathered.")
-            return
-
-        # --- Analyze Brightness Data ---
+        QtWidgets.QApplication.processEvents()
+        
         try:
-            if self.background_roi_idx is not None and background_brightness_per_frame is not None:
-                # Threshold = mean brightness of background ROI over scan + manual delta
-                valid_bg_frames = background_brightness_per_frame[background_brightness_per_frame > 0]
-                background_baseline = np.mean(valid_bg_frames) if valid_bg_frames.size > 0 else 0
-                threshold = background_baseline + self.manual_threshold
+            # Find completion beeps in the audio
+            completion_beeps = self.audio_analyzer.find_completion_beeps(self.video_path, expected_duration)
+            
+            progress.close()
+            
+            if not completion_beeps:
+                QtWidgets.QMessageBox.information(self, "Audio Detection", 
+                    "No completion beeps detected in the audio. Try adjusting the audio detection parameters or check if the video has audio.")
+                self.results_label.setText("Audio Detection: No completion beeps found.")
+                return
+            
+            # Show detected beeps to user for selection
+            if len(completion_beeps) == 1:
+                # Only one beep found, use it automatically
+                selected_beep_time, selected_end_frame = completion_beeps[0]
             else:
-                baseline = np.percentile(brightness_per_frame, AUTO_DETECT_BASELINE_PERCENTILE)
-                threshold = baseline + self.manual_threshold
-        except IndexError:
-             QtWidgets.QMessageBox.warning(self, "Auto-Detect", "Not enough frame data to determine brightness baseline.")
-             return
-
-        # Find indices where brightness is above the threshold
-        above_threshold_indices = np.where(brightness_per_frame >= threshold)[0]
-
-        if above_threshold_indices.size == 0:
-            QtWidgets.QMessageBox.information(self, "Auto-Detect",
-                                          f"No frames found significantly brighter than baseline (Threshold={threshold:.1f} L*). Frame range not changed.")
-            self.results_label.setText(f"Auto-Detect: No bright frames found (Threshold={threshold:.1f}).")
-            return
-
-        # Get the first and last frame index that met the criteria
-        detected_start_frame = int(above_threshold_indices[0])
-        detected_end_frame = int(above_threshold_indices[-1])
-
-        # --- Update UI ---
-        self.start_frame = detected_start_frame
-        self.end_frame = detected_end_frame
-
-        # Update slider and spinbox to the new start frame, then seek
-        self.frame_slider.blockSignals(True)
-        self.frame_spinbox.blockSignals(True)
-        self.frame_slider.setValue(self.start_frame)
-        self.frame_spinbox.setValue(self.start_frame)
-        self.frame_slider.blockSignals(False)
-        self.frame_spinbox.blockSignals(False)
-
-        self._seek_to_frame(self.start_frame) # Go to the detected start frame
-        self.update_frame_label() # Update label after seeking
-
-        self.results_label.setText(f"✅ Auto-detected range: Frame {self.start_frame + 1} to {self.end_frame + 1}")
+                # Multiple beeps found, let user choose
+                beep_options = []
+                for i, (beep_time, frame_num) in enumerate(completion_beeps):
+                    beep_options.append(f"Beep {i+1}: {beep_time:.1f}s (Frame {frame_num+1})")
+                
+                selected_option, ok = QtWidgets.QInputDialog.getItem(
+                    self, "Audio Detection", 
+                    f"Found {len(completion_beeps)} completion beeps. Select which one to use:",
+                    beep_options, 0, False)
+                
+                if not ok:
+                    self.results_label.setText("Audio Detection: User cancelled selection.")
+                    return
+                
+                # Get the selected beep
+                selected_index = beep_options.index(selected_option)
+                selected_beep_time, selected_end_frame = completion_beeps[selected_index]
+            
+            # Calculate start frame using run duration and video FPS
+            cap = cv2.VideoCapture(self.video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            
+            if fps <= 0:
+                QtWidgets.QMessageBox.critical(self, "Error", "Could not determine video frame rate.")
+                return
+            
+            # Calculate start frame (work backwards from completion beep)
+            start_time = selected_beep_time - expected_duration
+            calculated_start_frame = max(0, int(start_time * fps))
+            
+            # Ensure we don't go beyond video bounds
+            calculated_end_frame = min(selected_end_frame, total_frames - 1)
+            calculated_start_frame = min(calculated_start_frame, calculated_end_frame)
+            
+            # Update UI with detected range
+            self.start_frame = calculated_start_frame
+            self.end_frame = calculated_end_frame
+            
+            # Update slider and spinbox to the new start frame, then seek
+            self.frame_slider.blockSignals(True)
+            self.frame_spinbox.blockSignals(True)
+            self.frame_slider.setValue(self.start_frame)
+            self.frame_spinbox.setValue(self.start_frame)
+            self.frame_slider.blockSignals(False)
+            self.frame_spinbox.blockSignals(False)
+            
+            self._seek_to_frame(self.start_frame)
+            self.update_frame_label()
+            
+            # Calculate actual duration for verification
+            actual_duration = (self.end_frame - self.start_frame + 1) / fps
+            
+            self.results_label.setText(
+                f"✅ Audio-detected range: Frame {self.start_frame + 1} to {self.end_frame + 1} "
+                f"(Duration: {actual_duration:.1f}s, Expected: {expected_duration:.1f}s)")
+            
+            # Play success sound if duration is close to expected
+            duration_difference = abs(actual_duration - expected_duration)
+            if duration_difference <= expected_duration * 0.1:  # Within 10%
+                self.audio_manager.play_run_detected()
+                
+        except Exception as e:
+            progress.close()
+            QtWidgets.QMessageBox.critical(self, "Audio Detection Error", 
+                f"An error occurred during audio analysis:\n{str(e)}")
+            self.results_label.setText(f"Audio Detection failed: {str(e)}")
+            logging.error(f"Audio detection error: {e}")
 
 
     # --- Analysis and Plotting ---
@@ -1837,6 +3270,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         # Set analysis state
         self._analysis_in_progress = True
+        self.stop_playback()  # Stop playback during analysis
         self._update_widget_states(video_loaded=True, rois_exist=True)
         
         # --- Get Save Directory ---
@@ -1850,9 +3284,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
 
         # --- Setup ---
-        self.results_label.setText("Starting analysis...")
-        self.brightness_display_label.setText("Analyzing...")
-        self.statusBar().showMessage("Running brightness analysis...")
+        self.results_label.setText("⚙️ Initializing analysis...")
+        self.brightness_display_label.setText("📊 Preparing...")
+
+        # Play analysis start sound
+        self.audio_manager.play_analysis_start()
+        self.statusBar().showMessage("🔍 Starting brightness analysis...")
         QtWidgets.QApplication.processEvents()
 
         try:
@@ -1869,11 +3306,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             non_background_rois = [i for i in range(len(self.rects)) if i != self.background_roi_idx]
             brightness_mean_data = [[] for _ in non_background_rois]
             brightness_median_data = [[] for _ in non_background_rois]
+            blue_mean_data = [[] for _ in non_background_rois]
+            blue_median_data = [[] for _ in non_background_rois]
+            background_values_per_frame = []  # Track background brightness for each frame
 
-            # --- Progress Dialog ---
-            progress = QtWidgets.QProgressDialog("Analyzing video frames...", "Cancel", 0, num_frames_to_analyze, self)
+            # --- Enhanced Progress Dialog ---
+            progress = QtWidgets.QProgressDialog(f"🔍 Analyzing {num_frames_to_analyze} video frames...\nROIs: {len(non_background_rois)} | Frames: {start+1}-{end+1}",
+                                                "Cancel", 0, num_frames_to_analyze, self)
             progress.setWindowModality(QtCore.Qt.WindowModal)
-            progress.setWindowTitle("Analyzing Brightness")
+            progress.setWindowTitle("📊 Brightness Analysis")
+            progress.setMinimumWidth(400)
             progress.setValue(0)
             progress.show()
             QtWidgets.QApplication.processEvents()
@@ -1895,8 +3337,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     num_frames_to_analyze = frames_processed
                     brightness_mean_data = [lst[:frames_processed] for lst in brightness_mean_data]
                     brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
+                    blue_mean_data = [lst[:frames_processed] for lst in blue_mean_data]
+                    blue_median_data = [lst[:frames_processed] for lst in blue_median_data]
                     break
 
+                # Calculate background brightness for this frame
+                background_brightness = self._compute_background_brightness(frame)
+                background_values_per_frame.append(background_brightness if background_brightness is not None else 0.0)
+                
                 fh, fw = frame.shape[:2]
                 for data_idx, roi_idx in enumerate(non_background_rois):
                     pt1, pt2 = self.rects[roi_idx]
@@ -1905,12 +3353,29 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
                     if x2 > x1 and y2 > y1:
                         roi = frame[y1:y2, x1:x2]
-                        mean_val, median_val = self._compute_brightness_stats(roi)
-                        brightness_mean_data[data_idx].append(mean_val)
-                        brightness_median_data[data_idx].append(median_val)
+                        roi_mask = None
+                        if self.use_fixed_mask and roi_idx < len(self.fixed_roi_masks):
+                            roi_mask = self.fixed_roi_masks[roi_idx]
+                            # Ensure shape matches current ROI, else ignore
+                            if isinstance(roi_mask, np.ndarray) and roi_mask.shape[:2] != roi.shape[:2]:
+                                roi_mask = None
+                        l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(roi, background_brightness, roi_mask)
+                        # Store background-subtracted values if background ROI defined, otherwise raw values
+                        if background_brightness is not None:
+                            brightness_mean_data[data_idx].append(l_bg_sub_mean)
+                            brightness_median_data[data_idx].append(l_bg_sub_median)
+                            blue_mean_data[data_idx].append(b_bg_sub_mean)
+                            blue_median_data[data_idx].append(b_bg_sub_median)
+                        else:
+                            brightness_mean_data[data_idx].append(l_raw_mean)
+                            brightness_median_data[data_idx].append(l_raw_median)
+                            blue_mean_data[data_idx].append(b_raw_mean)
+                            blue_median_data[data_idx].append(b_raw_median)
                     else:
                         brightness_mean_data[data_idx].append(0.0)
                         brightness_median_data[data_idx].append(0.0)
+                        blue_mean_data[data_idx].append(0.0)
+                        blue_median_data[data_idx].append(0.0)
 
                 frames_processed += 1
                 
@@ -1921,8 +3386,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                         fps = frames_processed / elapsed_time
                         remaining_frames = num_frames_to_analyze - frames_processed
                         eta_seconds = remaining_frames / fps if fps > 0 else 0
-                        progress.setLabelText(f"Analyzing frame {frames_processed}/{num_frames_to_analyze}\n"
-                                            f"Speed: {fps:.1f} fps, ETA: {eta_seconds:.0f}s")
+                        progress.setLabelText(f"🔍 Analyzing frame {frames_processed}/{num_frames_to_analyze}\n"
+                                            f"⚡ Speed: {fps:.1f} fps | ⏱️ ETA: {eta_seconds:.0f}s | 📊 ROIs: {len(non_background_rois)}")
                     
                 progress.setValue(frames_processed)
                 QtWidgets.QApplication.processEvents()
@@ -1942,7 +3407,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                  return
 
             # --- Save Results and Generate Plots ---
-            self._save_analysis_results(brightness_mean_data, brightness_median_data, save_dir, frames_processed, non_background_rois)
+            self._save_analysis_results(brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame)
 
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Analysis Error", f"An error occurred during analysis:\n{str(e)}")
@@ -1952,11 +3417,22 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._analysis_in_progress = False
             self._update_widget_states(video_loaded=True, rois_exist=True)
             self.statusBar().showMessage("Analysis complete")
+            
+            # Play analysis completion sound
+            self.audio_manager.play_analysis_complete()
+            
+            # Check run duration if specified
+            expected_duration = self.run_duration_spin.value()
+            if expected_duration > 0.0 and self.start_frame is not None and self.end_frame is not None:
+                confidence = self._validate_run_duration(self.start_frame, self.end_frame, expected_duration)
+                if confidence >= 0.8:  # High confidence threshold
+                    self.audio_manager.play_run_detected()
 
-    def _save_analysis_results(self, brightness_mean_data, brightness_median_data, save_dir, frames_processed, non_background_rois):
+    def _save_analysis_results(self, brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame):
         """Save analysis results and generate plots."""
         self.out_paths = []
-        plot_paths = []
+        if self.video_path is None:
+            return
         base_video_name = os.path.splitext(os.path.basename(self.video_path))[0]
         analysis_name = self.analysis_name_input.text().strip() or "DefaultAnalysis"
         analysis_name = "".join(c for c in analysis_name if c.isalnum() or c in ('_', '-')).rstrip()
@@ -1980,23 +3456,29 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             actual_roi_idx = non_background_rois[data_idx]  # Get the actual ROI index
             mean_data = brightness_mean_data[data_idx]
             median_data = brightness_median_data[data_idx]
+            blue_mean = blue_mean_data[data_idx]
+            blue_median = blue_median_data[data_idx]
             
             if not mean_data: 
                 progress.setValue(data_idx + 1)
                 continue
 
-            # Create DataFrame with both mean and median
+            # Create DataFrame with L* and blue channel data
             frame_numbers = range(self.start_frame, self.start_frame + len(mean_data))
             df = pd.DataFrame({
                 "frame": frame_numbers, 
                 "brightness_mean": mean_data,
-                "brightness_median": median_data
+                "brightness_median": median_data,
+                "blue_mean": blue_mean,
+                "blue_median": blue_median
             })
 
             # Calculate averages for summary
             avg_mean = np.mean(mean_data)
             avg_median = np.mean(median_data)
-            avg_brightness_summary.append(f"ROI {actual_roi_idx+1} Mean: {avg_mean:.2f}, Median: {avg_median:.2f}")
+            avg_blue_mean = np.mean(blue_mean)
+            avg_blue_median = np.mean(blue_median)
+            avg_brightness_summary.append(f"ROI {actual_roi_idx+1} L*: {avg_mean:.2f}±{avg_median:.2f}, Blue: {avg_blue_mean:.1f}±{avg_blue_median:.1f}")
 
             # Construct filename and save CSV using actual ROI number
             base_filename = f"{analysis_name}_{base_video_name}_ROI{actual_roi_idx+1}_frames{self.start_frame+1}-{self.start_frame+len(mean_data)}"
@@ -2009,7 +3491,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 summary_lines.append(f" - Saved CSV: {csv_file}")
                 
                 # Generate enhanced plot for this ROI
-                self._generate_enhanced_plot(df, base_filename, save_dir, actual_roi_idx, analysis_name, base_video_name)
+                self._generate_enhanced_plot(df, base_filename, save_dir, actual_roi_idx, analysis_name, base_video_name, background_values_per_frame)
                 summary_lines.append(f" - Saved Plot: {base_filename}_plot.png")
 
             except Exception as e:
@@ -2030,12 +3512,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.results_label.setText("\n".join(summary_lines))
         self.brightness_display_label.setText(", ".join(avg_brightness_summary) if avg_brightness_summary else "N/A")
 
-    def _generate_enhanced_plot(self, df, base_filename, save_dir, r_idx, analysis_name, base_video_name):
+    def _generate_enhanced_plot(self, df, base_filename, save_dir, r_idx, analysis_name, base_video_name, background_values_per_frame):
         """Generate enhanced plots with better styling and information."""
         try:
             frames = df['frame']
             brightness_mean = df['brightness_mean']
             brightness_median = df['brightness_median']
+            blue_mean = df['blue_mean']
+            blue_median = df['blue_median']
 
             if brightness_mean.empty:
                 return
@@ -2050,14 +3534,34 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             frame_peak_median, val_peak_median = frames.iloc[idx_peak_median], brightness_median.iloc[idx_peak_median]
             mean_of_medians = brightness_median.mean()
             std_of_medians = brightness_median.std()
+            
+            # Blue channel statistics
+            idx_peak_blue_mean = blue_mean.idxmax()
+            frame_peak_blue_mean, val_peak_blue_mean = frames.iloc[idx_peak_blue_mean], blue_mean.iloc[idx_peak_blue_mean]
+            mean_of_blue_means = blue_mean.mean()
+            std_of_blue_means = blue_mean.std()
+            
+            idx_peak_blue_median = blue_median.idxmax()
+            frame_peak_blue_median, val_peak_blue_median = frames.iloc[idx_peak_blue_median], blue_median.iloc[idx_peak_blue_median]
+            mean_of_blue_medians = blue_median.mean()
+            std_of_blue_medians = blue_median.std()
 
-            # Create enhanced plot
+            # Create enhanced plot with dual subplots
             plt.style.use('seaborn-v0_8-darkgrid')
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
 
             # Main brightness plot
             ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
             ax1.plot(frames, brightness_median, label='Median Brightness', color='#70ad47', linewidth=2, alpha=0.8)
+            
+            # Add background line if background values are available
+            if background_values_per_frame and len(background_values_per_frame) == len(frames):
+                # Filter out zero values (frames where background ROI wasn't available)
+                background_array = np.array(background_values_per_frame)
+                valid_background_mask = background_array > 0
+                if np.any(valid_background_mask):
+                    ax1.plot(frames, background_array, label='Background Level', color='#808080', 
+                           linewidth=1.5, linestyle=':', alpha=0.9)
             
             # Add confidence bands (mean ± std)
             ax1.fill_between(frames, brightness_mean - std_of_means, brightness_mean + std_of_means, 
@@ -2088,18 +3592,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Add 15% padding at the top to accommodate the statistics panel
             ax1.set_ylim(y_min, y_max + 0.15 * y_range)
 
-            # Difference plot (Mean - Median)
-            difference = brightness_mean - brightness_median
-            ax2.plot(frames, difference, color='#ed7d31', linewidth=1.5, label='Mean - Median')
-            ax2.axhline(0, color='black', linestyle='-', alpha=0.5, linewidth=1)
-            ax2.fill_between(frames, 0, difference, alpha=0.3, color='#ed7d31')
-            
-            ax2.set_title('Difference Between Mean and Median Brightness', fontsize=14)
-            ax2.set_xlabel('Frame Number', fontsize=12)
-            ax2.set_ylabel('Brightness Difference', fontsize=12)
-            ax2.legend(fontsize=10)
-            ax2.grid(True, alpha=0.3)
-
             # Add statistics text box - positioned in top-right to avoid interference
             stats_text = f"""Statistics:
 Mean: {mean_of_means:.2f} ± {std_of_means:.2f}
@@ -2111,6 +3603,44 @@ Frames Analyzed: {len(frames)}"""
             ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
                     verticalalignment='top', horizontalalignment='right', 
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            
+            # Blue channel plot
+            ax2.plot(frames, blue_mean, label='Blue Mean', color='#0066cc', linewidth=2, alpha=0.8)
+            ax2.plot(frames, blue_median, label='Blue Median', color='#3399ff', linewidth=2, alpha=0.8)
+            
+            # Add confidence bands for blue channel
+            ax2.fill_between(frames, blue_mean - std_of_blue_means, blue_mean + std_of_blue_means, 
+                           alpha=0.2, color='#0066cc', label=f'Blue Mean ±1σ ({std_of_blue_means:.1f})')
+            ax2.fill_between(frames, blue_median - std_of_blue_medians, blue_median + std_of_blue_medians, 
+                           alpha=0.2, color='#3399ff', label=f'Blue Median ±1σ ({std_of_blue_medians:.1f})')
+            
+            # Add horizontal lines for blue averages
+            ax2.axhline(mean_of_blue_means, color='#0066cc', linestyle='--', alpha=0.7, 
+                       label=f'Avg Blue Mean ({mean_of_blue_means:.1f})')
+            ax2.axhline(mean_of_blue_medians, color='#3399ff', linestyle='--', alpha=0.7, 
+                       label=f'Avg Blue Median ({mean_of_blue_medians:.1f})')
+            
+            # Mark blue peak points
+            ax2.scatter([frame_peak_blue_mean], [val_peak_blue_mean], color='#ff0000', zorder=5, s=100, 
+                       marker='^', label=f'Peak Blue Mean ({val_peak_blue_mean:.1f})')
+            ax2.scatter([frame_peak_blue_median], [val_peak_blue_median], color='#ed7d31', zorder=5, s=100, 
+                       marker='v', label=f'Peak Blue Median ({val_peak_blue_median:.1f})')
+            
+            ax2.set_xlabel('Frame Number', fontsize=12)
+            ax2.set_ylabel('Blue Channel Value', fontsize=12)
+            ax2.legend(fontsize=10, loc='best')
+            ax2.grid(True, alpha=0.3)
+            
+            # Add blue channel statistics text box
+            blue_stats_text = f"""Blue Channel Statistics:
+Mean: {mean_of_blue_means:.1f} ± {std_of_blue_means:.1f}
+Median: {mean_of_blue_medians:.1f} ± {std_of_blue_medians:.1f}
+Peak Mean: {val_peak_blue_mean:.1f} @ Frame {frame_peak_blue_mean}
+Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
+            
+            ax2.text(0.98, 0.98, blue_stats_text, transform=ax2.transAxes, fontsize=9,
+                    verticalalignment='top', horizontalalignment='right', 
+                    bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
 
             plt.tight_layout()
 
@@ -2134,62 +3664,220 @@ Frames Analyzed: {len(frames)}"""
 
     # --- Utility Methods ---
 
-    def _compute_brightness_stats(self, roi_bgr: np.ndarray) -> Tuple[float, float]:
+    def _validate_run_duration(self, start_frame: int, end_frame: int, expected_duration: float) -> float:
         """
-        Calculates both mean and median brightness (L*) for an ROI.
+        Calculate confidence score for detected run vs expected duration.
+        
+        Args:
+            start_frame: Start frame of detected run
+            end_frame: End frame of detected run
+            expected_duration: Expected duration in seconds
+            
+        Returns:
+            Confidence score from 0.0 to 1.0 (1.0 = perfect match)
+        """
+        if expected_duration <= 0.0 or not self.cap:
+            return 1.0  # No validation if duration not set or video not loaded
+        
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            return 1.0  # No validation if fps unknown
+        
+        actual_duration = (end_frame - start_frame + 1) / fps
+        duration_difference = abs(actual_duration - expected_duration)
+        
+        # Calculate confidence - perfect match = 1.0, large difference = 0.0
+        # Allow 20% tolerance before confidence starts dropping
+        tolerance = expected_duration * 0.2
+        if duration_difference <= tolerance:
+            confidence = 1.0
+        else:
+            # Linear decay from 1.0 to 0.0 over the next 80% of expected duration
+            max_difference = expected_duration * 0.8
+            confidence = max(0.0, 1.0 - (duration_difference - tolerance) / max_difference)
+        
+        return confidence
+
+    def _compute_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None, roi_mask: Optional[np.ndarray] = None) -> Tuple[float, float, float, float, float, float, float, float]:
+        """
+        Calculates brightness statistics for an ROI with optional background subtraction.
 
         Converts BGR to CIE LAB color space and uses the L* channel.
-        Discards the darkest pixels (noise floor) before computing statistics.
+        Also extracts blue channel statistics for blue light analysis.
 
         Args:
             roi_bgr: The region of interest as a NumPy array (BGR format).
+            background_brightness: Optional background L* value to subtract from all pixels.
+            roi_mask: Optional boolean mask selecting pixels to analyze within ROI.
 
         Returns:
-            Tuple of (mean_brightness, median_brightness) as L* values (0-100 range)
-            or (0.0, 0.0) if the ROI is invalid or calculation fails.
+            Tuple of (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, 
+                     b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median)
+            L* values in 0-100 range, Blue values in 0-255 range
+            or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) if the ROI is invalid or calculation fails.
         """
         if roi_bgr is None or roi_bgr.size == 0:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
         try:
             lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
             l_chan = lab[:, :, 0].astype(np.float32)
 
+            # If a fixed ROI mask is provided, use it directly
+            if roi_mask is not None:
+                mask_bool = roi_mask.astype(bool)
+                if mask_bool.shape[:2] != roi_bgr.shape[:2] or not np.any(mask_bool):
+                    return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+                l_star = l_chan * 100.0 / 255.0
+                blue_chan = roi_bgr[:, :, 0].astype(np.float32)
+                l_pixels = l_star[mask_bool]
+                b_pixels = blue_chan[mask_bool]
+                l_raw_mean = float(np.mean(l_pixels))
+                l_raw_median = float(np.median(l_pixels))
+                b_raw_mean = float(np.mean(b_pixels))
+                b_raw_median = float(np.median(b_pixels))
+                if background_brightness is not None:
+                    l_bg = l_pixels - background_brightness
+                    l_bg_sub_mean = float(np.mean(l_bg))
+                    l_bg_sub_median = float(np.median(l_bg))
+                    b_bg_sub_mean = b_raw_mean
+                    b_bg_sub_median = b_raw_median
+                else:
+                    l_bg_sub_mean = l_raw_mean
+                    l_bg_sub_median = l_raw_median
+                    b_bg_sub_mean = b_raw_mean
+                    b_bg_sub_median = b_raw_median
+                return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
+
             # Convert raw L to L* scale (0–100)
             l_star = l_chan * 100.0 / 255.0
-
-            # Keep only pixels with brightness > threshold
-            mask = l_star > self.manual_threshold
-            if not np.any(mask):
-                return 0.0, 0.0
-
-            # Calculate both mean and median of the remaining pixels
-            filtered_pixels = l_star[mask]
-            mean_brightness = float(np.mean(filtered_pixels))
-            median_brightness = float(np.median(filtered_pixels))
             
-            return mean_brightness, median_brightness
+            # Extract blue channel (BGR format, so blue is index 0)
+            blue_chan = roi_bgr[:, :, 0].astype(np.float32)
+
+            # Calculate raw L* statistics (unthresholded)
+            l_raw_mean = float(np.mean(l_star))
+            l_raw_median = float(np.median(l_star))
+            
+            # Calculate raw blue statistics (unthresholded)
+            b_raw_mean = float(np.mean(blue_chan))
+            b_raw_median = float(np.median(blue_chan))
+            
+            # Calculate background-subtracted statistics if background provided
+            if background_brightness is not None:
+                # Filter pixels above background threshold, then subtract background
+                above_background_mask = l_star > background_brightness
+                
+                # Apply morphological operations to clean up the mask (remove noise/stray pixels)
+                if np.any(above_background_mask):
+                    # Create structuring element for morphological operations
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                                     (self.morphological_kernel_size, self.morphological_kernel_size))
+                    
+                    # Convert boolean mask to uint8 for morphological operations
+                    mask_uint8 = above_background_mask.astype(np.uint8) * 255
+                    
+                    # Apply opening (erosion followed by dilation) to remove small noise
+                    cleaned_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+                    
+                    # Convert back to boolean mask
+                    above_background_mask = cleaned_mask > 0
+                
+                if np.any(above_background_mask):
+                    # Apply additional noise floor filtering if enabled
+                    if self.noise_floor_threshold > 0:
+                        noise_floor_mask = l_star > self.noise_floor_threshold
+                        combined_mask = above_background_mask & noise_floor_mask
+                    else:
+                        combined_mask = above_background_mask
+
+                    if np.any(combined_mask):
+                        # Only analyze pixels above both background and noise floor thresholds
+                        filtered_l_pixels = l_star[combined_mask]
+                        filtered_b_pixels = blue_chan[combined_mask]
+                    else:
+                        # No pixels pass both filters
+                        l_bg_sub_mean = 0.0
+                        l_bg_sub_median = 0.0
+                        b_bg_sub_mean = 0.0
+                        b_bg_sub_median = 0.0
+                        return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
+                    
+                    # Background-subtracted L* statistics
+                    bg_subtracted_l_pixels = filtered_l_pixels - background_brightness
+                    l_bg_sub_mean = float(np.mean(bg_subtracted_l_pixels))
+                    l_bg_sub_median = float(np.median(bg_subtracted_l_pixels))
+                    
+                    # Blue channel statistics for masked pixels (no background subtraction for blue)
+                    b_bg_sub_mean = float(np.mean(filtered_b_pixels))
+                    b_bg_sub_median = float(np.median(filtered_b_pixels))
+                else:
+                    # No pixels above background - return 0
+                    l_bg_sub_mean = 0.0
+                    l_bg_sub_median = 0.0
+                    b_bg_sub_mean = 0.0
+                    b_bg_sub_median = 0.0
+            else:
+                l_bg_sub_mean = l_raw_mean
+                l_bg_sub_median = l_raw_median
+                b_bg_sub_mean = b_raw_mean
+                b_bg_sub_median = b_raw_median
+            
+            return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
 
         except cv2.error as e:
             print(f"OpenCV error during brightness computation: {e}")
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         except Exception as e:
             print(f"Error during brightness computation: {e}")
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    def _compute_background_brightness(self, frame: np.ndarray) -> Optional[float]:
+        """
+        Calculate background ROI brightness for current frame.
+        
+        Args:
+            frame: Current video frame in BGR format
+            
+        Returns:
+            90th percentile L* brightness of background ROI, or None if no background ROI defined
+        """
+        if self.background_roi_idx is None or frame is None:
+            return None
+            
+        if not (0 <= self.background_roi_idx < len(self.rects)):
+            return None
+            
+        try:
+            pt1, pt2 = self.rects[self.background_roi_idx]
+            roi = frame[pt1[1]:pt2[1], pt1[0]:pt2[0]]
+            if roi.size == 0:
+                return None
+                
+            # Convert to LAB and get L* channel
+            lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+            l_chan = lab[:, :, 0].astype(np.float32)
+            l_star = l_chan * 100.0 / 255.0
+            
+            return float(np.percentile(l_star, self.background_percentile))
+            
+        except Exception as e:
+            print(f"Error computing background brightness: {e}")
+            return None
 
     def _compute_brightness(self, roi_bgr: np.ndarray) -> float:
         """
         Legacy method for backward compatibility.
         Returns only the mean brightness for existing code that expects a single value.
         """
-        mean_brightness, _ = self._compute_brightness_stats(roi_bgr)
-        return mean_brightness
+        l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi_bgr)
+        return l_raw_mean
     
 if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
     
     # Set up logging
-    logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     # Create and show the main window
     win = VideoAnalyzer()
