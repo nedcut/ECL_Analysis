@@ -3,14 +3,33 @@ import logging
 import os
 import sys
 import time
-from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+# Import modular components from brightness_sorcerer package
+from brightness_sorcerer.constants import *
+from brightness_sorcerer.core.frame_cache import FrameCache
+from brightness_sorcerer.core.brightness_analyzer import BrightnessAnalyzer
+from brightness_sorcerer.core.roi_manager import ROIManager
+from brightness_sorcerer.core.video_player import VideoPlayer
+from brightness_sorcerer.audio.audio_manager import AudioManager
+from brightness_sorcerer.audio.audio_analyzer import AudioAnalyzer
+from brightness_sorcerer.analysis.exporter import AnalysisExporter
+from brightness_sorcerer.ui.styles import get_application_stylesheet
+from brightness_sorcerer.utils.helpers import (
+    normalize_roi_bounds,
+    convert_to_lab_lstar,
+    create_progress_dialog,
+    apply_morphological_filter
+)
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Check optional dependencies
 try:
     import pygame
     PYGAME_AVAILABLE = True
@@ -26,357 +45,8 @@ except ImportError:
     LIBROSA_AVAILABLE = False
     logging.warning("librosa not available - audio analysis disabled")
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# --- Constants ---
-DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif"
-# Modern color palette with improved contrast and visual appeal
-COLOR_BACKGROUND = "#1a1a1a"          # Deeper, richer dark background
-COLOR_FOREGROUND = "#e0e0e0"          # Softer white for better readability
-COLOR_ACCENT = "#4f9cf9"              # Modern blue with better saturation
-COLOR_ACCENT_HOVER = "#6bb3ff"        # Brighter blue for interactions
-COLOR_SECONDARY = "#2d2d2d"           # Elevated surface color
-COLOR_SECONDARY_LIGHT = "#404040"     # Lighter surface for borders/dividers
-COLOR_SUCCESS = "#10b981"             # Modern emerald green
-COLOR_WARNING = "#f59e0b"             # Warm amber
-COLOR_ERROR = "#ef4444"               # Modern red with better contrast
-COLOR_INFO = "#06b6d4"                # Cyan for info states
-COLOR_BRIGHTNESS_LABEL = "#fbbf24"    # Golden yellow for brightness display
-
-ROI_COLORS = [
-    (255, 50, 50), (50, 200, 50), (50, 150, 255), (255, 150, 50),
-    (255, 50, 255), (50, 200, 200), (150, 50, 255), (255, 255, 50)
-]
-ROI_THICKNESS_DEFAULT = 2
-ROI_THICKNESS_SELECTED = 4
-ROI_LABEL_FONT_SCALE = 0.8
-ROI_LABEL_THICKNESS = 2
-
-AUTO_DETECT_BASELINE_PERCENTILE = 5
-BRIGHTNESS_NOISE_FLOOR_PERCENTILE = 2
-DEFAULT_MANUAL_THRESHOLD = 5.0
-MORPHOLOGICAL_KERNEL_SIZE = 3
-
-MOUSE_RESIZE_HANDLE_SENSITIVITY = 10
-
-# New constants for improvements
-DEFAULT_SETTINGS_FILE = "brightness_analyzer_settings.json"
-MAX_RECENT_FILES = 10
-FRAME_CACHE_SIZE = 100
-JUMP_FRAMES = 10  # Number of frames to jump with Page Up/Down
-
-class FrameCache:
-    """Efficient frame caching system for better performance."""
-    
-    def __init__(self, max_size: int = FRAME_CACHE_SIZE):
-        self.max_size = max_size
-        self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
-    
-    def get(self, frame_index: int) -> Optional[np.ndarray]:
-        """Get frame from cache, moving it to end (most recently used)."""
-        if frame_index in self._cache:
-            # Move to end (most recently used)
-            frame = self._cache.pop(frame_index)
-            self._cache[frame_index] = frame
-            return frame.copy()  # Return copy to prevent modifications
-        return None
-    
-    def put(self, frame_index: int, frame: np.ndarray):
-        """Add frame to cache, removing oldest if necessary."""
-        if frame_index in self._cache:
-            self._cache.pop(frame_index)
-        
-        self._cache[frame_index] = frame.copy()
-        
-        # Remove oldest items if cache is full
-        while len(self._cache) > self.max_size:
-            self._cache.popitem(last=False)
-    
-    def clear(self):
-        """Clear all cached frames."""
-        self._cache.clear()
-    
-    def get_size(self) -> int:
-        """Get current cache size."""
-        return len(self._cache)
-
-class AudioManager:
-    """Handle all audio feedback in the application."""
-    
-    def __init__(self, enabled: bool = True, volume: float = 0.7):
-        """Initialize audio manager with pygame mixer."""
-        self.enabled = enabled and PYGAME_AVAILABLE
-        self.volume = max(0.0, min(1.0, volume))
-        self._initialized = False
-        
-        if self.enabled:
-            try:
-                pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
-                self._initialized = True
-            except (ImportError, OSError, RuntimeError) as e:
-                logging.warning(f"Failed to initialize audio: {e}")
-                self.enabled = False
-    
-    def play_analysis_start(self):
-        """Play sound when analysis starts."""
-        if not self._can_play():
-            return
-        try:
-            # Generate a simple ascending tone sequence
-            self._play_tone_sequence([440, 554, 659], duration=0.15)
-        except (RuntimeError, OSError) as e:
-            logging.warning(f"Failed to play analysis start sound: {e}")
-    
-    def play_analysis_complete(self):
-        """Play sound when analysis completes."""
-        if not self._can_play():
-            return
-        try:
-            # Generate a completion chord
-            self._play_tone_sequence([523, 659, 783], duration=0.3)
-        except (RuntimeError, OSError) as e:
-            logging.warning(f"Failed to play analysis complete sound: {e}")
-    
-    def play_run_detected(self):
-        """Play sound when a run is detected within expected duration."""
-        if not self._can_play():
-            return
-        try:
-            # Generate a quick notification beep
-            self._play_tone_sequence([880, 1109], duration=0.1)
-        except (RuntimeError, OSError) as e:
-            logging.warning(f"Failed to play run detected sound: {e}")
-    
-    def set_enabled(self, enabled: bool):
-        """Enable or disable audio."""
-        self.enabled = enabled and PYGAME_AVAILABLE and self._initialized
-    
-    def set_volume(self, volume: float):
-        """Set audio volume (0.0 to 1.0)."""
-        self.volume = max(0.0, min(1.0, volume))
-    
-    def _can_play(self) -> bool:
-        """Check if audio can be played."""
-        return self.enabled and self._initialized and PYGAME_AVAILABLE
-    
-    def _play_tone_sequence(self, frequencies: List[float], duration: float = 0.2):
-        """Play a sequence of tones."""
-        if not self._can_play():
-            return
-        
-        try:
-            sample_rate = 22050
-            samples_per_tone = int(sample_rate * duration)
-            
-            for freq in frequencies:
-                # Generate sine wave
-                t = np.linspace(0, duration, samples_per_tone, False)
-                wave = np.sin(2 * np.pi * freq * t)
-                
-                # Apply envelope to avoid clicks
-                envelope = np.exp(-t * 3)  # Exponential decay
-                wave = wave * envelope * self.volume
-                
-                # Convert to 16-bit integers
-                wave = (wave * 32767).astype(np.int16)
-                
-                # Create stereo sound
-                stereo_wave = np.zeros((samples_per_tone, 2), dtype=np.int16)
-                stereo_wave[:, 0] = wave  # Left channel
-                stereo_wave[:, 1] = wave  # Right channel
-                
-                # Play the sound
-                sound = pygame.sndarray.make_sound(stereo_wave)
-                sound.play()
-                
-                # Wait for tone to finish
-                pygame.time.wait(int(duration * 1000))
-        
-        except (RuntimeError, OSError, AttributeError) as e:
-            logging.warning(f"Failed to generate tone sequence: {e}")
-
-class AudioAnalyzer:
-    """Analyze video audio to detect completion beeps and calculate frame ranges."""
-    
-    def __init__(self):
-        """Initialize audio analyzer."""
-        self.available = LIBROSA_AVAILABLE
-        self.sample_rate = 44100
-        self.hop_length = 512
-        self.n_fft = 2048  # Larger FFT window for better frequency resolution
-        
-    def extract_audio_from_video(self, video_path: str) -> Tuple[Optional[np.ndarray], Optional[float]]:
-        """
-        Extract audio from video file.
-        
-        Args:
-            video_path: Path to video file
-            
-        Returns:
-            Tuple of (audio_data, sample_rate) or (None, None) if failed
-        """
-        if not self.available:
-            logging.warning("librosa not available - cannot extract audio")
-            return None, None
-        
-        try:
-            # Use librosa to load audio from video
-            audio_data, sr = librosa.load(video_path, sr=self.sample_rate, mono=True)
-            logging.info(f"Extracted audio: {len(audio_data)/sr:.2f} seconds at {sr} Hz")
-            return audio_data, sr
-        except Exception as e:
-            logging.error(f"Failed to extract audio from video: {e}")
-            return None, None
-    
-    def detect_beeps(self, audio_data: np.ndarray, sample_rate: float, 
-                     target_frequency: float = 7000.0, frequency_tolerance: float = 50.0,
-                     threshold_percentile: float = 95.0, min_duration: float = 0.1) -> List[float]:
-        """
-        Detect beeps/tones in audio data targeting a specific frequency.
-        
-        Args:
-            audio_data: Audio waveform data
-            sample_rate: Sample rate of audio
-            target_frequency: Target frequency to detect (Hz) - default 7000Hz
-            frequency_tolerance: Tolerance around target frequency (Hz) - default ±500Hz
-            threshold_percentile: Percentile threshold for detection
-            min_duration: Minimum duration of beep (seconds)
-            
-        Returns:
-            List of timestamps (in seconds) where beeps were detected
-        """
-        if not self.available or audio_data is None:
-            return []
-        
-        try:
-            # Compute STFT to get frequency domain representation
-            stft = librosa.stft(audio_data, hop_length=self.hop_length, n_fft=self.n_fft)
-            magnitude = np.abs(stft)
-            
-            # Get frequency bins
-            freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=self.n_fft)
-            freq_resolution = freqs[1] - freqs[0]
-            
-            # Find frequency bins around our target frequency
-            min_frequency = target_frequency - frequency_tolerance
-            max_frequency = target_frequency + frequency_tolerance
-            freq_mask = (freqs >= min_frequency) & (freqs <= max_frequency)
-            target_magnitude = magnitude[freq_mask, :]
-            
-            logging.info(f"Targeting {target_frequency}Hz ±{frequency_tolerance}Hz ({min_frequency:.1f}-{max_frequency:.1f}Hz)")
-            logging.info(f"Frequency resolution: {freq_resolution:.1f}Hz, {np.sum(freq_mask)} bins selected")
-            
-            # Use maximum energy instead of sum to focus on the strongest signal in our frequency range
-            # This helps when the beep is very pure tone at 7000Hz
-            energy_per_frame = np.max(target_magnitude, axis=0)
-            
-            # Calculate threshold based on percentile
-            threshold = np.percentile(energy_per_frame, threshold_percentile)
-            
-            # Also calculate some statistics for better insight
-            mean_energy = np.mean(energy_per_frame)
-            max_energy = np.max(energy_per_frame)
-            
-            logging.info(f"Energy stats: mean={mean_energy:.2f}, max={max_energy:.2f}, threshold={threshold:.2f}")
-            
-            # Find frames above threshold
-            above_threshold = energy_per_frame > threshold
-            
-            # Convert frame indices to time stamps
-            times = librosa.frames_to_time(np.arange(len(energy_per_frame)), 
-                                         sr=sample_rate, hop_length=self.hop_length)
-            
-            # Find start and end of continuous regions above threshold
-            beep_times = []
-            in_beep = False
-            beep_start = 0.0
-            
-            for i, (time, is_above) in enumerate(zip(times, above_threshold)):
-                if is_above and not in_beep:
-                    # Start of beep
-                    in_beep = True
-                    beep_start = time
-                elif not is_above and in_beep:
-                    # End of beep
-                    in_beep = False
-                    beep_duration = time - beep_start
-                    if beep_duration >= min_duration:
-                        # Use middle of beep as detection time
-                        beep_times.append(beep_start + beep_duration / 2)
-            
-            # Handle case where beep continues to end of audio
-            if in_beep:
-                beep_duration = times[-1] - beep_start
-                if beep_duration >= min_duration:
-                    beep_times.append(beep_start + beep_duration / 2)
-            
-            logging.info(f"Detected {len(beep_times)} beeps at: {beep_times}")
-            return beep_times
-            
-        except Exception as e:
-            logging.error(f"Failed to detect beeps: {e}")
-            return []
-    
-    def find_completion_beeps(self, video_path: str, expected_run_duration: float = 0.0) -> List[Tuple[float, int]]:
-        """
-        Find completion beeps in video audio and calculate corresponding frame ranges.
-        
-        Args:
-            video_path: Path to video file
-            expected_run_duration: Expected run duration in seconds (0 = no filtering)
-            
-        Returns:
-            List of (beep_time_seconds, frame_number) tuples
-        """
-        if not self.available:
-            return []
-        
-        # Extract audio from video
-        audio_data, sample_rate = self.extract_audio_from_video(video_path)
-        if audio_data is None:
-            return []
-        
-        # Detect beeps
-        beep_times = self.detect_beeps(audio_data, sample_rate)
-        if not beep_times:
-            return []
-        
-        # Get video properties to convert times to frames
-        try:
-            cap = cv2.VideoCapture(video_path)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            cap.release()
-            
-            if fps <= 0:
-                logging.error("Invalid FPS from video")
-                return []
-            
-            # Convert beep times to frame numbers
-            results = []
-            for beep_time in beep_times:
-                frame_number = int(beep_time * fps)
-                if 0 <= frame_number < total_frames:
-                    results.append((beep_time, frame_number))
-            
-            # Filter by expected run duration if provided
-            if expected_run_duration > 0.0:
-                filtered_results = []
-                for beep_time, frame_number in results:
-                    # Check if there's enough time before this beep for a run of expected duration
-                    if beep_time >= expected_run_duration:
-                        filtered_results.append((beep_time, frame_number))
-                
-                if filtered_results:
-                    logging.info(f"Filtered {len(results)} beeps to {len(filtered_results)} based on run duration")
-                    results = filtered_results
-            
-            return results
-            
-        except Exception as e:
-            logging.error(f"Failed to process video for beep detection: {e}")
-            return []
+# Old classes removed - now imported from brightness_sorcerer package
+# FrameCache, AudioManager, AudioAnalyzer are imported above
 
 class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better menu support
     """Main application window for video brightness analysis."""
@@ -391,65 +61,205 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _init_vars(self):
         """Initialize instance variables."""
-        self.video_path = None
-        self.frame = None
-        self.current_frame_index = 0
-        self.total_frames = 0
-        self.cap = None
-        self.out_paths = []
-        
-        # Frame caching
-        self.frame_cache = FrameCache(FRAME_CACHE_SIZE)
-        
-        # Audio system
+        # Initialize modular components
+        self.video_player = VideoPlayer(cache_size=FRAME_CACHE_SIZE)
+        self.roi_manager = ROIManager()
+        self.brightness_analyzer = BrightnessAnalyzer(
+            morphological_kernel_size=MORPHOLOGICAL_KERNEL_SIZE,
+            noise_floor_threshold=0.0
+        )
+        self.exporter = AnalysisExporter()
         self.audio_manager = AudioManager()
         self.audio_analyzer = AudioAnalyzer()
-        
+
+        # Legacy properties (for compatibility during transition)
+        self.video_path = None
+        self.frame = None
+        self.out_paths = []
+
         # Recent files
         self.recent_files = []
-        
-        # ROI management
-        self.rects = []
-        self.selected_rect_idx = None
-        self.drawing = False
-        self.moving = False
-        self.resizing = False
-        self.start_point = None
-        self.end_point = None
-        self.move_offset = None
-        self.resize_corner = None
-        self._current_image_size = None
-        
+
         # Frame range
         self.start_frame = 0
         self.end_frame = None
-        
+
         # Analysis state
         self._analysis_in_progress = False
-        
+
         # Settings
         self.settings = {}
-        
+
         # Threshold / background
         self.manual_threshold = DEFAULT_MANUAL_THRESHOLD
-        self.background_roi_idx = None       # index into self.rects
-        
+
         # Pixel visualization
         self.show_pixel_mask = False
         # Fixed mask across frames
         self.use_fixed_mask = False
-        self.fixed_roi_masks: List[Optional[np.ndarray]] = []  # aligned with self.rects
+        self.fixed_roi_masks: List[Optional[np.ndarray]] = []  # aligned with ROIs
 
         # Noise filtering parameters (adjustable via UI)
         self.morphological_kernel_size = MORPHOLOGICAL_KERNEL_SIZE
         self.background_percentile = 90.0  # For background ROI threshold calculation
         self.noise_floor_threshold = 0.0   # Additional noise floor filtering
-        
+
         # Video playback
         self.is_playing = False
         self.playback_timer = QtCore.QTimer()
-        self.playback_fps = 30.0  # Default playback FPS
         self.playback_speed = 1.0  # Playback speed multiplier
+
+        # Legacy compatibility properties (mapped to new modules)
+        self._current_image_size = None
+
+    # Property mappings for legacy compatibility
+    @property
+    def current_frame_index(self) -> int:
+        """Map to video_player.current_frame_index."""
+        return self.video_player.current_frame_index if self.video_player else 0
+
+    @current_frame_index.setter
+    def current_frame_index(self, value: int):
+        """Map to video_player.current_frame_index."""
+        if self.video_player:
+            self.video_player.current_frame_index = value
+
+    @property
+    def total_frames(self) -> int:
+        """Map to video_player.total_frames."""
+        return self.video_player.total_frames if self.video_player else 0
+
+    @total_frames.setter
+    def total_frames(self, value: int):
+        """Map to video_player.total_frames."""
+        if self.video_player:
+            self.video_player.total_frames = value
+
+    @property
+    def cap(self):
+        """Map to video_player.cap."""
+        return self.video_player.cap if self.video_player else None
+
+    @cap.setter
+    def cap(self, value):
+        """Map to video_player.cap."""
+        if self.video_player:
+            self.video_player.cap = value
+
+    @property
+    def frame_cache(self):
+        """Map to video_player.frame_cache."""
+        return self.video_player.frame_cache if self.video_player else None
+
+    @property
+    def rects(self) -> List:
+        """Map to roi_manager.rois."""
+        return self.roi_manager.rois if self.roi_manager else []
+
+    @rects.setter
+    def rects(self, value: List):
+        """Map to roi_manager.rois."""
+        if self.roi_manager:
+            self.roi_manager.rois = value
+
+    @property
+    def selected_rect_idx(self) -> Optional[int]:
+        """Map to roi_manager.selected_roi_idx."""
+        return self.roi_manager.selected_roi_idx if self.roi_manager else None
+
+    @selected_rect_idx.setter
+    def selected_rect_idx(self, value: Optional[int]):
+        """Map to roi_manager.selected_roi_idx."""
+        if self.roi_manager:
+            self.roi_manager.selected_roi_idx = value
+
+    @property
+    def background_roi_idx(self) -> Optional[int]:
+        """Map to roi_manager.background_roi_idx."""
+        return self.roi_manager.background_roi_idx if self.roi_manager else None
+
+    @background_roi_idx.setter
+    def background_roi_idx(self, value: Optional[int]):
+        """Map to roi_manager.background_roi_idx."""
+        if self.roi_manager:
+            self.roi_manager.background_roi_idx = value
+
+    @property
+    def drawing(self) -> bool:
+        """Map to roi_manager.is_drawing."""
+        return self.roi_manager.is_drawing if self.roi_manager else False
+
+    @drawing.setter
+    def drawing(self, value: bool):
+        """Map to roi_manager.is_drawing."""
+        if self.roi_manager:
+            self.roi_manager.is_drawing = value
+
+    @property
+    def moving(self) -> bool:
+        """Map to roi_manager.is_moving."""
+        return self.roi_manager.is_moving if self.roi_manager else False
+
+    @moving.setter
+    def moving(self, value: bool):
+        """Map to roi_manager.is_moving."""
+        if self.roi_manager:
+            self.roi_manager.is_moving = value
+
+    @property
+    def resizing(self) -> bool:
+        """Map to roi_manager.is_resizing."""
+        return self.roi_manager.is_resizing if self.roi_manager else False
+
+    @resizing.setter
+    def resizing(self, value: bool):
+        """Map to roi_manager.is_resizing."""
+        if self.roi_manager:
+            self.roi_manager.is_resizing = value
+
+    @property
+    def start_point(self):
+        """Map to roi_manager.start_point."""
+        return self.roi_manager.start_point if self.roi_manager else None
+
+    @start_point.setter
+    def start_point(self, value):
+        """Map to roi_manager.start_point."""
+        if self.roi_manager:
+            self.roi_manager.start_point = value
+
+    @property
+    def end_point(self):
+        """Map to roi_manager.end_point."""
+        return self.roi_manager.end_point if self.roi_manager else None
+
+    @end_point.setter
+    def end_point(self, value):
+        """Map to roi_manager.end_point."""
+        if self.roi_manager:
+            self.roi_manager.end_point = value
+
+    @property
+    def move_offset(self):
+        """Map to roi_manager.move_offset."""
+        return self.roi_manager.move_offset if self.roi_manager else None
+
+    @move_offset.setter
+    def move_offset(self, value):
+        """Map to roi_manager.move_offset."""
+        if self.roi_manager:
+            self.roi_manager.move_offset = value
+
+    @property
+    def playback_fps(self) -> float:
+        """Map to video_player.fps."""
+        return self.video_player.fps if self.video_player else 30.0
+
+    @playback_fps.setter
+    def playback_fps(self, value: float):
+        """Map to video_player.fps."""
+        if self.video_player:
+            self.video_player.fps = value
 
     def _load_settings(self):
         """Load application settings from file."""
