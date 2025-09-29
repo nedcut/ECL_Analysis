@@ -1756,10 +1756,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.file_info_label.setText("📂 Loading video file...")
         QtWidgets.QApplication.processEvents()
 
-        if self.cap:
-            self.cap.release()
-            self.cap = None
-
         if not self.video_path or not os.path.exists(self.video_path):
             QtWidgets.QMessageBox.critical(self, 'Error', 'Video path is invalid or file does not exist.')
             self._reset_state()
@@ -1768,38 +1764,22 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.statusBar().showMessage("⚙️ Initializing video decoder...")
         QtWidgets.QApplication.processEvents()
 
-        self.cap = cv2.VideoCapture(self.video_path)
-        if not self.cap.isOpened():
+        # Use VideoPlayer to load video
+        if not self.video_player.load_video(self.video_path):
             QtWidgets.QMessageBox.critical(self, 'Error', f'Could not open video file: {os.path.basename(self.video_path)}')
             self._reset_state()
             return
 
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.playback_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if self.playback_fps <= 0:
-            self.playback_fps = 30.0  # Default fallback
-            
-        if self.total_frames <= 0:
-             QtWidgets.QMessageBox.warning(self, 'Warning', 'Video file appears to have no frames.')
-             self._reset_state()
-             return
-
-        # Clear cache when loading new video
-        self.frame_cache.clear()
-        
-        self.current_frame_index = 0
+        # Set frame range
         self.start_frame = 0
         self.end_frame = self.total_frames - 1
 
-        # Load the first frame
-        ret, frame = self.cap.read()
-        if ret:
-            self.frame = frame
-            self.frame_cache.put(0, frame)  # Cache first frame
-
-            # Ensure the pixmap scales to the label’s current size the first time we draw it
+        # Get the first frame
+        self.frame = self.video_player.get_current_frame()
+        if self.frame is not None:
+            # Ensure the pixmap scales to the label's current size the first time we draw it
             self._current_image_size = self.image_label.size()
-            
+
             # Update UI elements for the loaded video
             self.frame_slider.setRange(0, self.total_frames - 1)
             self.frame_slider.setValue(0)
@@ -1810,10 +1790,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_video_info()
             self._update_cache_status()
             self._update_threshold_display()
-            
+
             # Add to recent files
             self._add_recent_file(self.video_path)
-            
+
             self.results_label.setText(f"✅ Loaded: {os.path.basename(self.video_path)}\n"
                                        f"📊 Frames: {self.total_frames:,} | ⏱️ FPS: {self.playback_fps:.1f}\n"
                                        f"⏳ Duration: {self.total_frames/self.playback_fps:.1f}s\n"
@@ -1835,19 +1815,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _reset_state(self):
         """Resets the application state when a video fails to load or is closed."""
-        if self.cap:
-            self.cap.release()
+        # Release video using VideoPlayer
+        self.video_player.release()
+
+        # Clear other state
         self.video_path = None
         self.frame = None
-        self.current_frame_index = 0
-        self.total_frames = 0
-        self.cap = None
-        self.rects = []
-        self.selected_rect_idx = None
         self.start_frame = 0
         self.end_frame = None
         self.out_paths = []
-        self.frame_cache.clear()
+
+        # Clear ROIs
+        self.roi_manager.clear_rois()
         
         # Stop playback and reset controls
         self.stop_playback()
@@ -1951,34 +1930,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _seek_to_frame(self, frame_index: int):
         """Reads and displays the specified frame index with caching."""
-        if not self.cap or not self.cap.isOpened():
+        if not self.video_player.is_loaded():
             return
         if frame_index < 0 or frame_index >= self.total_frames:
             logging.warning(f"Attempted to seek to invalid frame index {frame_index}")
             return
 
-        # Check cache first
-        cached_frame = self.frame_cache.get(frame_index)
-        if cached_frame is not None:
-            self.frame = cached_frame
-            self.current_frame_index = frame_index
-            self.show_frame()
-            self.update_frame_label()
-            self._update_current_brightness_display()
-            self._update_threshold_display()
-            return
-
-        # Not in cache, read from video
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        ret, frame = self.cap.read()
-        if ret:
-            self.frame = frame
-            self.current_frame_index = frame_index
-            
-            # Cache the frame
-            self.frame_cache.put(frame_index, frame)
+        # Use VideoPlayer to seek and get frame (it handles caching internally)
+        self.frame = self.video_player.seek_to_frame(frame_index)
+        if self.frame is not None:
             self._update_cache_status()
-            
             self.show_frame()
             self.update_frame_label()
             self._update_current_brightness_display()
@@ -2466,14 +2427,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 progress.setValue(frame_idx - start_frame)
                 QtWidgets.QApplication.processEvents()
 
-                # Get frame from cache or video
-                frame = self.frame_cache.get(frame_idx)
+                # Get frame using VideoPlayer (handles caching internally)
+                frame = self.video_player.get_frame(frame_idx)
                 if frame is None:
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                    ret, frame = self.cap.read()
-                    if not ret or frame is None:
-                        continue
-                    self.frame_cache.put(frame_idx, frame)
+                    continue
 
                 # Calculate average brightness of all non-background ROIs
                 frame_brightness = 0.0
