@@ -3187,91 +3187,55 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     self.audio_manager.play_run_detected()
 
     def _save_analysis_results(self, brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame):
-        """Save analysis results and generate plots."""
+        """Save analysis results and generate plots using AnalysisExporter."""
         self.out_paths = []
         if self.video_path is None:
             return
+
         base_video_name = os.path.splitext(os.path.basename(self.video_path))[0]
         analysis_name = self.analysis_name_input.text().strip() or "DefaultAnalysis"
-        analysis_name = "".join(c for c in analysis_name if c.isalnum() or c in ('_', '-')).rstrip()
 
-        summary_lines = [f"Analysis Complete ({frames_processed} frames analyzed):"]
+        # Use AnalysisExporter to save results and generate plots
+        output_paths, summary_lines = self.exporter.save_results(
+            brightness_mean_data=brightness_mean_data,
+            brightness_median_data=brightness_median_data,
+            blue_mean_data=blue_mean_data,
+            blue_median_data=blue_median_data,
+            save_dir=save_dir,
+            start_frame=self.start_frame,
+            non_background_roi_indices=non_background_rois,
+            analysis_name=analysis_name,
+            video_name=base_video_name,
+            background_values_per_frame=background_values_per_frame
+        )
+
+        self.out_paths = output_paths
+
+        # Extract average brightness summary from summary lines
         avg_brightness_summary = []
+        for line in summary_lines:
+            if line.strip().startswith("ROI"):
+                # Extract the ROI summary line for display
+                avg_brightness_summary.append(line.strip())
 
-        # Update progress dialog for plot generation
-        progress = QtWidgets.QProgressDialog("Saving results and generating plots...", "Cancel", 0, len(brightness_mean_data), self)
-        progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle("Saving Results")
-        progress.setValue(0)
-        progress.show()
-        QtWidgets.QApplication.processEvents()
-
-        plot_failed = False
-        for data_idx in range(len(brightness_mean_data)):
-            if progress.wasCanceled():
-                break
-                
-            actual_roi_idx = non_background_rois[data_idx]  # Get the actual ROI index
-            mean_data = brightness_mean_data[data_idx]
-            median_data = brightness_median_data[data_idx]
-            blue_mean = blue_mean_data[data_idx]
-            blue_median = blue_median_data[data_idx]
-            
-            if not mean_data: 
-                progress.setValue(data_idx + 1)
-                continue
-
-            # Create DataFrame with L* and blue channel data
-            frame_numbers = range(self.start_frame, self.start_frame + len(mean_data))
-            df = pd.DataFrame({
-                "frame": frame_numbers, 
-                "brightness_mean": mean_data,
-                "brightness_median": median_data,
-                "blue_mean": blue_mean,
-                "blue_median": blue_median
-            })
-
-            # Calculate averages for summary
-            avg_mean = np.mean(mean_data)
-            avg_median = np.mean(median_data)
-            avg_blue_mean = np.mean(blue_mean)
-            avg_blue_median = np.mean(blue_median)
-            avg_brightness_summary.append(f"ROI {actual_roi_idx+1} L*: {avg_mean:.2f}±{avg_median:.2f}, Blue: {avg_blue_mean:.1f}±{avg_blue_median:.1f}")
-
-            # Construct filename and save CSV using actual ROI number
-            base_filename = f"{analysis_name}_{base_video_name}_ROI{actual_roi_idx+1}_frames{self.start_frame+1}-{self.start_frame+len(mean_data)}"
-            csv_file = f"{base_filename}_brightness.csv"
-            csv_path = os.path.join(save_dir, csv_file)
-            
-            try:
-                df.to_csv(csv_path, index=False)
-                self.out_paths.append(csv_path)
-                summary_lines.append(f" - Saved CSV: {csv_file}")
-                
-                # Generate enhanced plot for this ROI
-                self._generate_enhanced_plot(df, base_filename, save_dir, actual_roi_idx, analysis_name, base_video_name, background_values_per_frame)
-                summary_lines.append(f" - Saved Plot: {base_filename}_plot.png")
-
-            except Exception as e:
-                plot_failed = True
-                error_msg = f"Failed to save/plot ROI {actual_roi_idx+1}: {e}"
-                logging.error(error_msg)
-                summary_lines.append(f" - FAILED: ROI {actual_roi_idx+1}")
-
-            progress.setValue(data_idx + 1)
-            QtWidgets.QApplication.processEvents()
-
-        progress.close()
-
-        # --- Update UI ---
-        if plot_failed:
-            summary_lines.append("Note: Some plots failed to generate - check console for details")
-            
+        # Update UI
         self.results_label.setText("\n".join(summary_lines))
-        self.brightness_display_label.setText(", ".join(avg_brightness_summary) if avg_brightness_summary else "N/A")
+        if avg_brightness_summary:
+            self.brightness_display_label.setText(", ".join(avg_brightness_summary))
+        else:
+            self.brightness_display_label.setText("N/A")
 
     def _generate_enhanced_plot(self, df, base_filename, save_dir, r_idx, analysis_name, base_video_name, background_values_per_frame):
-        """Generate enhanced plots with better styling and information."""
+        """
+        Legacy method - plot generation now handled by AnalysisExporter.
+
+        This method is deprecated and no longer called. Plotting is handled by
+        exporter.generate_plot() which is called within exporter.save_results().
+        Kept for reference during migration.
+        """
+        return  # Early return - method no longer used
+
+        # Old implementation below (unreachable)
         try:
             frames = df['frame']
             brightness_mean = df['brightness_mean']
