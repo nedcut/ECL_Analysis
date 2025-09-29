@@ -1995,25 +1995,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _draw_rois(self, frame_to_draw_on):
         """Draws all defined ROIs and the currently drawing ROI onto the frame."""
-        # Draw existing rectangles
-        for idx, (pt1, pt2) in enumerate(self.rects):
-            color = ROI_COLORS[idx % len(ROI_COLORS)]
-            thickness = ROI_THICKNESS_SELECTED if idx == self.selected_rect_idx else ROI_THICKNESS_DEFAULT
-            cv2.rectangle(frame_to_draw_on, pt1, pt2, color, thickness)
-            # Draw index label near the top-left corner
-            label = f"{idx+1}"
-            (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, ROI_LABEL_FONT_SCALE, ROI_LABEL_THICKNESS)
-            label_pos = (pt1[0] + 5, pt1[1] + text_height + 5)
-            # Simple background for label visibility
-            cv2.rectangle(frame_to_draw_on, (pt1[0], pt1[1]), (pt1[0] + text_width + 10, pt1[1] + text_height + 10), (0,0,0), cv2.FILLED)
-            cv2.putText(frame_to_draw_on, label, label_pos, cv2.FONT_HERSHEY_SIMPLEX, ROI_LABEL_FONT_SCALE, color, ROI_LABEL_THICKNESS, cv2.LINE_AA)
-
-        # Draw rectangle currently being drawn
+        # Prepare current drawing rectangle if in drawing mode
+        current_drawing_rect = None
         if self.drawing and self.start_point and self.end_point:
             # Map points from label coordinates to frame coordinates
             pt1_frame, pt2_frame = self._map_label_to_frame_rect(self.start_point, self.end_point)
             if pt1_frame and pt2_frame:
-                cv2.rectangle(frame_to_draw_on, pt1_frame, pt2_frame, (0, 255, 255), ROI_THICKNESS_DEFAULT) # Use a distinct color (cyan)
+                current_drawing_rect = (pt1_frame, pt2_frame)
+
+        # Use ROIManager to draw all ROIs
+        self.roi_manager.draw_rois(frame_to_draw_on, current_drawing_rect)
 
     def _update_current_brightness_display(self):
         """Calculates and displays comprehensive brightness information for the current frame's ROIs."""
@@ -2152,24 +2143,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def delete_selected_rectangle(self):
         """Deletes the currently selected ROI."""
         if self.selected_rect_idx is not None and 0 <= self.selected_rect_idx < len(self.rects):
-            del self.rects[self.selected_rect_idx]
-            # Remove corresponding fixed mask and invalidate
-            if self.selected_rect_idx is not None and self.selected_rect_idx < len(self.fixed_roi_masks):
+            # Use ROIManager to remove ROI (it handles index adjustments)
+            self.roi_manager.remove_roi(self.selected_rect_idx)
+
+            # Remove corresponding fixed mask
+            if self.selected_rect_idx < len(self.fixed_roi_masks):
                 del self.fixed_roi_masks[self.selected_rect_idx]
             self._invalidate_fixed_masks("ROI deleted")
-            
-            # Handle background ROI index adjustment
-            if self.background_roi_idx == self.selected_rect_idx:
-                self.background_roi_idx = None
-            elif self.background_roi_idx is not None and self.selected_rect_idx < self.background_roi_idx:
-                self.background_roi_idx -= 1
-            
-            # Adjust selection if the deleted item wasn't the last one
+
+            # Adjust selection if needed
             if self.selected_rect_idx >= len(self.rects) and len(self.rects) > 0:
-                 self.selected_rect_idx = len(self.rects) - 1
+                self.selected_rect_idx = len(self.rects) - 1
             elif len(self.rects) == 0:
-                 self.selected_rect_idx = None
-            # No need to explicitly set selection index otherwise, update_rect_list handles it
+                self.selected_rect_idx = None
+
             self.update_rect_list()
             self.show_frame()
 
@@ -2683,14 +2670,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             # Add rectangle only if it has a valid size
             if pt1_frame and pt2_frame and abs(pt1_frame[0] - pt2_frame[0]) > 1 and abs(pt1_frame[1] - pt2_frame[1]) > 1:
-                # Ensure pt1 is top-left and pt2 is bottom-right
-                final_x1 = min(pt1_frame[0], pt2_frame[0])
-                final_y1 = min(pt1_frame[1], pt2_frame[1])
-                final_x2 = max(pt1_frame[0], pt2_frame[0])
-                final_y2 = max(pt1_frame[1], pt2_frame[1])
-                self.rects.append(((final_x1, final_y1), (final_x2, final_y2)))
-                self.selected_rect_idx = len(self.rects) - 1 # Select the new rectangle
-                self.update_rect_list() # Update list and selection
+                # Use ROIManager to add ROI (it handles normalization)
+                new_roi_idx = self.roi_manager.add_roi(pt1_frame, pt2_frame)
+                self.selected_rect_idx = new_roi_idx  # Select the new rectangle
+                self.update_rect_list()  # Update list and selection
 
             # Reset drawing state
             self.drawing = False
