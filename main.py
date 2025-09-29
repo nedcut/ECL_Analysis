@@ -586,6 +586,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _apply_stylesheet(self):
         """Apply a modern, clean stylesheet to the application."""
+        # Use stylesheet from modular ui.styles module
+        self.setStyleSheet(get_application_stylesheet())
+
+        # Original inline stylesheet replaced with modular version
+        # See brightness_sorcerer/ui/styles.py for stylesheet details
+        return
+
+        # Below is the old inline stylesheet (kept for reference, not executed)
         self.setStyleSheet(f"""
             QMainWindow {{
                 background-color: {COLOR_BACKGROUND};
