@@ -8,11 +8,23 @@ Brightness Sorcerer v2.0 is a PyQt5-based desktop application for advanced video
 
 ## Core Architecture
 
-### Single-File Application Structure
-- **main.py**: Complete application implementation (~2900+ lines)
-  - `FrameCache` class: LRU cache system for smooth video navigation (100 frame default)
-  - `VideoAnalyzer` class: Main PyQt5 application window with comprehensive video analysis functionality
+### Modular Application Structure
+- **main.py**: Main application window (~3,500 lines)
+  - `VideoAnalyzer` class: Main PyQt5 application window that orchestrates modular components
+  - Imports and uses specialized modules from `brightness_sorcerer` package
   - Modern dark theme with responsive UI design and professional gradients
+
+- **brightness_sorcerer/**: Modular package structure (~2,300+ lines across 11 modules)
+  - `core/video_player.py`: Video loading, frame navigation, and caching
+  - `core/roi_manager.py`: ROI management, drawing, selection, and manipulation
+  - `core/brightness_analyzer.py`: Brightness calculations, noise filtering, and statistics
+  - `core/frame_cache.py`: LRU cache system for smooth video navigation
+  - `analysis/exporter.py`: CSV export and matplotlib plot generation
+  - `audio/audio_manager.py`: Audio feedback system (pygame)
+  - `audio/audio_analyzer.py`: Beep detection and analysis (librosa)
+  - `ui/styles.py`: Qt stylesheet definitions
+  - `utils/helpers.py`: Common utility functions
+  - `constants.py`: Application constants and configuration
 
 ### Key Components
 
