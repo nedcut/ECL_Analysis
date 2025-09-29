@@ -3460,8 +3460,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
         """
         Calculates brightness statistics for an ROI with optional background subtraction.
 
-        Converts BGR to CIE LAB color space and uses the L* channel.
-        Also extracts blue channel statistics for blue light analysis.
+        Delegates to BrightnessAnalyzer for all brightness calculations.
 
         Args:
             roi_bgr: The region of interest as a NumPy array (BGR format).
@@ -3469,159 +3468,43 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             roi_mask: Optional boolean mask selecting pixels to analyze within ROI.
 
         Returns:
-            Tuple of (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, 
+            Tuple of (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median,
                      b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median)
-            L* values in 0-100 range, Blue values in 0-255 range
-            or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) if the ROI is invalid or calculation fails.
         """
-        if roi_bgr is None or roi_bgr.size == 0:
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        # Update BrightnessAnalyzer with current noise filtering parameters
+        self.brightness_analyzer.set_morphological_kernel_size(self.morphological_kernel_size)
+        self.brightness_analyzer.set_noise_floor_threshold(self.noise_floor_threshold)
 
-        try:
-            lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
-            l_chan = lab[:, :, 0].astype(np.float32)
-
-            # If a fixed ROI mask is provided, use it directly
-            if roi_mask is not None:
-                mask_bool = roi_mask.astype(bool)
-                if mask_bool.shape[:2] != roi_bgr.shape[:2] or not np.any(mask_bool):
-                    return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-                l_star = l_chan * 100.0 / 255.0
-                blue_chan = roi_bgr[:, :, 0].astype(np.float32)
-                l_pixels = l_star[mask_bool]
-                b_pixels = blue_chan[mask_bool]
-                l_raw_mean = float(np.mean(l_pixels))
-                l_raw_median = float(np.median(l_pixels))
-                b_raw_mean = float(np.mean(b_pixels))
-                b_raw_median = float(np.median(b_pixels))
-                if background_brightness is not None:
-                    l_bg = l_pixels - background_brightness
-                    l_bg_sub_mean = float(np.mean(l_bg))
-                    l_bg_sub_median = float(np.median(l_bg))
-                    b_bg_sub_mean = b_raw_mean
-                    b_bg_sub_median = b_raw_median
-                else:
-                    l_bg_sub_mean = l_raw_mean
-                    l_bg_sub_median = l_raw_median
-                    b_bg_sub_mean = b_raw_mean
-                    b_bg_sub_median = b_raw_median
-                return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
-
-            # Convert raw L to L* scale (0–100)
-            l_star = l_chan * 100.0 / 255.0
-            
-            # Extract blue channel (BGR format, so blue is index 0)
-            blue_chan = roi_bgr[:, :, 0].astype(np.float32)
-
-            # Calculate raw L* statistics (unthresholded)
-            l_raw_mean = float(np.mean(l_star))
-            l_raw_median = float(np.median(l_star))
-            
-            # Calculate raw blue statistics (unthresholded)
-            b_raw_mean = float(np.mean(blue_chan))
-            b_raw_median = float(np.median(blue_chan))
-            
-            # Calculate background-subtracted statistics if background provided
-            if background_brightness is not None:
-                # Filter pixels above background threshold, then subtract background
-                above_background_mask = l_star > background_brightness
-                
-                # Apply morphological operations to clean up the mask (remove noise/stray pixels)
-                if np.any(above_background_mask):
-                    # Create structuring element for morphological operations
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                                     (self.morphological_kernel_size, self.morphological_kernel_size))
-                    
-                    # Convert boolean mask to uint8 for morphological operations
-                    mask_uint8 = above_background_mask.astype(np.uint8) * 255
-                    
-                    # Apply opening (erosion followed by dilation) to remove small noise
-                    cleaned_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-                    
-                    # Convert back to boolean mask
-                    above_background_mask = cleaned_mask > 0
-                
-                if np.any(above_background_mask):
-                    # Apply additional noise floor filtering if enabled
-                    if self.noise_floor_threshold > 0:
-                        noise_floor_mask = l_star > self.noise_floor_threshold
-                        combined_mask = above_background_mask & noise_floor_mask
-                    else:
-                        combined_mask = above_background_mask
-
-                    if np.any(combined_mask):
-                        # Only analyze pixels above both background and noise floor thresholds
-                        filtered_l_pixels = l_star[combined_mask]
-                        filtered_b_pixels = blue_chan[combined_mask]
-                    else:
-                        # No pixels pass both filters
-                        l_bg_sub_mean = 0.0
-                        l_bg_sub_median = 0.0
-                        b_bg_sub_mean = 0.0
-                        b_bg_sub_median = 0.0
-                        return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
-                    
-                    # Background-subtracted L* statistics
-                    bg_subtracted_l_pixels = filtered_l_pixels - background_brightness
-                    l_bg_sub_mean = float(np.mean(bg_subtracted_l_pixels))
-                    l_bg_sub_median = float(np.median(bg_subtracted_l_pixels))
-                    
-                    # Blue channel statistics for masked pixels (no background subtraction for blue)
-                    b_bg_sub_mean = float(np.mean(filtered_b_pixels))
-                    b_bg_sub_median = float(np.median(filtered_b_pixels))
-                else:
-                    # No pixels above background - return 0
-                    l_bg_sub_mean = 0.0
-                    l_bg_sub_median = 0.0
-                    b_bg_sub_mean = 0.0
-                    b_bg_sub_median = 0.0
-            else:
-                l_bg_sub_mean = l_raw_mean
-                l_bg_sub_median = l_raw_median
-                b_bg_sub_mean = b_raw_mean
-                b_bg_sub_median = b_raw_median
-            
-            return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
-
-        except cv2.error as e:
-            print(f"OpenCV error during brightness computation: {e}")
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        except Exception as e:
-            print(f"Error during brightness computation: {e}")
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        # Delegate to BrightnessAnalyzer
+        return self.brightness_analyzer.compute_brightness_stats(
+            roi_bgr, background_brightness, roi_mask
+        )
 
     def _compute_background_brightness(self, frame: np.ndarray) -> Optional[float]:
         """
         Calculate background ROI brightness for current frame.
-        
+
+        Delegates to BrightnessAnalyzer for background brightness calculation.
+
         Args:
             frame: Current video frame in BGR format
-            
+
         Returns:
-            90th percentile L* brightness of background ROI, or None if no background ROI defined
+            Percentile L* brightness of background ROI, or None if no background ROI defined
         """
         if self.background_roi_idx is None or frame is None:
             return None
-            
+
         if not (0 <= self.background_roi_idx < len(self.rects)):
             return None
-            
-        try:
-            pt1, pt2 = self.rects[self.background_roi_idx]
-            roi = frame[pt1[1]:pt2[1], pt1[0]:pt2[0]]
-            if roi.size == 0:
-                return None
-                
-            # Convert to LAB and get L* channel
-            lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-            l_chan = lab[:, :, 0].astype(np.float32)
-            l_star = l_chan * 100.0 / 255.0
-            
-            return float(np.percentile(l_star, self.background_percentile))
-            
-        except Exception as e:
-            print(f"Error computing background brightness: {e}")
-            return None
+
+        # Get background ROI coordinates
+        roi_coords = self.rects[self.background_roi_idx]
+
+        # Use BrightnessAnalyzer to compute background brightness
+        return self.brightness_analyzer.compute_background_brightness(
+            frame, roi_coords, percentile=self.background_percentile
+        )
 
     def _compute_brightness(self, roi_bgr: np.ndarray) -> float:
         """
