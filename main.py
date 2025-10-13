@@ -239,7 +239,7 @@ class AudioAnalyzer:
             audio_data: Audio waveform data
             sample_rate: Sample rate of audio
             target_frequency: Target frequency to detect (Hz) - default 7000Hz
-            frequency_tolerance: Tolerance around target frequency (Hz) - default ±500Hz
+            frequency_tolerance: Tolerance around target frequency (Hz) - default ±50Hz
             threshold_percentile: Percentile threshold for detection
             min_duration: Minimum duration of beep (seconds)
             
@@ -256,12 +256,20 @@ class AudioAnalyzer:
             
             # Get frequency bins
             freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=self.n_fft)
-            freq_resolution = freqs[1] - freqs[0]
+            freq_resolution = freqs[1] - freqs[0] if len(freqs) > 1 else 0.0
             
             # Find frequency bins around our target frequency
             min_frequency = target_frequency - frequency_tolerance
             max_frequency = target_frequency + frequency_tolerance
             freq_mask = (freqs >= min_frequency) & (freqs <= max_frequency)
+
+            if not np.any(freq_mask):
+                logging.warning(
+                    "No STFT bins found within %.1f±%.1fHz; increase tolerance to detect beeps",
+                    target_frequency,
+                    frequency_tolerance,
+                )
+                return []
             target_magnitude = magnitude[freq_mask, :]
             
             logging.info(f"Targeting {target_frequency}Hz ±{frequency_tolerance}Hz ({min_frequency:.1f}-{max_frequency:.1f}Hz)")
@@ -1605,6 +1613,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.mask_status_label.setObjectName("statusLabel")
         viz_layout.addWidget(self.mask_status_label)
 
+        self.mask_pixel_count_label = QtWidgets.QLabel("Mask Pixels: n/a")
+        self.mask_pixel_count_label.setObjectName("statusLabel")
+        viz_layout.addWidget(self.mask_pixel_count_label)
+
         # Noise filtering controls
         noise_groupbox = QtWidgets.QGroupBox("Noise Filtering")
         noise_layout = QtWidgets.QVBoxLayout()
@@ -1821,6 +1833,23 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         cache_size = self.frame_cache.get_size()
         self.cache_status_label.setText(f"Cache: {cache_size}/{FRAME_CACHE_SIZE} frames")
 
+    def _update_mask_pixel_count_display(self):
+        """Update sidebar label with total fixed mask pixels."""
+        if not hasattr(self, "mask_pixel_count_label"):
+            return
+
+        count = 0
+        mask_found = False
+        for mask in getattr(self, "fixed_roi_masks", []):
+            if isinstance(mask, np.ndarray):
+                mask_found = True
+                count += int(np.count_nonzero(mask))
+
+        if mask_found:
+            self.mask_pixel_count_label.setText(f"Mask Pixels: {count:,}")
+        else:
+            self.mask_pixel_count_label.setText("Mask Pixels: n/a")
+
     def _invalidate_fixed_masks(self, reason: str = ""):
         """Clear captured fixed masks when ROIs change or become invalid.
         Optionally provide a reason for UI feedback.
@@ -1831,6 +1860,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 self.mask_status_label.setText(f"Mask: cleared ({reason})")
             else:
                 self.mask_status_label.setText("Mask: cleared")
+        self._update_mask_pixel_count_display()
 
     def _update_video_info(self):
         """Update video information display."""
@@ -2015,6 +2045,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.fixed_roi_masks = [None for _ in self.rects]
             self.use_fixed_mask_checkbox.setChecked(False)
             self.mask_status_label.setText("Mask: none")
+            self._update_mask_pixel_count_display()
 
             # Attempt auto-detection if ROIs already exist
             if self.rects:
@@ -2341,6 +2372,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 else:
                     new_masks.append(None)
             self.fixed_roi_masks = new_masks
+        self._update_mask_pixel_count_display()
 
         self._update_widget_states(video_loaded=bool(self.cap), rois_exist=bool(self.rects))
         self._update_threshold_display()
@@ -2408,6 +2440,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.fixed_roi_masks = []
             self.use_fixed_mask_checkbox.setChecked(False)
             self.mask_status_label.setText("Mask: none")
+            self._update_mask_pixel_count_display()
             self.update_rect_list()
             self.show_frame()
 
@@ -2613,6 +2646,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 self.use_fixed_mask_checkbox.setChecked(True)
         else:
             self.mask_status_label.setText("Mask: none (could not capture)")
+        self._update_mask_pixel_count_display()
         if self.frame is not None:
             self.show_frame()
 

@@ -35,11 +35,18 @@ Advanced video brightness analysis tool for analyzing brightness changes in vide
 - Pandas
 - Matplotlib
 
+The core dependencies above are enough to launch the UI and run brightness analysis. Optional extras unlock quality-of-life features:
+
+- `pygame` — enables audio cues for analysis start/finish events
+- `librosa` + `soundfile` — unlock automated audio-based run detection
+
+The application gracefully disables these extras when the packages are absent.
+
 ### Setup
 ```bash
 # Clone the repository
 git clone [repository-url]
-cd ECL_Analysis
+cd ecl
 
 # Install dependencies
 pip install -r requirements.txt
