@@ -10,6 +10,7 @@ numpy>=1.21.0
 
 # Plotting and visualization
 matplotlib>=3.4.0
+plotly>=5.0.0
 
 # Audio support and analysis
 pygame>=2.0.0
