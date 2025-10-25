@@ -2257,9 +2257,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             Frame with red mask overlay applied
         """
         overlay = frame.copy()
-        
-        # Get background brightness for current frame
-        background_brightness = self._compute_background_brightness(frame)
+
+        # Precompute L* for current frame and derive background brightness
+        l_star_frame = self._compute_l_star_frame(frame)
+        background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
         
         for roi_idx, (pt1, pt2) in enumerate(self.rects):
             # Skip background ROI
@@ -2274,8 +2275,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             y2 = max(0, min(pt2[1], fh - 1))
             
             if x2 > x1 and y2 > y1:
-                # Extract ROI and convert to LAB
                 roi = frame[y1:y2, x1:x2]
+                roi_l_star = l_star_frame[y1:y2, x1:x2]
                 try:
                     use_fixed = self.use_fixed_mask and roi_idx < len(self.fixed_roi_masks) and isinstance(self.fixed_roi_masks[roi_idx], np.ndarray)
                     mask = None
@@ -2288,14 +2289,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                             mask = None
 
                     if mask is None:
-                        # Derive mask from current frame
-                        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-                        l_chan = lab[:, :, 0].astype(np.float32)
-                        l_star = l_chan * 100.0 / 255.0
+                        # Derive mask from current frame using cached L* channel
                         if background_brightness is not None:
-                            mask = l_star > background_brightness
+                            mask = roi_l_star > background_brightness
                         else:
-                            mask = np.ones_like(l_star, dtype=bool)
+                            mask = np.ones_like(roi_l_star, dtype=bool)
                     
                     # Apply red overlay to analyzed pixels
                     roi_overlay = roi.copy()
@@ -2336,7 +2334,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         frame = self.frame
         fh, fw = frame.shape[:2]
         # Determine background brightness once from current frame
-        background_brightness = self._compute_background_brightness(frame)
+        l_star_frame = self._compute_l_star_frame(frame)
+        background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
         
         masks: List[Optional[np.ndarray]] = []
         created_any = False
@@ -2350,12 +2349,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             y2 = max(0, min(pt2[1], fh - 1))
             if x2 > x1 and y2 > y1:
                 roi = frame[y1:y2, x1:x2]
+                roi_l_star = l_star_frame[y1:y2, x1:x2]
                 try:
-                    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-                    l_chan = lab[:, :, 0].astype(np.float32)
-                    l_star = l_chan * 100.0 / 255.0
                     if background_brightness is not None:
-                        mask = l_star > background_brightness
+                        mask = roi_l_star > background_brightness
                         # Morphological cleanup similar to analysis
                         if np.any(mask):
                             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.morphological_kernel_size, self.morphological_kernel_size))
@@ -2364,7 +2361,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                             mask = cleaned > 0
                     else:
                         # If no background brightness, default to full ROI
-                        mask = np.ones(l_star.shape, dtype=bool)
+                        mask = np.ones(roi_l_star.shape, dtype=bool)
                     masks.append(mask)
                     created_any = True
                 except Exception as e:
@@ -2433,6 +2430,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     if not ret or frame is None:
                         continue
                     self.frame_cache.put(frame_idx, frame)
+                l_star_frame = self._compute_l_star_frame(frame)
 
                 # Calculate average brightness of all non-background ROIs
                 frame_brightness = 0.0
@@ -2450,7 +2448,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
                     if x2 > x1 and y2 > y1:
                         roi = frame[y1:y2, x1:x2]
-                        l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
+                        roi_l_star = l_star_frame[y1:y2, x1:x2]
+                        l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi, roi_l_star=roi_l_star)
                         frame_brightness += l_raw_mean
                         roi_count += 1
 
@@ -3134,8 +3133,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     blue_median_data = [lst[:frames_processed] for lst in blue_median_data]
                     break
 
+                # Pre-compute L* channel once per frame for reuse
+                l_star_frame = self._compute_l_star_frame(frame)
+
                 # Calculate background brightness for this frame
-                background_brightness = self._compute_background_brightness(frame)
+                background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
                 background_values_per_frame.append(background_brightness if background_brightness is not None else 0.0)
                 
                 fh, fw = frame.shape[:2]
@@ -3146,13 +3148,19 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
                     if x2 > x1 and y2 > y1:
                         roi = frame[y1:y2, x1:x2]
+                        roi_l_star = l_star_frame[y1:y2, x1:x2]
                         roi_mask = None
                         if self.use_fixed_mask and roi_idx < len(self.fixed_roi_masks):
                             roi_mask = self.fixed_roi_masks[roi_idx]
                             # Ensure shape matches current ROI, else ignore
                             if isinstance(roi_mask, np.ndarray) and roi_mask.shape[:2] != roi.shape[:2]:
                                 roi_mask = None
-                        l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(roi, background_brightness, roi_mask)
+                        l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(
+                            roi,
+                            background_brightness,
+                            roi_mask,
+                            roi_l_star=roi_l_star,
+                        )
                         # Store background-subtracted values if background ROI defined, otherwise raw values
                         if background_brightness is not None:
                             brightness_mean_data[data_idx].append(l_bg_sub_mean)
@@ -4091,7 +4099,22 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
         
         return confidence
 
-    def _compute_brightness_stats(self, roi_bgr: np.ndarray, background_brightness: Optional[float] = None, roi_mask: Optional[np.ndarray] = None) -> Tuple[float, float, float, float, float, float, float, float]:
+    def _compute_l_star_frame(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Convert a BGR frame to its L* channel (0-100) once for reuse across ROIs.
+        """
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l_chan = lab[:, :, 0].astype(np.float32)
+        np.multiply(l_chan, 100.0 / 255.0, out=l_chan)
+        return l_chan
+
+    def _compute_brightness_stats(
+        self,
+        roi_bgr: np.ndarray,
+        background_brightness: Optional[float] = None,
+        roi_mask: Optional[np.ndarray] = None,
+        roi_l_star: Optional[np.ndarray] = None,
+    ) -> Tuple[float, float, float, float, float, float, float, float]:
         """
         Calculates brightness statistics for an ROI with optional background subtraction.
 
@@ -4102,6 +4125,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             roi_bgr: The region of interest as a NumPy array (BGR format).
             background_brightness: Optional background L* value to subtract from all pixels.
             roi_mask: Optional boolean mask selecting pixels to analyze within ROI.
+            roi_l_star: Optional precomputed L* slice aligned with roi_bgr to avoid redundant conversions.
 
         Returns:
             Tuple of (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, 
@@ -4113,15 +4137,18 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
         try:
-            lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
-            l_chan = lab[:, :, 0].astype(np.float32)
+            if roi_l_star is None:
+                lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
+                l_chan = lab[:, :, 0].astype(np.float32)
+                l_star = l_chan * 100.0 / 255.0
+            else:
+                l_star = roi_l_star.astype(np.float32, copy=False)
 
             # If a fixed ROI mask is provided, use it directly
             if roi_mask is not None:
                 mask_bool = roi_mask.astype(bool)
                 if mask_bool.shape[:2] != roi_bgr.shape[:2] or not np.any(mask_bool):
                     return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-                l_star = l_chan * 100.0 / 255.0
                 blue_chan = roi_bgr[:, :, 0].astype(np.float32)
                 l_pixels = l_star[mask_bool]
                 b_pixels = blue_chan[mask_bool]
@@ -4142,9 +4169,6 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                     b_bg_sub_median = b_raw_median
                 return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
 
-            # Convert raw L to L* scale (0–100)
-            l_star = l_chan * 100.0 / 255.0
-            
             # Extract blue channel (BGR format, so blue is index 0)
             blue_chan = roi_bgr[:, :, 0].astype(np.float32)
 
@@ -4225,12 +4249,17 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             print(f"Error during brightness computation: {e}")
             return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
-    def _compute_background_brightness(self, frame: np.ndarray) -> Optional[float]:
+    def _compute_background_brightness(
+        self,
+        frame: np.ndarray,
+        frame_l_star: Optional[np.ndarray] = None,
+    ) -> Optional[float]:
         """
         Calculate background ROI brightness for current frame.
         
         Args:
             frame: Current video frame in BGR format
+            frame_l_star: Optional precomputed L* channel for the frame to avoid recomputation.
             
         Returns:
             90th percentile L* brightness of background ROI, or None if no background ROI defined
@@ -4243,17 +4272,21 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             
         try:
             pt1, pt2 = self.rects[self.background_roi_idx]
-            roi = frame[pt1[1]:pt2[1], pt1[0]:pt2[0]]
-            if roi.size == 0:
+            if frame_l_star is not None:
+                roi_l_star = frame_l_star[pt1[1]:pt2[1], pt1[0]:pt2[0]]
+            else:
+                roi = frame[pt1[1]:pt2[1], pt1[0]:pt2[0]]
+                if roi.size == 0:
+                    return None
+                lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+                l_chan = lab[:, :, 0].astype(np.float32)
+                roi_l_star = l_chan * 100.0 / 255.0
+
+            if roi_l_star.size == 0:
                 return None
-                
-            # Convert to LAB and get L* channel
-            lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-            l_chan = lab[:, :, 0].astype(np.float32)
-            l_star = l_chan * 100.0 / 255.0
-            
-            return float(np.percentile(l_star, self.background_percentile))
-            
+
+            return float(np.percentile(roi_l_star, self.background_percentile))
+
         except Exception as e:
             print(f"Error computing background brightness: {e}")
             return None
