@@ -48,11 +48,20 @@ The application gracefully disables these extras when the packages are absent.
 git clone [repository-url]
 cd ecl
 
+# (Recommended) create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
 # Install dependencies
 pip install -r requirements.txt
 
+# Optional: preflight import compilation
+python -m compileall ecl_analysis
+
 # Run the application
 python main.py
+# or launch with a video preloaded
+python main.py /path/to/video.mp4
 ```
 
 ## Usage
@@ -67,7 +76,7 @@ python main.py
 
 #### Navigation
 - **Arrow Keys**: Previous/Next frame
-- **Space**: Next frame
+- **Space**: Play/Pause video playback
 - **Backspace**: Previous frame
 - **Page Up/Down**: Jump 10 frames
 - **Home/End**: Go to first/last frame
@@ -127,10 +136,11 @@ Supported video formats:
 ## Configuration
 
 Settings are automatically saved to `brightness_analyzer_settings.json`:
-- Recent files list (up to 10 files)
-- Window geometry and preferences
-- Analysis parameters
+- Recent files list (up to 10 entries)
+- Audio feedback enabled/disabled flag
+- Audio volume level
 
+Window layout and analysis parameters are currently session-based and reset when you relaunch the app.
 ## Troubleshooting
 
 ### Common Issues
