@@ -3,7 +3,6 @@
 import json
 import logging
 import os
-import time
 from string import Template
 from typing import Dict, List, Optional, Tuple
 
@@ -13,6 +12,11 @@ import numpy as np
 import pandas as pd
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from .analysis_core import (
+    compute_background_brightness,
+    compute_brightness_stats,
+    compute_l_star_frame,
+)
 from .audio import AudioAnalyzer, AudioManager
 from .cache import FrameCache
 from .constants import (
@@ -45,6 +49,7 @@ from .constants import (
     ROI_THICKNESS_SELECTED,
 )
 from .dependencies import PLOTLY_AVAILABLE, go, make_subplots
+from .workers import AnalysisRequest, AnalysisResult, AnalysisWorker, AudioDetectionWorker
 
 
 def _hex_to_rgba(color: str, alpha: float) -> str:
@@ -106,6 +111,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Analysis state
         self._analysis_in_progress = False
+        self._audio_detection_in_progress = False
+        self._analysis_thread: Optional[QtCore.QThread] = None
+        self._analysis_worker: Optional[AnalysisWorker] = None
+        self._analysis_progress_dialog: Optional[QtWidgets.QProgressDialog] = None
+        self._audio_thread: Optional[QtCore.QThread] = None
+        self._audio_worker: Optional[AudioDetectionWorker] = None
+        self._audio_progress_dialog: Optional[QtWidgets.QProgressDialog] = None
+        self._analysis_output_dir: Optional[str] = None
+        self._pending_audio_expected_duration: float = 0.0
         
         # Settings
         self.settings = {}
@@ -1465,33 +1479,38 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _update_widget_states(self, video_loaded=False, rois_exist=False):
         """Enable/disable widgets based on application state."""
-        self.frame_slider.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.frame_spinbox.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.prev_frame_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.next_frame_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.jump_back_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.jump_forward_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.set_start_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.set_end_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.auto_detect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.analyze_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        busy = self._analysis_in_progress or self._audio_detection_in_progress
+        self.frame_slider.setEnabled(video_loaded and not busy)
+        self.frame_spinbox.setEnabled(video_loaded and not busy)
+        self.prev_frame_btn.setEnabled(video_loaded and not busy)
+        self.next_frame_btn.setEnabled(video_loaded and not busy)
+        self.jump_back_btn.setEnabled(video_loaded and not busy)
+        self.jump_forward_btn.setEnabled(video_loaded and not busy)
+        self.set_start_btn.setEnabled(video_loaded and not busy)
+        self.set_end_btn.setEnabled(video_loaded and not busy)
+        self.auto_detect_btn.setEnabled(video_loaded and not busy)
+        self.analyze_btn.setEnabled(video_loaded and rois_exist and not busy)
         
         # Playback controls
-        self.play_pause_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.speed_combo.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.add_rect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
-        self.clear_rect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
-        self.set_bg_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
-        self.set_bg_roi_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
-        self.threshold_spin.setEnabled(not self._analysis_in_progress)
+        self.play_pause_btn.setEnabled(video_loaded and not busy)
+        self.speed_combo.setEnabled(video_loaded and not busy)
+        self.add_rect_btn.setEnabled(video_loaded and not busy)
+        self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not busy)
+        self.clear_rect_btn.setEnabled(video_loaded and rois_exist and not busy)
+        self.set_bg_btn.setEnabled(video_loaded and rois_exist and not busy)
+        self.set_bg_roi_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not busy)
+        self.threshold_spin.setEnabled(not busy)
         # Fixed mask controls
         if hasattr(self, 'use_fixed_mask_checkbox'):
-            self.use_fixed_mask_checkbox.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+            self.use_fixed_mask_checkbox.setEnabled(video_loaded and rois_exist and not busy)
         if hasattr(self, 'capture_mask_btn'):
-            self.capture_mask_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+            self.capture_mask_btn.setEnabled(video_loaded and rois_exist and not busy)
         if hasattr(self, 'auto_brightest_mask_btn'):
-            self.auto_brightest_mask_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+            self.auto_brightest_mask_btn.setEnabled(video_loaded and rois_exist and not busy)
+
+    def _refresh_widget_states(self):
+        """Recompute widget enablement using current video/ROI availability."""
+        self._update_widget_states(video_loaded=self.video_path is not None, rois_exist=bool(self.rects))
 
     def _update_cache_status(self):
         """Update cache status display."""
@@ -1944,7 +1963,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Calculate background brightness if background ROI is defined
         if self.background_roi_idx is not None:
-            background_brightness = self._compute_background_brightness(self.frame)
+            background_brightness = compute_background_brightness(
+                self.frame,
+                self.rects,
+                self.background_roi_idx,
+                self.background_percentile,
+            )
         
         for idx, (pt1, pt2) in enumerate(self.rects):
             # Handle background ROI separately
@@ -1964,7 +1988,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     roi_mask = self.fixed_roi_masks[idx]
                     if isinstance(roi_mask, np.ndarray) and roi_mask.shape[:2] != roi.shape[:2]:
                         roi_mask = None
-                brightness_stats = self._compute_brightness_stats(roi, background_brightness, roi_mask)
+                brightness_stats = compute_brightness_stats(
+                    roi,
+                    self.morphological_kernel_size,
+                    self.noise_floor_threshold,
+                    background_brightness,
+                    roi_mask=roi_mask,
+                )
                 l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median = brightness_stats[:6]
                 roi_data.append((idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median))
             else:
@@ -1993,7 +2023,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 
                 if bg_x2 > bg_x1 and bg_y2 > bg_y1:
                     bg_roi = self.frame[bg_y1:bg_y2, bg_x1:bg_x2]
-                    _, _, _, _, bg_b_mean, _, _, _ = self._compute_brightness_stats(bg_roi)
+                    _, _, _, _, bg_b_mean, _, _, _ = compute_brightness_stats(
+                        bg_roi,
+                        self.morphological_kernel_size,
+                        self.noise_floor_threshold,
+                    )
                     display_lines.append(f"Background: L* {background_brightness:.1f} | Blue: {bg_b_mean:.0f}")
             
             self.brightness_display_label.setText("\n".join(display_lines))
@@ -2148,7 +2182,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 
                 if x2 > x1 and y2 > y1:
                     roi = self.frame[y1:y2, x1:x2]
-                    l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
+                    l_raw_mean, _, _, _, _, _, _, _ = compute_brightness_stats(
+                        roi,
+                        self.morphological_kernel_size,
+                        self.noise_floor_threshold,
+                    )
                     return l_raw_mean
         
         # If no background ROI or calculation failed, return manual threshold
@@ -2189,8 +2227,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         overlay = frame.copy()
 
         # Precompute L* for current frame and derive background brightness
-        l_star_frame = self._compute_l_star_frame(frame)
-        background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
+            l_star_frame = compute_l_star_frame(frame)
+            background_brightness = compute_background_brightness(
+                frame,
+                self.rects,
+                self.background_roi_idx,
+                self.background_percentile,
+                frame_l_star=l_star_frame,
+            )
         
         for roi_idx, (pt1, pt2) in enumerate(self.rects):
             # Skip background ROI
@@ -2264,8 +2308,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         frame = self.frame
         fh, fw = frame.shape[:2]
         # Determine background brightness once from current frame
-        l_star_frame = self._compute_l_star_frame(frame)
-        background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
+            l_star_frame = compute_l_star_frame(frame)
+            background_brightness = compute_background_brightness(
+                frame,
+                self.rects,
+                self.background_roi_idx,
+                self.background_percentile,
+                frame_l_star=l_star_frame,
+            )
         
         masks: List[Optional[np.ndarray]] = []
         created_any = False
@@ -2360,7 +2410,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     if not ret or frame is None:
                         continue
                     self.frame_cache.put(frame_idx, frame)
-                l_star_frame = self._compute_l_star_frame(frame)
+                l_star_frame = compute_l_star_frame(frame)
 
                 # Calculate average brightness of all non-background ROIs
                 frame_brightness = 0.0
@@ -2379,7 +2429,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     if x2 > x1 and y2 > y1:
                         roi = frame[y1:y2, x1:x2]
                         roi_l_star = l_star_frame[y1:y2, x1:x2]
-                        l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi, roi_l_star=roi_l_star)
+                        l_raw_mean, _, _, _, _, _, _, _ = compute_brightness_stats(
+                            roi,
+                            self.morphological_kernel_size,
+                            self.noise_floor_threshold,
+                            roi_l_star=roi_l_star,
+                        )
                         frame_brightness += l_raw_mean
                         roi_count += 1
 
@@ -2835,127 +2890,79 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._update_threshold_display() # Update threshold display after setting frames
 
     def auto_detect_range(self):
-        """
-        Analyzes video audio to detect completion beeps and calculates frame ranges 
-        using the expected run duration.
-        """
+        """Start asynchronous audio detection for completion beeps."""
+        if self._audio_detection_in_progress:
+            return
         if not self.video_path:
             self.results_label.setText("Load a video first.")
             return
-        
         if not self.audio_analyzer.available:
-            QtWidgets.QMessageBox.warning(self, "Audio Detection", 
-                "Audio analysis not available. Please install librosa:\npip install librosa soundfile")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Audio Detection",
+                "Audio analysis not available. Please install librosa:\\npip install librosa soundfile",
+            )
             return
-        
-        # Get expected run duration
+
         expected_duration = self.run_duration_spin.value()
         if expected_duration <= 0.0:
-            QtWidgets.QMessageBox.warning(self, "Audio Detection", 
-                "Please set an expected run duration (> 0 seconds) to calculate start frames from detected completion beeps.")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Audio Detection",
+                "Please set an expected run duration (> 0 seconds) to calculate start frames from detected completion beeps.",
+            )
             return
-        
-        # Show progress dialog
-        progress = QtWidgets.QProgressDialog("Analyzing audio for completion beeps...", "Cancel", 0, 0, self)
+
+        self._audio_detection_in_progress = True
+        self._pending_audio_expected_duration = float(expected_duration)
+        self._refresh_widget_states()
+
+        self.results_label.setText("🔊 Analyzing audio for completion beeps…")
+        self.statusBar().showMessage("Analyzing audio for completion beeps…")
+
+        progress = QtWidgets.QProgressDialog(
+            "Analyzing audio for completion beeps…",
+            "Cancel",
+            0,
+            0,
+            self,
+        )
         progress.setWindowModality(QtCore.Qt.WindowModal)
         progress.setWindowTitle("Audio Detection")
-        progress.setRange(0, 0)  # Indeterminate progress
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumDuration(0)
+        progress.setLabelText("Analyzing audio for completion beeps…")
         progress.show()
-        QtWidgets.QApplication.processEvents()
-        
-        try:
-            # Find completion beeps in the audio
-            completion_beeps = self.audio_analyzer.find_completion_beeps(self.video_path, expected_duration)
-            
-            progress.close()
-            
-            if not completion_beeps:
-                QtWidgets.QMessageBox.information(self, "Audio Detection", 
-                    "No completion beeps detected in the audio. Try adjusting the audio detection parameters or check if the video has audio.")
-                self.results_label.setText("Audio Detection: No completion beeps found.")
-                return
-            
-            # Show detected beeps to user for selection
-            if len(completion_beeps) == 1:
-                # Only one beep found, use it automatically
-                selected_beep_time, selected_end_frame = completion_beeps[0]
-            else:
-                # Multiple beeps found, let user choose
-                beep_options = []
-                for i, (beep_time, frame_num) in enumerate(completion_beeps):
-                    beep_options.append(f"Beep {i+1}: {beep_time:.1f}s (Frame {frame_num+1})")
-                
-                selected_option, ok = QtWidgets.QInputDialog.getItem(
-                    self, "Audio Detection", 
-                    f"Found {len(completion_beeps)} completion beeps. Select which one to use:",
-                    beep_options, 0, False)
-                
-                if not ok:
-                    self.results_label.setText("Audio Detection: User cancelled selection.")
-                    return
-                
-                # Get the selected beep
-                selected_index = beep_options.index(selected_option)
-                selected_beep_time, selected_end_frame = completion_beeps[selected_index]
-            
-            # Calculate start frame using run duration and video FPS
-            cap = cv2.VideoCapture(self.video_path)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            cap.release()
-            
-            if fps <= 0:
-                QtWidgets.QMessageBox.critical(self, "Error", "Could not determine video frame rate.")
-                return
-            
-            # Calculate start frame (work backwards from completion beep)
-            start_time = selected_beep_time - expected_duration
-            calculated_start_frame = max(0, int(start_time * fps))
-            
-            # Ensure we don't go beyond video bounds
-            calculated_end_frame = min(selected_end_frame, total_frames - 1)
-            calculated_start_frame = min(calculated_start_frame, calculated_end_frame)
-            
-            # Update UI with detected range
-            self.start_frame = calculated_start_frame
-            self.end_frame = calculated_end_frame
-            
-            # Update slider and spinbox to the new start frame, then seek
-            self.frame_slider.blockSignals(True)
-            self.frame_spinbox.blockSignals(True)
-            self.frame_slider.setValue(self.start_frame)
-            self.frame_spinbox.setValue(self.start_frame)
-            self.frame_slider.blockSignals(False)
-            self.frame_spinbox.blockSignals(False)
-            
-            self._seek_to_frame(self.start_frame)
-            self.update_frame_label()
-            
-            # Calculate actual duration for verification
-            actual_duration = (self.end_frame - self.start_frame + 1) / fps
-            
-            self.results_label.setText(
-                f"✅ Audio-detected range: Frame {self.start_frame + 1} to {self.end_frame + 1} "
-                f"(Duration: {actual_duration:.1f}s, Expected: {expected_duration:.1f}s)")
-            
-            # Play success sound if duration is close to expected
-            duration_difference = abs(actual_duration - expected_duration)
-            if duration_difference <= expected_duration * 0.1:  # Within 10%
-                self.audio_manager.play_run_detected()
-                
-        except Exception as e:
-            progress.close()
-            QtWidgets.QMessageBox.critical(self, "Audio Detection Error", 
-                f"An error occurred during audio analysis:\n{str(e)}")
-            self.results_label.setText(f"Audio Detection failed: {str(e)}")
-            logging.error(f"Audio detection error: {e}")
+        self._audio_progress_dialog = progress
 
+        thread = QtCore.QThread(self)
+        worker = AudioDetectionWorker(self.video_path, expected_duration)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.status.connect(self._on_audio_detection_status)
+        worker.finished.connect(self._on_audio_detection_finished)
+        worker.error.connect(self._on_audio_detection_error)
+        worker.cancelled.connect(self._on_audio_detection_cancelled)
+
+        worker.finished.connect(thread.quit)
+        worker.error.connect(lambda _error: thread.quit())
+        worker.cancelled.connect(thread.quit)
+
+        thread.finished.connect(self._on_audio_thread_finished)
+
+        progress.canceled.connect(worker.cancel)
+
+        self._audio_thread = thread
+        self._audio_worker = worker
+
+        thread.start()
 
     # --- Analysis and Plotting ---
 
     def analyze_video(self):
-        """Performs brightness analysis with enhanced progress tracking and error handling."""
-        # --- Preconditions ---
+        """Kick off brightness analysis on a background worker."""
         if not self.video_path:
             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Please load a video file first.")
             return
@@ -2963,177 +2970,343 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Please define at least one ROI.")
             return
         if self.start_frame is None or self.end_frame is None or self.start_frame > self.end_frame:
-             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Invalid start/end frame range selected.")
-             return
+            QtWidgets.QMessageBox.warning(self, "Analysis Error", "Invalid start/end frame range selected.")
+            return
+        if self._analysis_in_progress:
+            return
 
-        # Set analysis state
         self._analysis_in_progress = True
-        self.stop_playback()  # Stop playback during analysis
-        self._update_widget_states(video_loaded=True, rois_exist=True)
-        
-        # --- Get Save Directory ---
+        self.stop_playback()
+        self._refresh_widget_states()
+
         initial_dir = os.path.dirname(self.video_path) if self.video_path else ""
         save_dir = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Choose Directory to Save Analysis Results and Plots", initial_dir)
+            self,
+            "Choose Directory to Save Analysis Results and Plots",
+            initial_dir,
+        )
         if not save_dir:
             self.results_label.setText("Analysis cancelled (no save directory chosen).")
             self._analysis_in_progress = False
-            self._update_widget_states(video_loaded=True, rois_exist=True)
+            self._refresh_widget_states()
             return
 
-        # --- Setup ---
+        self._analysis_output_dir = save_dir
+        total_frames = int(self.end_frame - self.start_frame + 1)
+
         self.results_label.setText("⚙️ Initializing analysis...")
         self.brightness_display_label.setText("📊 Preparing...")
-
-        # Play analysis start sound
         self.audio_manager.play_analysis_start()
-        self.statusBar().showMessage("🔍 Starting brightness analysis...")
-        QtWidgets.QApplication.processEvents()
+        self.statusBar().showMessage("🔍 Starting brightness analysis…")
 
+        rects_snapshot = [(tuple(pt1), tuple(pt2)) for pt1, pt2 in self.rects]
+        masks_snapshot = []
+        for mask in self.fixed_roi_masks:
+            if isinstance(mask, np.ndarray):
+                masks_snapshot.append(mask.copy())
+            else:
+                masks_snapshot.append(None)
+        if len(masks_snapshot) < len(rects_snapshot):
+            masks_snapshot.extend([None] * (len(rects_snapshot) - len(masks_snapshot)))
+
+        request = AnalysisRequest(
+            video_path=self.video_path,
+            rects=rects_snapshot,
+            background_roi_idx=self.background_roi_idx,
+            start_frame=int(self.start_frame),
+            end_frame=int(self.end_frame),
+            use_fixed_mask=self.use_fixed_mask,
+            fixed_roi_masks=masks_snapshot,
+            background_percentile=self.background_percentile,
+            morphological_kernel_size=self.morphological_kernel_size,
+            noise_floor_threshold=self.noise_floor_threshold,
+        )
+
+        progress = QtWidgets.QProgressDialog(
+            f"🔍 Analyzing {total_frames} video frames…",
+            "Cancel",
+            0,
+            total_frames,
+            self,
+        )
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setWindowTitle("📊 Brightness Analysis")
+        progress.setMinimumWidth(400)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        progress.show()
+        self._analysis_progress_dialog = progress
+
+        thread = QtCore.QThread(self)
+        worker = AnalysisWorker(request)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.progress_changed.connect(self._on_analysis_progress_changed)
+        worker.progress_message.connect(self._on_analysis_progress_message)
+        worker.finished.connect(self._on_analysis_finished)
+        worker.error.connect(self._on_analysis_error)
+        worker.cancelled.connect(self._on_analysis_cancelled)
+
+        worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        worker.error.connect(lambda _error: thread.quit())
+
+        thread.finished.connect(self._on_analysis_thread_finished)
+
+        progress.canceled.connect(worker.cancel)
+
+        self._analysis_thread = thread
+        self._analysis_worker = worker
+
+        thread.start()
+
+    def _on_analysis_progress_changed(self, processed: int, total: int) -> None:
+        total_display = max(total, 1)
+        clamped_processed = max(0, min(processed, total_display))
+        if self._analysis_progress_dialog:
+            self._analysis_progress_dialog.setMaximum(total_display)
+            self._analysis_progress_dialog.setValue(clamped_processed)
+        self.statusBar().showMessage(f"Analyzing frame {clamped_processed}/{total_display}")
+
+    def _on_analysis_progress_message(self, message: str) -> None:
+        if self._analysis_progress_dialog:
+            self._analysis_progress_dialog.setLabelText(message)
+        self.statusBar().showMessage(message)
+
+    def _close_analysis_progress_dialog(self) -> None:
+        if self._analysis_progress_dialog is not None:
+            self._analysis_progress_dialog.close()
+            self._analysis_progress_dialog.deleteLater()
+            self._analysis_progress_dialog = None
+
+    def _reset_analysis_state(self) -> None:
+        self._analysis_in_progress = False
+        self._refresh_widget_states()
+
+    def _on_analysis_finished(self, result: AnalysisResult) -> None:
+        self._close_analysis_progress_dialog()
+        save_dir = self._analysis_output_dir
+        status_message = "Analysis complete."
         try:
-            analysis_cap = cv2.VideoCapture(self.video_path)
-            if not analysis_cap.isOpened():
-                raise Exception(f"Could not open video file for analysis: {os.path.basename(self.video_path)}")
-
-            # Frame range for analysis (inclusive)
-            start = self.start_frame
-            end = self.end_frame
-            num_frames_to_analyze = end - start + 1
-
-            # Data structure: list of lists for mean and median, one inner list per non-background ROI
-            non_background_rois = [i for i in range(len(self.rects)) if i != self.background_roi_idx]
-            brightness_mean_data = [[] for _ in non_background_rois]
-            brightness_median_data = [[] for _ in non_background_rois]
-            blue_mean_data = [[] for _ in non_background_rois]
-            blue_median_data = [[] for _ in non_background_rois]
-            background_values_per_frame = []  # Track background brightness for each frame
-
-            # --- Enhanced Progress Dialog ---
-            progress = QtWidgets.QProgressDialog(f"🔍 Analyzing {num_frames_to_analyze} video frames...\nROIs: {len(non_background_rois)} | Frames: {start+1}-{end+1}",
-                                                "Cancel", 0, num_frames_to_analyze, self)
-            progress.setWindowModality(QtCore.Qt.WindowModal)
-            progress.setWindowTitle("📊 Brightness Analysis")
-            progress.setMinimumWidth(400)
-            progress.setValue(0)
-            progress.show()
-            QtWidgets.QApplication.processEvents()
-
-            # --- Frame Processing Loop ---
-            analysis_cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-            analysis_cancelled = False
-            frames_processed = 0
-            start_time = time.time()
-
-            for f_idx in range(start, end + 1):
-                if progress.wasCanceled():
-                    analysis_cancelled = True
-                    break
-
-                ret, frame = analysis_cap.read()
-                if not ret:
-                    logging.warning(f"Could not read frame {f_idx} during analysis. Stopping analysis.")
-                    num_frames_to_analyze = frames_processed
-                    brightness_mean_data = [lst[:frames_processed] for lst in brightness_mean_data]
-                    brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
-                    blue_mean_data = [lst[:frames_processed] for lst in blue_mean_data]
-                    blue_median_data = [lst[:frames_processed] for lst in blue_median_data]
-                    break
-
-                # Pre-compute L* channel once per frame for reuse
-                l_star_frame = self._compute_l_star_frame(frame)
-
-                # Calculate background brightness for this frame
-                background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
-                background_values_per_frame.append(background_brightness if background_brightness is not None else 0.0)
-                
-                fh, fw = frame.shape[:2]
-                for data_idx, roi_idx in enumerate(non_background_rois):
-                    pt1, pt2 = self.rects[roi_idx]
-                    x1, y1 = max(0, pt1[0]), max(0, pt1[1])
-                    x2, y2 = min(fw - 1, pt2[0]), min(fh - 1, pt2[1])
-
-                    if x2 > x1 and y2 > y1:
-                        roi = frame[y1:y2, x1:x2]
-                        roi_l_star = l_star_frame[y1:y2, x1:x2]
-                        roi_mask = None
-                        if self.use_fixed_mask and roi_idx < len(self.fixed_roi_masks):
-                            roi_mask = self.fixed_roi_masks[roi_idx]
-                            # Ensure shape matches current ROI, else ignore
-                            if isinstance(roi_mask, np.ndarray) and roi_mask.shape[:2] != roi.shape[:2]:
-                                roi_mask = None
-                        l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median = self._compute_brightness_stats(
-                            roi,
-                            background_brightness,
-                            roi_mask,
-                            roi_l_star=roi_l_star,
-                        )
-                        # Store background-subtracted values if background ROI defined, otherwise raw values
-                        if background_brightness is not None:
-                            brightness_mean_data[data_idx].append(l_bg_sub_mean)
-                            brightness_median_data[data_idx].append(l_bg_sub_median)
-                            blue_mean_data[data_idx].append(b_bg_sub_mean)
-                            blue_median_data[data_idx].append(b_bg_sub_median)
-                        else:
-                            brightness_mean_data[data_idx].append(l_raw_mean)
-                            brightness_median_data[data_idx].append(l_raw_median)
-                            blue_mean_data[data_idx].append(b_raw_mean)
-                            blue_median_data[data_idx].append(b_raw_median)
-                    else:
-                        brightness_mean_data[data_idx].append(0.0)
-                        brightness_median_data[data_idx].append(0.0)
-                        blue_mean_data[data_idx].append(0.0)
-                        blue_median_data[data_idx].append(0.0)
-
-                frames_processed += 1
-                
-                # Update progress with time estimate
-                if frames_processed % 10 == 0:
-                    elapsed_time = time.time() - start_time
-                    if elapsed_time > 0:
-                        fps = frames_processed / elapsed_time
-                        remaining_frames = num_frames_to_analyze - frames_processed
-                        eta_seconds = remaining_frames / fps if fps > 0 else 0
-                        progress.setLabelText(f"🔍 Analyzing frame {frames_processed}/{num_frames_to_analyze}\n"
-                                            f"⚡ Speed: {fps:.1f} fps | ⏱️ ETA: {eta_seconds:.0f}s | 📊 ROIs: {len(non_background_rois)}")
-                    
-                progress.setValue(frames_processed)
-                QtWidgets.QApplication.processEvents()
-
-            analysis_cap.release()
-            progress.close()
-
-            if analysis_cancelled:
-                self.results_label.setText("Analysis cancelled by user.")
-                self._update_current_brightness_display()
+            if result.frames_processed == 0:
+                QtWidgets.QMessageBox.warning(self, "Analysis", "No frames were processed during analysis.")
+                self.results_label.setText("Analysis completed, but no frames processed.")
+                status_message = "Analysis completed with no frames."
+                return
+            if not save_dir:
+                QtWidgets.QMessageBox.critical(self, "Analysis Error", "No output directory available for results.")
+                self.results_label.setText("Analysis failed: No output directory available.")
+                status_message = "Analysis failed (missing output directory)."
                 return
 
-            if frames_processed == 0:
-                 QtWidgets.QMessageBox.warning(self, "Analysis", "No frames were processed during analysis.")
-                 self.results_label.setText("Analysis completed, but no frames processed.")
-                 self._update_current_brightness_display()
-                 return
+            self._save_analysis_results(
+                result.brightness_mean_data,
+                result.brightness_median_data,
+                result.blue_mean_data,
+                result.blue_median_data,
+                save_dir,
+                result.frames_processed,
+                result.non_background_rois,
+                result.background_values_per_frame,
+            )
 
-            # --- Save Results and Generate Plots ---
-            self._save_analysis_results(brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame)
-
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Analysis Error", f"An error occurred during analysis:\n{str(e)}")
-            self.results_label.setText(f"Analysis failed: {str(e)}")
-            logging.error(f"Analysis error: {e}")
-        finally:
-            self._analysis_in_progress = False
-            self._update_widget_states(video_loaded=True, rois_exist=True)
-            self.statusBar().showMessage("Analysis complete")
-            
-            # Play analysis completion sound
+            self.results_label.setText(
+                f"✅ Analysis complete: {result.frames_processed}/{result.total_frames} frames analyzed "
+                f"in {result.elapsed_seconds:.1f}s."
+            )
             self.audio_manager.play_analysis_complete()
-            
-            # Check run duration if specified
+
             expected_duration = self.run_duration_spin.value()
-            if expected_duration > 0.0 and self.start_frame is not None and self.end_frame is not None:
+            if (
+                expected_duration > 0.0
+                and self.start_frame is not None
+                and self.end_frame is not None
+            ):
                 confidence = self._validate_run_duration(self.start_frame, self.end_frame, expected_duration)
-                if confidence >= 0.8:  # High confidence threshold
+                if confidence >= 0.8:
                     self.audio_manager.play_run_detected()
+
+            status_message = f"Analysis complete in {result.elapsed_seconds:.1f}s."
+        except Exception as exc:  # pragma: no cover - GUI side-effect
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Analysis Error",
+                f"An error occurred while saving analysis results:\\n{exc}",
+            )
+            self.results_label.setText(f"Analysis failed while saving results: {exc}")
+            logging.exception("Analysis post-processing failed: %s", exc)
+            status_message = "Analysis failed during result saving."
+        finally:
+            self.statusBar().showMessage(status_message)
+            self._analysis_output_dir = None
+            self._reset_analysis_state()
+            self._update_current_brightness_display()
+
+    def _on_analysis_error(self, message: str) -> None:
+        self._close_analysis_progress_dialog()
+        QtWidgets.QMessageBox.critical(
+            self,
+            "Analysis Error",
+            f"An error occurred during analysis:\\n{message}",
+        )
+        self.results_label.setText(f"Analysis failed: {message}")
+        logging.error("Analysis error: %s", message)
+        self._analysis_output_dir = None
+        self._reset_analysis_state()
+        self._update_current_brightness_display()
+        self.statusBar().showMessage("Analysis failed.")
+
+    def _on_analysis_cancelled(self) -> None:
+        self._close_analysis_progress_dialog()
+        self.results_label.setText("Analysis cancelled by user.")
+        self._analysis_output_dir = None
+        self._reset_analysis_state()
+        self._update_current_brightness_display()
+        self.statusBar().showMessage("Analysis cancelled.")
+
+    def _on_analysis_thread_finished(self) -> None:
+        if self._analysis_worker is not None:
+            self._analysis_worker.deleteLater()
+            self._analysis_worker = None
+        if self._analysis_thread is not None:
+            self._analysis_thread.deleteLater()
+            self._analysis_thread = None
+
+    def _close_audio_progress_dialog(self) -> None:
+        if self._audio_progress_dialog is not None:
+            self._audio_progress_dialog.close()
+            self._audio_progress_dialog.deleteLater()
+            self._audio_progress_dialog = None
+
+    def _reset_audio_detection_state(self) -> None:
+        self._audio_detection_in_progress = False
+        self._refresh_widget_states()
+
+    def _on_audio_detection_status(self, message: str) -> None:
+        if self._audio_progress_dialog:
+            self._audio_progress_dialog.setLabelText(message)
+        self.statusBar().showMessage(message)
+
+    def _on_audio_detection_finished(self, beeps: List[Tuple[float, int]]) -> None:
+        self._close_audio_progress_dialog()
+        expected_duration = self._pending_audio_expected_duration
+        self._pending_audio_expected_duration = 0.0
+
+        if not beeps:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Audio Detection",
+                "No completion beeps detected in the audio. Try adjusting the detection parameters or verify the video has audio.",
+            )
+            self.results_label.setText("Audio Detection: No completion beeps found.")
+            self.statusBar().showMessage("Audio detection complete (no beeps found).")
+            self._reset_audio_detection_state()
+            return
+
+        status_message = "Audio detection complete."
+        try:
+            if len(beeps) == 1:
+                selected_beep_time, selected_end_frame = beeps[0]
+            else:
+                beep_options = [
+                    f"Beep {idx + 1}: {beep_time:.1f}s (Frame {frame_num + 1})"
+                    for idx, (beep_time, frame_num) in enumerate(beeps)
+                ]
+                selected_option, ok = QtWidgets.QInputDialog.getItem(
+                    self,
+                    "Audio Detection",
+                    f"Found {len(beeps)} completion beeps. Select which one to use:",
+                    beep_options,
+                    0,
+                    False,
+                )
+                if not ok:
+                    self.results_label.setText("Audio Detection: User cancelled selection.")
+                    status_message = "Audio detection cancelled."
+                    return
+                selected_index = beep_options.index(selected_option)
+                selected_beep_time, selected_end_frame = beeps[selected_index]
+
+            cap = cv2.VideoCapture(self.video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+
+            if fps <= 0:
+                QtWidgets.QMessageBox.critical(self, "Audio Detection Error", "Could not determine video frame rate.")
+                self.results_label.setText("Audio Detection failed: invalid video frame rate.")
+                status_message = "Audio detection failed (invalid frame rate)."
+                return
+
+            start_time = selected_beep_time - expected_duration
+            calculated_start_frame = max(0, int(start_time * fps))
+            calculated_end_frame = min(selected_end_frame, total_frames - 1)
+            calculated_start_frame = min(calculated_start_frame, calculated_end_frame)
+
+            self.start_frame = calculated_start_frame
+            self.end_frame = calculated_end_frame
+
+            self.frame_slider.blockSignals(True)
+            self.frame_spinbox.blockSignals(True)
+            self.frame_slider.setValue(self.start_frame)
+            self.frame_spinbox.setValue(self.start_frame)
+            self.frame_slider.blockSignals(False)
+            self.frame_spinbox.blockSignals(False)
+
+            self._seek_to_frame(self.start_frame)
+            self.update_frame_label()
+
+            actual_duration = (self.end_frame - self.start_frame + 1) / fps
+            self.results_label.setText(
+                f"✅ Audio-detected range: Frame {self.start_frame + 1} to {self.end_frame + 1} "
+                f"(Duration: {actual_duration:.1f}s, Expected: {expected_duration:.1f}s)"
+            )
+
+            duration_difference = abs(actual_duration - expected_duration)
+            if expected_duration > 0 and duration_difference <= expected_duration * 0.1:
+                self.audio_manager.play_run_detected()
+        except Exception as exc:  # pragma: no cover - GUI dialog path
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Audio Detection Error",
+                f"An error occurred during audio analysis:\\n{exc}",
+            )
+            self.results_label.setText(f"Audio Detection failed: {exc}")
+            logging.error("Audio detection error: %s", exc)
+            status_message = "Audio detection failed."
+        finally:
+            self.statusBar().showMessage(status_message)
+            self._reset_audio_detection_state()
+
+    def _on_audio_detection_error(self, message: str) -> None:
+        self._close_audio_progress_dialog()
+        QtWidgets.QMessageBox.critical(
+            self,
+            "Audio Detection Error",
+            f"An error occurred during audio analysis:\\n{message}",
+        )
+        self.results_label.setText(f"Audio Detection failed: {message}")
+        logging.error("Audio detection error: %s", message)
+        self._pending_audio_expected_duration = 0.0
+        self.statusBar().showMessage("Audio detection failed.")
+        self._reset_audio_detection_state()
+
+    def _on_audio_detection_cancelled(self) -> None:
+        self._close_audio_progress_dialog()
+        self.results_label.setText("Audio Detection: cancelled.")
+        self.statusBar().showMessage("Audio detection cancelled.")
+        self._pending_audio_expected_duration = 0.0
+        self._reset_audio_detection_state()
+
+    def _on_audio_thread_finished(self) -> None:
+        if self._audio_worker is not None:
+            self._audio_worker.deleteLater()
+            self._audio_worker = None
+        if self._audio_thread is not None:
+            self._audio_thread.deleteLater()
+            self._audio_thread = None
 
     def _save_analysis_results(self, brightness_mean_data, brightness_median_data, blue_mean_data, blue_median_data, save_dir, frames_processed, non_background_rois, background_values_per_frame):
         """Save analysis results and generate plots."""
@@ -4071,203 +4244,3 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             confidence = max(0.0, 1.0 - (duration_difference - tolerance) / max_difference)
         
         return confidence
-
-    def _compute_l_star_frame(self, frame: np.ndarray) -> np.ndarray:
-        """
-        Convert a BGR frame to its L* channel (0-100) once for reuse across ROIs.
-        """
-        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-        l_chan = lab[:, :, 0].astype(np.float32)
-        np.multiply(l_chan, 100.0 / 255.0, out=l_chan)
-        return l_chan
-
-    def _compute_brightness_stats(
-        self,
-        roi_bgr: np.ndarray,
-        background_brightness: Optional[float] = None,
-        roi_mask: Optional[np.ndarray] = None,
-        roi_l_star: Optional[np.ndarray] = None,
-    ) -> Tuple[float, float, float, float, float, float, float, float]:
-        """
-        Calculates brightness statistics for an ROI with optional background subtraction.
-
-        Converts BGR to CIE LAB color space and uses the L* channel.
-        Also extracts blue channel statistics for blue light analysis.
-
-        Args:
-            roi_bgr: The region of interest as a NumPy array (BGR format).
-            background_brightness: Optional background L* value to subtract from all pixels.
-            roi_mask: Optional boolean mask selecting pixels to analyze within ROI.
-            roi_l_star: Optional precomputed L* slice aligned with roi_bgr to avoid redundant conversions.
-
-        Returns:
-            Tuple of (l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, 
-                     b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median)
-            L* values in 0-100 range, Blue values in 0-255 range
-            or (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) if the ROI is invalid or calculation fails.
-        """
-        if roi_bgr is None or roi_bgr.size == 0:
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-
-        try:
-            if roi_l_star is None:
-                lab = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2LAB)
-                l_chan = lab[:, :, 0].astype(np.float32)
-                l_star = l_chan * 100.0 / 255.0
-            else:
-                l_star = roi_l_star.astype(np.float32, copy=False)
-
-            # If a fixed ROI mask is provided, use it directly
-            if roi_mask is not None:
-                mask_bool = roi_mask.astype(bool)
-                if mask_bool.shape[:2] != roi_bgr.shape[:2] or not np.any(mask_bool):
-                    return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-                blue_chan = roi_bgr[:, :, 0].astype(np.float32)
-                l_pixels = l_star[mask_bool]
-                b_pixels = blue_chan[mask_bool]
-                l_raw_mean = float(np.mean(l_pixels))
-                l_raw_median = float(np.median(l_pixels))
-                b_raw_mean = float(np.mean(b_pixels))
-                b_raw_median = float(np.median(b_pixels))
-                if background_brightness is not None:
-                    l_bg = l_pixels - background_brightness
-                    l_bg_sub_mean = float(np.mean(l_bg))
-                    l_bg_sub_median = float(np.median(l_bg))
-                    b_bg_sub_mean = b_raw_mean
-                    b_bg_sub_median = b_raw_median
-                else:
-                    l_bg_sub_mean = l_raw_mean
-                    l_bg_sub_median = l_raw_median
-                    b_bg_sub_mean = b_raw_mean
-                    b_bg_sub_median = b_raw_median
-                return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
-
-            # Extract blue channel (BGR format, so blue is index 0)
-            blue_chan = roi_bgr[:, :, 0].astype(np.float32)
-
-            # Calculate raw L* statistics (unthresholded)
-            l_raw_mean = float(np.mean(l_star))
-            l_raw_median = float(np.median(l_star))
-            
-            # Calculate raw blue statistics (unthresholded)
-            b_raw_mean = float(np.mean(blue_chan))
-            b_raw_median = float(np.median(blue_chan))
-            
-            # Calculate background-subtracted statistics if background provided
-            if background_brightness is not None:
-                # Filter pixels above background threshold, then subtract background
-                above_background_mask = l_star > background_brightness
-                
-                # Apply morphological operations to clean up the mask (remove noise/stray pixels)
-                if np.any(above_background_mask):
-                    # Create structuring element for morphological operations
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                                     (self.morphological_kernel_size, self.morphological_kernel_size))
-                    
-                    # Convert boolean mask to uint8 for morphological operations
-                    mask_uint8 = above_background_mask.astype(np.uint8) * 255
-                    
-                    # Apply opening (erosion followed by dilation) to remove small noise
-                    cleaned_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-                    
-                    # Convert back to boolean mask
-                    above_background_mask = cleaned_mask > 0
-                
-                if np.any(above_background_mask):
-                    # Apply additional noise floor filtering if enabled
-                    if self.noise_floor_threshold > 0:
-                        noise_floor_mask = l_star > self.noise_floor_threshold
-                        combined_mask = above_background_mask & noise_floor_mask
-                    else:
-                        combined_mask = above_background_mask
-
-                    if np.any(combined_mask):
-                        # Only analyze pixels above both background and noise floor thresholds
-                        filtered_l_pixels = l_star[combined_mask]
-                        filtered_b_pixels = blue_chan[combined_mask]
-                    else:
-                        # No pixels pass both filters
-                        l_bg_sub_mean = 0.0
-                        l_bg_sub_median = 0.0
-                        b_bg_sub_mean = 0.0
-                        b_bg_sub_median = 0.0
-                        return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
-                    
-                    # Background-subtracted L* statistics
-                    bg_subtracted_l_pixels = filtered_l_pixels - background_brightness
-                    l_bg_sub_mean = float(np.mean(bg_subtracted_l_pixels))
-                    l_bg_sub_median = float(np.median(bg_subtracted_l_pixels))
-                    
-                    # Blue channel statistics for masked pixels (no background subtraction for blue)
-                    b_bg_sub_mean = float(np.mean(filtered_b_pixels))
-                    b_bg_sub_median = float(np.median(filtered_b_pixels))
-                else:
-                    # No pixels above background - return 0
-                    l_bg_sub_mean = 0.0
-                    l_bg_sub_median = 0.0
-                    b_bg_sub_mean = 0.0
-                    b_bg_sub_median = 0.0
-            else:
-                l_bg_sub_mean = l_raw_mean
-                l_bg_sub_median = l_raw_median
-                b_bg_sub_mean = b_raw_mean
-                b_bg_sub_median = b_raw_median
-            
-            return l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median, b_bg_sub_mean, b_bg_sub_median
-
-        except cv2.error as e:
-            print(f"OpenCV error during brightness computation: {e}")
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        except Exception as e:
-            print(f"Error during brightness computation: {e}")
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-
-    def _compute_background_brightness(
-        self,
-        frame: np.ndarray,
-        frame_l_star: Optional[np.ndarray] = None,
-    ) -> Optional[float]:
-        """
-        Calculate background ROI brightness for current frame.
-        
-        Args:
-            frame: Current video frame in BGR format
-            frame_l_star: Optional precomputed L* channel for the frame to avoid recomputation.
-            
-        Returns:
-            90th percentile L* brightness of background ROI, or None if no background ROI defined
-        """
-        if self.background_roi_idx is None or frame is None:
-            return None
-            
-        if not (0 <= self.background_roi_idx < len(self.rects)):
-            return None
-            
-        try:
-            pt1, pt2 = self.rects[self.background_roi_idx]
-            if frame_l_star is not None:
-                roi_l_star = frame_l_star[pt1[1]:pt2[1], pt1[0]:pt2[0]]
-            else:
-                roi = frame[pt1[1]:pt2[1], pt1[0]:pt2[0]]
-                if roi.size == 0:
-                    return None
-                lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-                l_chan = lab[:, :, 0].astype(np.float32)
-                roi_l_star = l_chan * 100.0 / 255.0
-
-            if roi_l_star.size == 0:
-                return None
-
-            return float(np.percentile(roi_l_star, self.background_percentile))
-
-        except Exception as e:
-            print(f"Error computing background brightness: {e}")
-            return None
-
-    def _compute_brightness(self, roi_bgr: np.ndarray) -> float:
-        """
-        Legacy method for backward compatibility.
-        Returns only the mean brightness for existing code that expects a single value.
-        """
-        l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi_bgr)
-        return l_raw_mean
