@@ -1,5 +1,6 @@
 """Shared constants for the Brightness Sorcerer application."""
 
+APP_WINDOW_TITLE = "Brightness Sorcerer v2.0"
 DEFAULT_FONT_FAMILY = "Segoe UI, Arial, sans-serif"
 
 COLOR_BACKGROUND = "#1a1a1a"

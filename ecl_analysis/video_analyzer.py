@@ -16,6 +16,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from .audio import AudioAnalyzer, AudioManager
 from .cache import FrameCache
 from .constants import (
+    APP_WINDOW_TITLE,
     AUTO_DETECT_BASELINE_PERCENTILE,
     BRIGHTNESS_NOISE_FLOOR_PERCENTILE,
     COLOR_ACCENT,
@@ -170,7 +171,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _init_ui(self):
         """Set up the main UI layout and widgets."""
-        self.setWindowTitle('Brightness Sorcerer v2.0')
+        self.setWindowTitle(APP_WINDOW_TITLE)
         self.setGeometry(100, 100, 1400, 900)  # Larger default size
         self.setAcceptDrops(True)
         self._apply_stylesheet()
@@ -670,14 +671,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             QSpinBox::down-button {{
                 subcontrol-position: bottom right;
             }}
-            QSpinBox::up-arrow {{
-                image: url(./icons/arrow_up.png); /* Requires icon files */
-                width: 10px; height: 10px;
-            }}
-            QSpinBox::down-arrow {{
-                image: url(./icons/arrow_down.png); /* Requires icon files */
-                 width: 10px; height: 10px;
-            }}
+            /* Default platform-provided spin box arrows (no custom icons). */
             QProgressDialog {{
                  font-size: 14px;
             }}
@@ -711,7 +705,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
                            stop: 0 {COLOR_ACCENT_HOVER}, stop: 1 {COLOR_ACCENT});
                 border: 2px solid #8fc8ff;
-                transform: scale(1.05);
             }}
             QPushButton#playButton:pressed {{
                 background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
@@ -1672,9 +1665,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.playback_fps = 30.0  # Default fallback
             
         if self.total_frames <= 0:
-             QtWidgets.QMessageBox.warning(self, 'Warning', 'Video file appears to have no frames.')
-             self._reset_state()
-             return
+            QtWidgets.QMessageBox.warning(self, 'Warning', 'Video file appears to have no frames.')
+            self._reset_state()
+            return
 
         # Clear cache when loading new video
         self.frame_cache.clear()
