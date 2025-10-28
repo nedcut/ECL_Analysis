@@ -4,8 +4,7 @@ import json
 import logging
 import os
 import time
-import warnings
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import matplotlib.pyplot as plt
@@ -31,16 +30,12 @@ from .constants import (
     COLOR_WARNING,
     DEFAULT_FONT_FAMILY,
     DEFAULT_MANUAL_THRESHOLD,
-    DEFAULT_PEAK_MIN_DISTANCE,
-    DEFAULT_PEAK_PROMINENCE_RATIO,
-    DEFAULT_PEAK_WINDOW,
     DEFAULT_SETTINGS_FILE,
     FRAME_CACHE_SIZE,
     JUMP_FRAMES,
     MAX_RECENT_FILES,
     MORPHOLOGICAL_KERNEL_SIZE,
     MOUSE_RESIZE_HANDLE_SENSITIVITY,
-    PEAK_POLY_DEGREE,
     ROI_COLORS,
     ROI_LABEL_FONT_SCALE,
     ROI_LABEL_THICKNESS,
@@ -48,7 +43,6 @@ from .constants import (
     ROI_THICKNESS_SELECTED,
 )
 from .dependencies import PLOTLY_AVAILABLE, go, make_subplots
-
 
 class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better menu support
     """Main application window for video brightness analysis."""
@@ -117,11 +111,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.background_percentile = 90.0  # For background ROI threshold calculation
         self.noise_floor_threshold = 0.0   # Additional noise floor filtering
 
-        # Peak detection parameters (adjustable via UI)
-        self.peak_detection_window = DEFAULT_PEAK_WINDOW
-        self.peak_detection_prominence = DEFAULT_PEAK_PROMINENCE_RATIO
-        self.peak_detection_min_distance = DEFAULT_PEAK_MIN_DISTANCE
-        
         # Video playback
         self.is_playing = False
         self.playback_timer = QtCore.QTimer()
@@ -142,20 +131,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     self.audio_manager.set_enabled(audio_enabled)
                     self.audio_manager.set_volume(audio_volume)
 
-                    # Load peak detection settings
-                    self.peak_detection_window = int(self.settings.get('peak_detection_window', DEFAULT_PEAK_WINDOW))
-                    min_window = max(PEAK_POLY_DEGREE + 2, 5)
-                    if self.peak_detection_window < min_window:
-                        self.peak_detection_window = min_window
-                    if self.peak_detection_window % 2 == 0:
-                        self.peak_detection_window += 1
-                    self.peak_detection_prominence = float(
-                        self.settings.get('peak_detection_prominence', DEFAULT_PEAK_PROMINENCE_RATIO)
-                    )
-                    self.peak_detection_prominence = max(0.0, min(1.0, self.peak_detection_prominence))
-                    self.peak_detection_min_distance = float(
-                        self.settings.get('peak_detection_min_distance', DEFAULT_PEAK_MIN_DISTANCE)
-                    )
         except Exception as e:
             logging.warning(f"Could not load settings: {e}")
             self.settings = {}
@@ -167,10 +142,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.settings['recent_files'] = self.recent_files
             self.settings['audio_enabled'] = self.audio_manager.enabled
             self.settings['audio_volume'] = self.audio_manager.volume
-            # Persist peak detection parameters
-            self.settings['peak_detection_window'] = int(self.peak_detection_window)
-            self.settings['peak_detection_prominence'] = float(self.peak_detection_prominence)
-            self.settings['peak_detection_min_distance'] = float(self.peak_detection_min_distance)
             with open(DEFAULT_SETTINGS_FILE, 'w') as f:
                 json.dump(self.settings, f, indent=2)
         except Exception as e:
@@ -1351,50 +1322,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         noise_groupbox.setLayout(noise_layout)
         viz_layout.addWidget(noise_groupbox)
 
-        # Peak detection controls
-        peak_groupbox = QtWidgets.QGroupBox("Peak Detection")
-        peak_layout = QtWidgets.QVBoxLayout()
-
-        window_layout = QtWidgets.QHBoxLayout()
-        window_layout.addWidget(QtWidgets.QLabel("Window Size:"))
-        self.peak_window_spin = QtWidgets.QSpinBox()
-        min_window = max(PEAK_POLY_DEGREE + 2, 5)
-        self.peak_window_spin.setRange(min_window, 501)
-        self.peak_window_spin.setSingleStep(2)
-        if self.peak_detection_window % 2 == 0:
-            self.peak_detection_window += 1
-        self.peak_window_spin.setValue(self.peak_detection_window)
-        self.peak_window_spin.setToolTip("Frames used per cubic fit. Must be an odd number larger than the polynomial degree.")
-        window_layout.addWidget(self.peak_window_spin)
-        peak_layout.addLayout(window_layout)
-
-        prominence_layout = QtWidgets.QHBoxLayout()
-        prominence_layout.addWidget(QtWidgets.QLabel("Min Prominence:"))
-        self.peak_prominence_spin = QtWidgets.QDoubleSpinBox()
-        self.peak_prominence_spin.setRange(0.0, 1.0)
-        self.peak_prominence_spin.setSingleStep(0.01)
-        self.peak_prominence_spin.setDecimals(3)
-        self.peak_prominence_spin.setValue(self.peak_detection_prominence)
-        self.peak_prominence_spin.setToolTip("Fraction of the signal's dynamic range a peak must exceed to be kept.")
-        prominence_layout.addWidget(self.peak_prominence_spin)
-        peak_layout.addLayout(prominence_layout)
-
-        distance_layout = QtWidgets.QHBoxLayout()
-        distance_layout.addWidget(QtWidgets.QLabel("Min Distance:"))
-        self.peak_distance_spin = QtWidgets.QDoubleSpinBox()
-        self.peak_distance_spin.setRange(0.0, 2000.0)
-        self.peak_distance_spin.setSingleStep(1.0)
-        self.peak_distance_spin.setDecimals(1)
-        self.peak_distance_spin.setValue(self.peak_detection_min_distance)
-        self.peak_distance_spin.setSpecialValueText("Auto")
-        self.peak_distance_spin.setToolTip("Minimum frame spacing between peaks (set to 0 for automatic scaling).")
-        distance_layout.addWidget(self.peak_distance_spin)
-        distance_layout.addWidget(QtWidgets.QLabel("frames"))
-        peak_layout.addLayout(distance_layout)
-
-        peak_groupbox.setLayout(peak_layout)
-        viz_layout.addWidget(peak_groupbox)
-
         self.viz_groupbox.setLayout(viz_layout)
 
         # Rectangle Controls
@@ -1529,9 +1456,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.kernel_size_slider.valueChanged.connect(self._on_kernel_size_changed)
         self.bg_percentile_slider.valueChanged.connect(self._on_bg_percentile_changed)
         self.noise_floor_slider.valueChanged.connect(self._on_noise_floor_changed)
-        self.peak_window_spin.valueChanged.connect(self._on_peak_window_changed)
-        self.peak_prominence_spin.valueChanged.connect(self._on_peak_prominence_changed)
-        self.peak_distance_spin.valueChanged.connect(self._on_peak_distance_changed)
 
     def _update_widget_states(self, video_loaded=False, rois_exist=False):
         """Enable/disable widgets based on application state."""
@@ -2507,30 +2431,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             self.show_frame()
 
-    def _on_peak_window_changed(self, value: int):
-        """Ensure the peak detection window stays odd and within bounds."""
-        min_window = self.peak_window_spin.minimum()
-        adjusted_value = max(value, min_window)
-        if adjusted_value % 2 == 0:
-            if adjusted_value >= self.peak_detection_window:
-                adjusted_value += 1
-            else:
-                adjusted_value = max(min_window, adjusted_value - 1)
-            if adjusted_value % 2 == 0:
-                adjusted_value += 1
-            self.peak_window_spin.blockSignals(True)
-            self.peak_window_spin.setValue(adjusted_value)
-            self.peak_window_spin.blockSignals(False)
-        self.peak_detection_window = max(self.peak_window_spin.value(), min_window)
-
-    def _on_peak_prominence_changed(self, value: float):
-        """Update minimum prominence ratio for peak detection."""
-        self.peak_detection_prominence = max(0.0, min(1.0, float(value)))
-
-    def _on_peak_distance_changed(self, value: float):
-        """Update minimum peak separation in frame units (0 = auto)."""
-        self.peak_detection_min_distance = max(0.0, float(value))
-
     # --- Mouse Interaction on Image Label ---
 
     def image_mouse_press(self, event: QtGui.QMouseEvent):
@@ -3324,149 +3224,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.results_label.setText("\n".join(summary_lines))
         self.brightness_display_label.setText(", ".join(avg_brightness_summary) if avg_brightness_summary else "N/A")
 
-    def _detect_local_cubic_maxima(
-        self,
-        frames: Union[np.ndarray, List[float]],
-        values: Union[np.ndarray, List[float]],
-        window_size: int = DEFAULT_PEAK_WINDOW,
-        degree: int = PEAK_POLY_DEGREE,
-        min_prominence_ratio: float = DEFAULT_PEAK_PROMINENCE_RATIO,
-        min_distance: Optional[float] = None
-    ) -> List[Tuple[float, float]]:
-        """
-        Detect local maxima by fitting sliding-window polynomials and locating derivative zeros.
-
-        Args:
-            frames: Monotonic sequence of x-axis locations (typically frame numbers).
-            values: Sequence of y values for which local maxima should be detected.
-            window_size: Number of samples to include in each local fit (must be >= degree + 1).
-            degree: Polynomial degree used for the local fits (3 gives cubic behaviour).
-            min_prominence_ratio: Fraction of the global value range that a candidate peak must exceed.
-            min_distance: Minimum horizontal distance (in frame units) between accepted peaks. Defaults
-                          to half the window size scaled by the frame spacing.
-
-        Returns:
-            List of (x, y) tuples for each detected local maximum.
-        """
-        if frames is None or values is None:
-            return []
-
-        x_arr = np.asarray(frames, dtype=np.float64)
-        y_arr = np.asarray(values, dtype=np.float64)
-
-        if x_arr.size == 0 or y_arr.size == 0:
-            return []
-
-        # Drop NaNs and ensure data is ordered by frame number
-        valid_mask = np.isfinite(x_arr) & np.isfinite(y_arr)
-        if not np.any(valid_mask):
-            return []
-        x_arr = x_arr[valid_mask]
-        y_arr = y_arr[valid_mask]
-
-        sort_idx = np.argsort(x_arr)
-        x_arr = x_arr[sort_idx]
-        y_arr = y_arr[sort_idx]
-
-        if x_arr.size <= degree:
-            return []
-
-        # Normalise window configuration
-        if window_size < degree + 1:
-            window_size = degree + 1
-        max_window = x_arr.size if x_arr.size % 2 == 1 else x_arr.size - 1
-        window_size = min(window_size, max_window)
-        if window_size % 2 == 0:
-            window_size -= 1
-        if window_size < degree + 1 or window_size < 3:
-            return []
-
-        half_window = window_size // 2
-
-        # Determine minimal separation in frame units between reported peaks
-        if min_distance is None:
-            if x_arr.size > 1:
-                frame_spacing = float(np.median(np.diff(x_arr)))
-            else:
-                frame_spacing = 1.0
-            min_distance = frame_spacing * max(half_window // 2, 1)
-
-        value_range = float(np.nanmax(y_arr) - np.nanmin(y_arr))
-        min_prominence = value_range * min_prominence_ratio
-        if not np.isfinite(min_prominence) or min_prominence < 0:
-            min_prominence = 0.0
-
-        candidates: List[Tuple[float, float]] = []
-
-        for center_idx in range(half_window, x_arr.size - half_window):
-            start = center_idx - half_window
-            end = center_idx + half_window + 1
-            x_window = x_arr[start:end]
-            y_window = y_arr[start:end]
-
-            if x_window.size <= degree:
-                continue
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", np.RankWarning)
-                try:
-                    coeffs = np.polyfit(x_window, y_window, degree)
-                except (np.linalg.LinAlgError, ValueError):
-                    continue
-
-            # First derivative coefficients and its roots
-            derivative_coeffs = np.polyder(coeffs)
-            derivative_roots = np.roots(derivative_coeffs)
-
-            if derivative_roots.size == 0:
-                continue
-
-            second_derivative_coeffs = np.polyder(derivative_coeffs)
-            local_baseline = float(np.percentile(y_window, 30))
-
-            for root in derivative_roots:
-                if not np.isfinite(root):
-                    continue
-                if np.iscomplex(root):
-                    if abs(root.imag) > 1e-6:
-                        continue
-                    root = root.real
-
-                root = float(root)
-                if root < x_window[0] or root > x_window[-1]:
-                    continue
-
-                second_derivative = float(np.polyval(second_derivative_coeffs, root))
-                if second_derivative >= 0:
-                    continue  # Not a local maximum
-
-                peak_value = float(np.polyval(coeffs, root))
-                if peak_value - local_baseline < min_prominence:
-                    continue
-
-                candidates.append((root, peak_value))
-
-        if not candidates:
-            return []
-
-        # Sort and merge nearby peaks to avoid multiple detections of the same maxima
-        candidates.sort(key=lambda pair: pair[0])
-        merged: List[Tuple[float, float]] = []
-
-        for peak_x, peak_y in candidates:
-            if not merged:
-                merged.append((peak_x, peak_y))
-                continue
-
-            prev_x, prev_y = merged[-1]
-            if abs(peak_x - prev_x) <= min_distance:
-                if peak_y > prev_y:
-                    merged[-1] = (peak_x, peak_y)
-            else:
-                merged.append((peak_x, peak_y))
-
-        return merged
-
     def _generate_enhanced_plot(self, df, base_filename, save_dir, r_idx, analysis_name, base_video_name, background_values_per_frame):
         """Generate enhanced plots and an interactive visualization for the ROI."""
         png_path: Optional[str] = None
@@ -3509,37 +3266,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             blue_mean_values = blue_mean.tolist()
             blue_median_values = blue_median.tolist()
 
-            # Detect additional local maxima beyond the global peak positions
-            brightness_local_peaks = self._detect_local_cubic_maxima(
-                frames.to_numpy(),
-                brightness_mean.to_numpy(),
-                window_size=self.peak_detection_window,
-                degree=PEAK_POLY_DEGREE,
-                min_prominence_ratio=self.peak_detection_prominence,
-                min_distance=self.peak_detection_min_distance if self.peak_detection_min_distance > 0 else None,
-            )
-            brightness_local_peaks = [
-                (px, py) for px, py in brightness_local_peaks
-                if abs(px - frame_peak_mean) > 1.0 and abs(px - frame_peak_median) > 1.0
-            ]
-            brightness_local_frames = [float(px) for px, _ in brightness_local_peaks]
-            brightness_local_values = [float(py) for _, py in brightness_local_peaks]
-
-            blue_local_peaks = self._detect_local_cubic_maxima(
-                frames.to_numpy(),
-                blue_mean.to_numpy(),
-                window_size=self.peak_detection_window,
-                degree=PEAK_POLY_DEGREE,
-                min_prominence_ratio=self.peak_detection_prominence,
-                min_distance=self.peak_detection_min_distance if self.peak_detection_min_distance > 0 else None,
-            )
-            blue_local_peaks = [
-                (px, py) for px, py in blue_local_peaks
-                if abs(px - frame_peak_blue_mean) > 1.0 and abs(px - frame_peak_blue_median) > 1.0
-            ]
-            blue_local_frames = [float(px) for px, _ in blue_local_peaks]
-            blue_local_values = [float(py) for _, py in blue_local_peaks]
-
             background_array: Optional[np.ndarray] = None
             if background_values_per_frame and len(background_values_per_frame) == len(frames):
                 candidate_background = np.array(background_values_per_frame)
@@ -3577,16 +3303,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                         marker='^', label=f'Peak Mean ({val_peak_mean:.1f})')
             ax1.scatter([frame_peak_median], [val_peak_median], color='#ed7d31', zorder=5, s=100, 
                         marker='v', label=f'Peak Median ({val_peak_median:.1f})')
-            if brightness_local_frames:
-                ax1.scatter(
-                    brightness_local_frames,
-                    brightness_local_values,
-                    color='#fbbf24',
-                    marker='X',
-                    s=70,
-                    zorder=6,
-                    label='Local Mean Peaks'
-                )
 
             ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
             ax1.set_ylabel('L* Brightness', fontsize=12)
@@ -3631,16 +3347,6 @@ Frames Analyzed: {len(frames)}"""
                         marker='^', label=f'Peak Blue Mean ({val_peak_blue_mean:.1f})')
             ax2.scatter([frame_peak_blue_median], [val_peak_blue_median], color='#ed7d31', zorder=5, s=100, 
                         marker='v', label=f'Peak Blue Median ({val_peak_blue_median:.1f})')
-            if blue_local_frames:
-                ax2.scatter(
-                    blue_local_frames,
-                    blue_local_values,
-                    color='#ffbf54',
-                    marker='X',
-                    s=70,
-                    zorder=6,
-                    label='Local Blue Peaks'
-                )
             
             ax2.set_xlabel('Frame Number', fontsize=12)
             ax2.set_ylabel('Blue Channel Value', fontsize=12)
@@ -3817,19 +3523,23 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         row=1,
                         col=1
                     )
-                    if brightness_local_frames:
-                        fig_interactive.add_trace(
-                            go.Scatter(
-                                x=brightness_local_frames,
-                                y=brightness_local_values,
-                                mode='markers',
-                                name='Local Mean Peaks',
-                                marker=dict(color='#fbbf24', size=9, symbol='x'),
-                                hovertemplate="Frame %{x:.2f}<br>Local Mean Peak: %{y:.2f}<extra></extra>"
+                    fig_interactive.add_trace(
+                        go.Scatter(
+                            x=[frame_peak_mean],
+                            y=[val_peak_mean],
+                            mode='markers',
+                            name='Selected Range Peak (L*)',
+                            marker=dict(
+                                color=COLOR_WARNING,
+                                size=14,
+                                symbol='star',
+                                line=dict(color='#92400e', width=1.2)
                             ),
-                            row=1,
-                            col=1
-                        )
+                            hovertemplate="Frame %{x}<br>Selected L* Peak: %{y:.2f}<extra></extra>"
+                        ),
+                        row=1,
+                        col=1
+                    )
 
                     # Horizontal averages
                     fig_interactive.add_trace(
@@ -3969,19 +3679,23 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         row=2,
                         col=1
                     )
-                    if blue_local_frames:
-                        fig_interactive.add_trace(
-                            go.Scatter(
-                                x=blue_local_frames,
-                                y=blue_local_values,
-                                mode='markers',
-                                name='Local Blue Peaks',
-                                marker=dict(color='#ffbf54', size=9, symbol='x'),
-                                hovertemplate="Frame %{x:.2f}<br>Local Blue Peak: %{y:.2f}<extra></extra>"
+                    fig_interactive.add_trace(
+                        go.Scatter(
+                            x=[frame_peak_blue_mean],
+                            y=[val_peak_blue_mean],
+                            mode='markers',
+                            name='Selected Range Peak (Blue)',
+                            marker=dict(
+                                color=COLOR_INFO,
+                                size=14,
+                                symbol='star',
+                                line=dict(color='#0e7490', width=1.2)
                             ),
-                            row=2,
-                            col=1
-                        )
+                            hovertemplate="Frame %{x}<br>Selected Blue Peak: %{y:.2f}<extra></extra>"
+                        ),
+                        row=2,
+                        col=1
+                    )
 
                     # Blue channel averages
                     fig_interactive.add_trace(
@@ -4013,10 +3727,15 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                     fig_interactive.update_layout(
                         title=f"{analysis_name} - {base_video_name} - ROI {r_idx+1}",
                         height=820,
+                        dragmode='select',
+                        selectdirection='h',
                         hovermode='x unified',
                         template='plotly_white',
                         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1.0),
-                        margin=dict(t=80, b=60, l=60, r=30)
+                        margin=dict(t=80, b=60, l=60, r=30),
+                        newselection=dict(
+                            line=dict(color=COLOR_ACCENT, width=2)
+                        )
                     )
                     fig_interactive.update_xaxes(title_text="Frame Number", row=2, col=1)
                     fig_interactive.update_yaxes(title_text="L* Brightness", row=1, col=1)
@@ -4043,7 +3762,19 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         borderpad=6
                     )
 
-                    fig_interactive.write_html(interactive_save_path, include_plotlyjs='cdn')
+                    div_id = f"roi-interactive-{r_idx+1}"
+                    selection_script = self._build_selection_post_script(
+                        div_id=div_id,
+                        frames=frame_list,
+                        brightness_values=brightness_mean_values,
+                        blue_values=blue_mean_values,
+                    )
+                    fig_interactive.write_html(
+                        interactive_save_path,
+                        include_plotlyjs='cdn',
+                        div_id=div_id,
+                        post_script=selection_script,
+                    )
                     interactive_path = interactive_save_path
                     self.out_paths.append(interactive_save_path)
 
@@ -4062,6 +3793,159 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
         except Exception as e:
             logging.error(f"Failed to generate plot for ROI {r_idx+1}: {e}")
             raise
+
+    def _build_selection_post_script(
+        self,
+        div_id: str,
+        frames: List[float],
+        brightness_values: List[float],
+        blue_values: List[float],
+    ) -> str:
+        """Generate a JS snippet that highlights peaks inside the active brush selection."""
+        frames_json = json.dumps(frames)
+        brightness_json = json.dumps(brightness_values)
+        blue_json = json.dumps(blue_values)
+        font_family = DEFAULT_FONT_FAMILY.replace("\\", "\\\\").replace("'", "\\'")
+
+        return (
+            f"(function() {{\n"
+            f"  const divId = '{div_id}';\n"
+            f"  const frames = {frames_json};\n"
+            f"  const brightnessValues = {brightness_json};\n"
+            f"  const blueValues = {blue_json};\n"
+            f"  const fontFamily = '{font_family}';\n\n"
+            f"  const createSelectionEnhancements = () => {{\n"
+            f"    const gd = document.getElementById(divId);\n"
+            f"    if (!gd || gd.__selectionInitialized) {{\n"
+            f"      return;\n"
+            f"    }}\n\n"
+            f"    const initialiseWhenReady = () => {{\n"
+            f"      if (typeof Plotly === 'undefined') {{\n"
+            f"        return false;\n"
+            f"      }}\n"
+            f"      if (!gd.data || !gd.data.length) {{\n"
+            f"        return false;\n"
+            f"      }}\n\n"
+            f"      const selectedMeanIndex = gd.data.findIndex(trace => trace.name === 'Selected Range Peak (L*)');\n"
+            f"      const selectedBlueIndex = gd.data.findIndex(trace => trace.name === 'Selected Range Peak (Blue)');\n"
+            f"      if (selectedMeanIndex === -1 || selectedBlueIndex === -1) {{\n"
+            f"        return false;\n"
+            f"      }}\n\n"
+            f"      gd.__selectionInitialized = true;\n\n"
+            f"      const infoPanel = document.createElement('div');\n"
+            f"      infoPanel.className = 'selection-info';\n"
+            f"      infoPanel.style.marginTop = '12px';\n"
+            f"      infoPanel.style.fontFamily = fontFamily;\n"
+            f"      infoPanel.style.fontSize = '14px';\n"
+            f"      infoPanel.style.color = '#1f2937';\n"
+            f"      infoPanel.style.background = 'rgba(255,255,255,0.92)';\n"
+            f"      infoPanel.style.border = '1px solid #e5e7eb';\n"
+            f"      infoPanel.style.borderRadius = '8px';\n"
+            f"      infoPanel.style.padding = '8px 12px';\n"
+            f"      infoPanel.style.boxShadow = '0 1px 3px rgba(15,23,42,0.12)';\n"
+            f"      infoPanel.style.display = 'inline-block';\n"
+            f"      if (gd.parentNode) {{\n"
+            f"        gd.parentNode.insertBefore(infoPanel, gd.nextSibling);\n"
+            f"      }}\n\n"
+            f"      const normaliseRange = (range) => {{\n"
+            f"        if (!Array.isArray(range) || range.length < 2) {{\n"
+            f"          return [frames[0], frames[frames.length - 1]];\n"
+            f"        }}\n"
+            f"        const start = Number(range[0]);\n"
+            f"        const end = Number(range[1]);\n"
+            f"        if (!Number.isFinite(start) || !Number.isFinite(end)) {{\n"
+            f"          return [frames[0], frames[frames.length - 1]];\n"
+            f"        }}\n"
+            f"        return start <= end ? [start, end] : [end, start];\n"
+            f"      }};\n\n"
+            f"      const findPeakIndex = (range, values) => {{\n"
+            f"        let candidate = -1;\n"
+            f"        let maxValue = -Infinity;\n"
+            f"        for (let i = 0; i < frames.length; i += 1) {{\n"
+            f"          const frame = frames[i];\n"
+            f"          if (frame >= range[0] && frame <= range[1]) {{\n"
+            f"            const value = values[i];\n"
+            f"            if (value > maxValue) {{\n"
+            f"              maxValue = value;\n"
+            f"              candidate = i;\n"
+            f"            }}\n"
+            f"          }}\n"
+            f"        }}\n"
+            f"        if (candidate !== -1) {{\n"
+            f"          return candidate;\n"
+            f"        }}\n"
+            f"        let bestDistance = Infinity;\n"
+            f"        for (let i = 0; i < frames.length; i += 1) {{\n"
+            f"          const frame = frames[i];\n"
+            f"          const distance = frame < range[0] ? range[0] - frame : frame > range[1] ? frame - range[1] : 0;\n"
+            f"          if (distance < bestDistance) {{\n"
+            f"            bestDistance = distance;\n"
+            f"            candidate = i;\n"
+            f"          }}\n"
+            f"        }}\n"
+            f"        return candidate;\n"
+            f"      }};\n\n"
+            f"      const updateSelection = (range) => {{\n"
+            f"        const [start, end] = normaliseRange(range);\n"
+            f"        const brightnessIndex = findPeakIndex([start, end], brightnessValues);\n"
+            f"        const blueIndex = findPeakIndex([start, end], blueValues);\n\n"
+            f"        if (brightnessIndex >= 0) {{\n"
+            f"          Plotly.restyle(gd, {{\n"
+            f"            x: [[frames[brightnessIndex]]],\n"
+            f"            y: [[brightnessValues[brightnessIndex]]]\n"
+            f"          }}, [selectedMeanIndex]);\n"
+            f"        }}\n\n"
+            f"        if (blueIndex >= 0) {{\n"
+            f"          Plotly.restyle(gd, {{\n"
+            f"            x: [[frames[blueIndex]]],\n"
+            f"            y: [[blueValues[blueIndex]]]\n"
+            f"          }}, [selectedBlueIndex]);\n"
+            f"        }}\n\n"
+            f"        const rangeLabel = `Frames ${'{'}Math.round(start){'}'}–${'{'}Math.round(end){'}'}`;\n"
+            f"        const brightnessLabel = brightnessIndex >= 0\n"
+            f"          ? `L* peak frame ${'{'}frames[brightnessIndex]{'}'} (${'{'}brightnessValues[brightnessIndex].toFixed(2){'}'})`\n"
+            f"          : 'L* peak n/a';\n"
+            f"        const blueLabel = blueIndex >= 0\n"
+            f"          ? `Blue peak frame ${'{'}frames[blueIndex]{'}'} (${'{'}blueValues[blueIndex].toFixed(2){'}'})`\n"
+            f"          : 'Blue peak n/a';\n\n"
+            f"        infoPanel.textContent = `${'{'}rangeLabel{'}'} • ${'{'}brightnessLabel{'}'} • ${'{'}blueLabel{'}'}`;\n"
+            f"      }};\n\n"
+            f"      let activeRange = [frames[0], frames[frames.length - 1]];\n"
+            f"      updateSelection(activeRange);\n"
+            f"      const reset = () => {{\n"
+            f"        activeRange = [frames[0], frames[frames.length - 1]];\n"
+            f"        updateSelection(activeRange);\n"
+            f"      }};\n\n"
+            f"      gd.on('plotly_selected', (eventData) => {{\n"
+            f"        if (eventData && eventData.range && eventData.range.x) {{\n"
+            f"          activeRange = [eventData.range.x[0], eventData.range.x[1]];\n"
+            f"          updateSelection(activeRange);\n"
+            f"        }}\n"
+            f"      }});\n"
+            f"      gd.on('plotly_doubleclick', reset);\n"
+            f"      gd.on('plotly_deselect', reset);\n"
+            f"      return true;\n"
+            f"    }};\n\n"
+            f"    if (!initialiseWhenReady()) {{\n"
+            f"      const handler = () => {{\n"
+            f"        if (initialiseWhenReady() && gd.removeListener) {{\n"
+            f"          gd.removeListener('plotly_afterplot', handler);\n"
+            f"        }}\n"
+            f"      }};\n"
+            f"      if (gd.on) {{\n"
+            f"        gd.on('plotly_afterplot', handler);\n"
+            f"      }} else {{\n"
+            f"        setTimeout(handler, 60);\n"
+            f"      }}\n"
+            f"    }}\n"
+            f"  }};\n\n"
+            f"  if (document.readyState === 'loading') {{\n"
+            f"    document.addEventListener('DOMContentLoaded', createSelectionEnhancements, {{ once: true }});\n"
+            f"  }} else {{\n"
+            f"    createSelectionEnhancements();\n"
+            f"  }}\n"
+            f"}})();"
+        )
 
     # --- Utility Methods ---
 
