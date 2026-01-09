@@ -119,6 +119,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Fixed mask across frames
         self.use_fixed_mask = False
         self.fixed_roi_masks: List[Optional[np.ndarray]] = []  # aligned with self.rects
+        self.mask_source_frames: List[Optional[int]] = []  # frame index each mask was captured from
 
         # Noise filtering parameters (adjustable via UI)
         self.morphological_kernel_size = MORPHOLOGICAL_KERNEL_SIZE
@@ -1263,13 +1264,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         viz_layout.addWidget(self.use_fixed_mask_checkbox)
 
         mask_btn_layout = QtWidgets.QHBoxLayout()
-        self.capture_mask_btn = QtWidgets.QPushButton("Capture Mask From Current Frame")
+        self.capture_mask_btn = QtWidgets.QPushButton("Capture From Current")
         self.capture_mask_btn.setToolTip("Compute the analyzed-pixel mask for each ROI based on the current frame and reuse it for all frames")
         mask_btn_layout.addWidget(self.capture_mask_btn)
 
-        self.auto_brightest_mask_btn = QtWidgets.QPushButton("Auto-Capture from Brightest Frame")
-        self.auto_brightest_mask_btn.setToolTip("Automatically find the brightest frame in the current range and capture masks from it")
+        self.auto_brightest_mask_btn = QtWidgets.QPushButton("Auto (Global)")
+        self.auto_brightest_mask_btn.setToolTip("Find one brightest frame (averaged across all ROIs) and capture all masks from it")
         mask_btn_layout.addWidget(self.auto_brightest_mask_btn)
+
+        self.per_roi_brightest_btn = QtWidgets.QPushButton("Auto (Per-ROI)")
+        self.per_roi_brightest_btn.setToolTip("Find the brightest frame for EACH ROI independently - best for sequential electrode activation")
+        mask_btn_layout.addWidget(self.per_roi_brightest_btn)
 
         mask_btn_layout.addStretch()
         viz_layout.addLayout(mask_btn_layout)
@@ -1457,6 +1462,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.use_fixed_mask_checkbox.toggled.connect(self._on_use_fixed_mask_toggled)
         self.capture_mask_btn.clicked.connect(self._capture_fixed_masks)
         self.auto_brightest_mask_btn.clicked.connect(self._auto_capture_brightest_frame_masks)
+        self.per_roi_brightest_btn.clicked.connect(self._auto_capture_per_roi_brightest_masks)
 
         # Noise filtering slider connections
         self.kernel_size_slider.valueChanged.connect(self._on_kernel_size_changed)
@@ -1492,6 +1498,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.capture_mask_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
         if hasattr(self, 'auto_brightest_mask_btn'):
             self.auto_brightest_mask_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
+        if hasattr(self, 'per_roi_brightest_btn'):
+            self.per_roi_brightest_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
 
     def _update_cache_status(self):
         """Update cache status display."""
@@ -1499,19 +1507,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.cache_status_label.setText(f"Cache: {cache_size}/{FRAME_CACHE_SIZE} frames")
 
     def _update_mask_pixel_count_display(self):
-        """Update sidebar label with total fixed mask pixels."""
+        """Update sidebar label with per-ROI fixed mask pixel counts."""
         if not hasattr(self, "mask_pixel_count_label"):
             return
 
-        count = 0
-        mask_found = False
-        for mask in getattr(self, "fixed_roi_masks", []):
+        counts = []
+        for idx, mask in enumerate(getattr(self, "fixed_roi_masks", [])):
+            if idx == self.background_roi_idx:
+                continue  # Skip background ROI
             if isinstance(mask, np.ndarray):
-                mask_found = True
-                count += int(np.count_nonzero(mask))
+                counts.append(int(np.count_nonzero(mask)))
+            else:
+                counts.append(None)
 
-        if mask_found:
-            self.mask_pixel_count_label.setText(f"Mask Pixels: {count:,}")
+        if counts and any(c is not None for c in counts):
+            # Format as array, showing 'n/a' for missing masks
+            count_strs = [str(c) if c is not None else "n/a" for c in counts]
+            total = sum(c for c in counts if c is not None)
+            self.mask_pixel_count_label.setText(f"Mask Pixels: [{', '.join(count_strs)}] = {total:,}")
         else:
             self.mask_pixel_count_label.setText("Mask Pixels: n/a")
 
@@ -1521,6 +1534,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """
         if self.fixed_roi_masks:
             self.fixed_roi_masks = [None for _ in self.rects]
+            self.mask_source_frames = [None for _ in self.rects]
             if reason:
                 self.mask_status_label.setText(f"Mask: cleared ({reason})")
             else:
@@ -1708,6 +1722,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             # Reset fixed masks on new video load
             self.fixed_roi_masks = [None for _ in self.rects]
+            self.mask_source_frames = [None for _ in self.rects]
             self.use_fixed_mask_checkbox.setChecked(False)
             self.mask_status_label.setText("Mask: none")
             self._update_mask_pixel_count_display()
@@ -2031,12 +2046,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if len(self.fixed_roi_masks) != len(self.rects):
             # Resize/realign masks; default to None for new or mismatched entries
             new_masks: List[Optional[np.ndarray]] = []
+            new_sources: List[Optional[int]] = []
             for i in range(len(self.rects)):
                 if i < len(self.fixed_roi_masks):
                     new_masks.append(self.fixed_roi_masks[i])
                 else:
                     new_masks.append(None)
+                if i < len(self.mask_source_frames):
+                    new_sources.append(self.mask_source_frames[i])
+                else:
+                    new_sources.append(None)
             self.fixed_roi_masks = new_masks
+            self.mask_source_frames = new_sources
         self._update_mask_pixel_count_display()
 
         self._update_widget_states(video_loaded=bool(self.cap), rois_exist=bool(self.rects))
@@ -2103,6 +2124,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.selected_rect_idx = None
             self.background_roi_idx = None
             self.fixed_roi_masks = []
+            self.mask_source_frames = []
             self.use_fixed_mask_checkbox.setChecked(False)
             self.mask_status_label.setText("Mask: none")
             self._update_mask_pixel_count_display()
@@ -2255,30 +2277,40 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.frame is not None:
             self.show_frame()
 
-    def _capture_fixed_masks(self):
-        """Capture analyzed-pixel masks for all ROIs based on the current frame."""
+    def _capture_fixed_masks(self, source_frame_idx: Optional[int] = None):
+        """Capture analyzed-pixel masks for all ROIs based on the current frame.
+
+        Args:
+            source_frame_idx: If provided, record this as the source frame for all masks.
+                            If None, uses the current frame slider position.
+        """
         if self.frame is None or not self.rects:
             QtWidgets.QMessageBox.information(self, "Capture Mask", "Load a video and define at least one ROI.")
             return
-        
+
         frame = self.frame
         fh, fw = frame.shape[:2]
         # Determine background brightness once from current frame
         l_star_frame = self._compute_l_star_frame(frame)
         background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
-        
+
+        # Determine source frame index
+        if source_frame_idx is None:
+            source_frame_idx = self.frame_slider.value()
+
         masks: List[Optional[np.ndarray]] = []
+        sources: List[Optional[int]] = []
         created_any = False
         for roi_idx, (pt1, pt2) in enumerate(self.rects):
             if roi_idx == self.background_roi_idx:
                 masks.append(None)
+                sources.append(None)
                 continue
             x1 = max(0, min(pt1[0], fw - 1))
             y1 = max(0, min(pt1[1], fh - 1))
             x2 = max(0, min(pt2[0], fw - 1))
             y2 = max(0, min(pt2[1], fh - 1))
             if x2 > x1 and y2 > y1:
-                roi = frame[y1:y2, x1:x2]
                 roi_l_star = l_star_frame[y1:y2, x1:x2]
                 try:
                     if background_brightness is not None:
@@ -2293,16 +2325,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                         # If no background brightness, default to full ROI
                         mask = np.ones(roi_l_star.shape, dtype=bool)
                     masks.append(mask)
+                    sources.append(source_frame_idx)
                     created_any = True
                 except Exception as e:
                     logging.warning(f"Failed to capture mask for ROI {roi_idx+1}: {e}")
                     masks.append(None)
+                    sources.append(None)
             else:
                 masks.append(None)
-        
+                sources.append(None)
+
         self.fixed_roi_masks = masks
+        self.mask_source_frames = sources
         if created_any:
-            self.mask_status_label.setText("Mask: captured from current frame")
+            self.mask_status_label.setText(f"Mask: captured from frame {source_frame_idx}")
             if not self.use_fixed_mask:
                 # Auto-enable usage for convenience
                 self.use_fixed_mask_checkbox.setChecked(True)
@@ -2347,6 +2383,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         try:
             for frame_idx in range(start_frame, end_frame + 1, step):
                 if progress.wasCanceled():
+                    progress.close()
                     return
 
                 progress.setValue(frame_idx - start_frame)
@@ -2406,6 +2443,180 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         QtWidgets.QMessageBox.information(self, "Auto-Capture Complete",
                                         f"Captured masks from frame {brightest_frame_idx} "
                                         f"(brightness: {max_brightness:.1f} L*)")
+
+    def _auto_capture_per_roi_brightest_masks(self):
+        """Find the brightest frame for EACH ROI independently and capture masks.
+
+        Unlike _auto_capture_brightest_frame_masks which uses a single frame for all ROIs,
+        this method finds the optimal frame for each ROI individually, allowing each
+        electrode to be captured at its peak brightness.
+        """
+        if self.cap is None or not self.rects:
+            QtWidgets.QMessageBox.information(self, "Per-ROI Auto-Capture",
+                                            "Load a video and define at least one ROI first.")
+            return
+
+        # Build list of non-background ROI indices
+        roi_indices = [i for i in range(len(self.rects)) if i != self.background_roi_idx]
+        if not roi_indices:
+            QtWidgets.QMessageBox.information(self, "Per-ROI Auto-Capture",
+                                            "Define at least one non-background ROI.")
+            return
+
+        # Use current frame range or full video if not set
+        start_frame = max(0, self.start_frame)
+        end_frame = min(self.total_frames - 1, self.end_frame if self.end_frame is not None else self.total_frames - 1)
+
+        if start_frame >= end_frame:
+            QtWidgets.QMessageBox.information(self, "Per-ROI Auto-Capture",
+                                            "Invalid frame range for analysis.")
+            return
+
+        # Show progress dialog
+        progress = QtWidgets.QProgressDialog("Finding brightest frame per ROI...", "Cancel", 0, end_frame - start_frame, self)
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.show()
+
+        # Track brightest frame and brightness for each ROI
+        brightest_frames: Dict[int, int] = {idx: start_frame for idx in roi_indices}
+        max_brightness: Dict[int, float] = {idx: 0.0 for idx in roi_indices}
+
+        # Sample frames for performance
+        step = max(1, (end_frame - start_frame) // 100)
+
+        try:
+            for frame_idx in range(start_frame, end_frame + 1, step):
+                if progress.wasCanceled():
+                    return
+
+                progress.setValue(frame_idx - start_frame)
+                QtWidgets.QApplication.processEvents()
+
+                # Get frame from cache or video
+                frame = self.frame_cache.get(frame_idx)
+                if frame is None:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    ret, frame = self.cap.read()
+                    if not ret or frame is None:
+                        continue
+                    self.frame_cache.put(frame_idx, frame)
+
+                l_star_frame = self._compute_l_star_frame(frame)
+                fh, fw = frame.shape[:2]
+
+                # Calculate brightness for each ROI independently
+                for roi_idx in roi_indices:
+                    pt1, pt2 = self.rects[roi_idx]
+                    x1 = max(0, min(pt1[0], fw - 1))
+                    y1 = max(0, min(pt1[1], fh - 1))
+                    x2 = max(0, min(pt2[0], fw - 1))
+                    y2 = max(0, min(pt2[1], fh - 1))
+
+                    if x2 > x1 and y2 > y1:
+                        roi = frame[y1:y2, x1:x2]
+                        roi_l_star = l_star_frame[y1:y2, x1:x2]
+                        l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi, roi_l_star=roi_l_star)
+
+                        if l_raw_mean > max_brightness[roi_idx]:
+                            max_brightness[roi_idx] = l_raw_mean
+                            brightest_frames[roi_idx] = frame_idx
+
+        except Exception as e:
+            progress.close()
+            QtWidgets.QMessageBox.warning(self, "Error", f"Error finding brightest frames: {str(e)}")
+            return
+
+        progress.close()
+
+        # Now capture mask for each ROI from its own brightest frame
+        progress2 = QtWidgets.QProgressDialog("Capturing masks from brightest frames...", "Cancel", 0, len(roi_indices), self)
+        progress2.setWindowModality(QtCore.Qt.WindowModal)
+        progress2.show()
+
+        masks: List[Optional[np.ndarray]] = [None] * len(self.rects)
+        sources: List[Optional[int]] = [None] * len(self.rects)
+
+        try:
+            for progress_idx, roi_idx in enumerate(roi_indices):
+                if progress2.wasCanceled():
+                    progress2.close()
+                    return
+
+                progress2.setValue(progress_idx)
+                QtWidgets.QApplication.processEvents()
+
+                best_frame_idx = brightest_frames[roi_idx]
+
+                # Get the frame
+                frame = self.frame_cache.get(best_frame_idx)
+                if frame is None:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, best_frame_idx)
+                    ret, frame = self.cap.read()
+                    if not ret or frame is None:
+                        continue
+                    self.frame_cache.put(best_frame_idx, frame)
+
+                l_star_frame = self._compute_l_star_frame(frame)
+                background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
+
+                fh, fw = frame.shape[:2]
+                pt1, pt2 = self.rects[roi_idx]
+                x1 = max(0, min(pt1[0], fw - 1))
+                y1 = max(0, min(pt1[1], fh - 1))
+                x2 = max(0, min(pt2[0], fw - 1))
+                y2 = max(0, min(pt2[1], fh - 1))
+
+                if x2 > x1 and y2 > y1:
+                    roi_l_star = l_star_frame[y1:y2, x1:x2]
+                    try:
+                        if background_brightness is not None:
+                            mask = roi_l_star > background_brightness
+                            if np.any(mask):
+                                kernel = cv2.getStructuringElement(
+                                    cv2.MORPH_ELLIPSE,
+                                    (self.morphological_kernel_size, self.morphological_kernel_size)
+                                )
+                                mask_uint8 = mask.astype(np.uint8) * 255
+                                cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+                                mask = cleaned > 0
+                        else:
+                            mask = np.ones(roi_l_star.shape, dtype=bool)
+                        masks[roi_idx] = mask
+                        sources[roi_idx] = best_frame_idx
+                    except Exception as e:
+                        logging.warning(f"Failed to capture mask for ROI {roi_idx+1}: {e}")
+
+        except Exception as e:
+            progress2.close()
+            QtWidgets.QMessageBox.warning(self, "Error", f"Error capturing masks: {str(e)}")
+            return
+
+        progress2.close()
+
+        self.fixed_roi_masks = masks
+        self.mask_source_frames = sources
+
+        # Build status message showing per-ROI frame sources
+        created_count = sum(1 for m in masks if m is not None)
+        frame_info = [str(sources[i]) if sources[i] is not None else "n/a"
+                     for i in range(len(self.rects)) if i != self.background_roi_idx]
+
+        if created_count > 0:
+            self.mask_status_label.setText(f"Mask: frames [{', '.join(frame_info)}]")
+            if not self.use_fixed_mask:
+                self.use_fixed_mask_checkbox.setChecked(True)
+        else:
+            self.mask_status_label.setText("Mask: none (could not capture)")
+
+        self._update_mask_pixel_count_display()
+        if self.frame is not None:
+            self.show_frame()
+
+        # Show summary to user
+        unique_frames = len(set(f for f in sources if f is not None))
+        QtWidgets.QMessageBox.information(self, "Per-ROI Auto-Capture Complete",
+                                        f"Captured masks for {created_count} ROIs from {unique_frames} unique frames.\n\n"
+                                        f"Frame sources: [{', '.join(frame_info)}]")
 
     def _on_kernel_size_changed(self, value: int):
         """Handle morphological kernel size slider change."""
