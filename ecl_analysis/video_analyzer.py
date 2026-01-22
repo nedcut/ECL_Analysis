@@ -3587,17 +3587,9 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             plot_filename = f"{base_filename}_plot.png"
             plot_save_path = os.path.join(save_dir, plot_filename)
             plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
-            plt.show()
             plt.close(fig)
             png_path = plot_save_path
             self.out_paths.append(plot_save_path)
-            
-            # Automatically open the generated PNG file
-            try:
-                import subprocess
-                subprocess.run(['open', plot_save_path], check=True)
-            except Exception as e:
-                logging.warning(f"Could not automatically open plot file {plot_save_path}: {e}")
 
             if PLOTLY_AVAILABLE:
                 try:
