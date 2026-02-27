@@ -71,15 +71,21 @@ pip install -r requirements-dev.txt
 
 # Fast quality gate
 python -m compileall ecl_analysis
-pytest -q
-ruff check ecl_analysis tests
+pytest -q -m "not performance"
+python -m ruff check ecl_analysis tests
+
+# Optional performance checks
+pytest -q -m performance
 ```
 
 If you are using the project venv:
 ```bash
 .venv/bin/python -m compileall ecl_analysis
-.venv/bin/python -m pytest -q
+.venv/bin/python -m pytest -q -m "not performance"
 .venv/bin/python -m ruff check ecl_analysis tests
+
+# Optional performance checks
+.venv/bin/python -m pytest -q -m performance
 ```
 
 Manual smoke workflow for UI-affecting changes:

@@ -4,12 +4,11 @@ import json
 import logging
 import os
 from string import Template
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .analysis.background import (
@@ -26,13 +25,10 @@ from .audio import AudioAnalyzer, AudioManager
 from .cache import FrameCache
 from .constants import (
     APP_WINDOW_TITLE,
-    AUTO_DETECT_BASELINE_PERCENTILE,
-    BRIGHTNESS_NOISE_FLOOR_PERCENTILE,
     COLOR_ACCENT,
     COLOR_ACCENT_HOVER,
     COLOR_BACKGROUND,
     COLOR_BRIGHTNESS_LABEL,
-    COLOR_ERROR,
     COLOR_FOREGROUND,
     COLOR_INFO,
     COLOR_SECONDARY,

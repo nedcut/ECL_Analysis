@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
 
 jobs:
   checks:
@@ -26,9 +29,32 @@ jobs:
         run: python -m compileall ecl_analysis
 
       - name: Lint
-        run: ruff check ecl_analysis tests
+        run: python -m ruff check ecl_analysis tests
 
       - name: Tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: pytest -q
+        run: pytest -q -m "not performance"
+
+  performance:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Performance tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q -m performance

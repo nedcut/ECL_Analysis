@@ -2,103 +2,69 @@ import cv2
 import numpy as np
 import pytest
 
+from ecl_analysis.analysis.background import compute_background_brightness
+from ecl_analysis.analysis.brightness import compute_brightness_stats
 from ecl_analysis.video_analyzer import VideoAnalyzer
 
 
-def test_compute_brightness_stats_zero_roi(video_analyzer_factory):
-    analyzer: VideoAnalyzer = video_analyzer_factory()
-    roi = np.zeros((2, 2, 3), dtype=np.uint8)
+def test_compute_brightness_stats_wrapper_uses_instance_parameters(video_analyzer_factory):
+    analyzer: VideoAnalyzer = video_analyzer_factory(morphological_kernel_size=5, noise_floor_threshold=2.5)
 
-    stats = analyzer._compute_brightness_stats(roi)
-
-    assert stats == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-
-def test_compute_brightness_stats_white_roi(video_analyzer_factory):
-    analyzer: VideoAnalyzer = video_analyzer_factory()
-    roi = np.full((2, 2, 3), 255, dtype=np.uint8)
-
-    stats = analyzer._compute_brightness_stats(roi)
-
-    l_raw_mean, l_raw_median, l_bg_mean, l_bg_median, b_raw_mean, b_raw_median, b_bg_mean, b_bg_median = stats
-
-    assert pytest.approx(l_raw_mean, rel=1e-3) == 100.0
-    assert pytest.approx(l_raw_median, rel=1e-3) == 100.0
-    assert pytest.approx(l_bg_mean, rel=1e-3) == 100.0
-    assert pytest.approx(l_bg_median, rel=1e-3) == 100.0
-    assert pytest.approx(b_raw_mean, rel=1e-3) == 255.0
-    assert pytest.approx(b_raw_median, rel=1e-3) == 255.0
-    assert pytest.approx(b_bg_mean, rel=1e-3) == 255.0
-    assert pytest.approx(b_bg_median, rel=1e-3) == 255.0
-
-
-def test_compute_brightness_stats_with_mask_and_background(video_analyzer_factory):
-    analyzer: VideoAnalyzer = video_analyzer_factory()
     roi = np.array(
         [
-            [[50, 60, 70], [200, 210, 220]],
-            [[50, 60, 70], [200, 210, 220]],
+            [[0, 0, 0], [250, 250, 250], [0, 0, 0]],
+            [[250, 250, 250], [250, 250, 250], [250, 250, 250]],
+            [[0, 0, 0], [250, 250, 250], [0, 0, 0]],
         ],
         dtype=np.uint8,
     )
-    mask = np.array([[True, False], [True, False]])
+    roi_l_star = analyzer._compute_l_star_frame(roi)
 
-    background_brightness = 10.0
-    stats = analyzer._compute_brightness_stats(roi, background_brightness=background_brightness, roi_mask=mask)
-
-    l_raw_mean, l_raw_median, l_bg_mean, l_bg_median, b_raw_mean, b_raw_median, b_bg_mean, b_bg_median = stats
-
-    # Only masked pixels (the first column) should be considered
-    assert l_raw_mean == pytest.approx(l_raw_median)
-    assert b_raw_mean == pytest.approx(b_raw_median)
-    assert l_bg_mean == pytest.approx(l_raw_mean - background_brightness)
-    assert l_bg_median == pytest.approx(l_raw_median - background_brightness)
-    assert b_bg_mean == pytest.approx(b_raw_mean)
-    assert b_bg_median == pytest.approx(b_raw_median)
-
-
-def test_compute_brightness_stats_with_morphology(video_analyzer_factory):
-    analyzer: VideoAnalyzer = video_analyzer_factory(morphological_kernel_size=3)
-
-    roi = np.zeros((7, 7, 3), dtype=np.uint8)
-    roi[2:5, 2:5, :] = 200
-    roi[2:5, 2:5, 0] = 220  # Blue-enriched center block
-
-    l_star_frame = analyzer._compute_l_star_frame(roi)
-    stats = analyzer._compute_brightness_stats(
+    wrapped_stats = analyzer._compute_brightness_stats(
         roi,
-        background_brightness=5.0,
-        roi_l_star=l_star_frame,
+        background_brightness=10.0,
+        roi_l_star=roi_l_star,
+    )
+    direct_stats = compute_brightness_stats(
+        roi_bgr=roi,
+        background_brightness=10.0,
+        roi_l_star=roi_l_star,
+        morphological_kernel_size=analyzer.morphological_kernel_size,
+        noise_floor_threshold=analyzer.noise_floor_threshold,
     )
 
-    # Morphological filtering retains the dense bright block
-    assert stats[2] > 0.0
-    assert stats[4] > 0.0
+    assert wrapped_stats == pytest.approx(direct_stats, rel=1e-6)
 
 
-def test_compute_background_brightness(video_analyzer_factory):
+def test_compute_background_brightness_wrapper_uses_instance_state(video_analyzer_factory):
     analyzer: VideoAnalyzer = video_analyzer_factory(
         rects=[((0, 0), (2, 2))],
         background_roi_idx=0,
         background_percentile=50.0,
     )
 
-    roi_values = np.array(
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    frame[0:2, 0:2, :] = np.array(
         [
             [[10, 10, 10], [20, 20, 20]],
             [[30, 30, 30], [40, 40, 40]],
         ],
         dtype=np.uint8,
     )
-    frame = np.zeros((4, 4, 3), dtype=np.uint8)
-    frame[0:2, 0:2, :] = roi_values
 
     frame_l_star = analyzer._compute_l_star_frame(frame)
-    expected = float(np.percentile(frame_l_star[0:2, 0:2], 50.0))
+    wrapped_result = analyzer._compute_background_brightness(frame, frame_l_star=frame_l_star)
+    direct_result = compute_background_brightness(
+        frame=frame,
+        rects=analyzer.rects,
+        background_roi_idx=analyzer.background_roi_idx,
+        background_percentile=analyzer.background_percentile,
+        frame_l_star=frame_l_star,
+    )
 
-    result = analyzer._compute_background_brightness(frame, frame_l_star=frame_l_star)
-    assert result is not None
-    assert pytest.approx(result, rel=1e-6) == expected
+    assert wrapped_result is not None
+    assert direct_result is not None
+    assert wrapped_result == pytest.approx(direct_result, rel=1e-6)
 
 
 def test_validate_run_duration_confidence(video_analyzer_factory):
