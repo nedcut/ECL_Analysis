@@ -72,6 +72,7 @@ pip install -r requirements-dev.txt
 # Fast quality gate
 python -m compileall ecl_analysis
 pytest -q -m "not performance"
+pytest -q -m "not performance" --cov=ecl_analysis --cov-report=term-missing
 python -m ruff check ecl_analysis tests
 
 # Optional performance checks
@@ -82,6 +83,7 @@ If you are using the project venv:
 ```bash
 .venv/bin/python -m compileall ecl_analysis
 .venv/bin/python -m pytest -q -m "not performance"
+.venv/bin/python -m pytest -q -m "not performance" --cov=ecl_analysis --cov-report=term-missing
 .venv/bin/python -m ruff check ecl_analysis tests
 
 # Optional performance checks

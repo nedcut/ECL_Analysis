@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
@@ -114,7 +115,8 @@ def save_analysis_outputs(
             if interactive_path:
                 summary_lines.append(f" - Saved Interactive Plot: {os.path.basename(interactive_path)}")
                 out_paths.append(interactive_path)
-        except Exception:
+        except Exception as exc:
+            logging.exception("Failed to export ROI %s to %s: %s", actual_roi_idx + 1, save_dir, exc)
             plot_failed = True
             summary_lines.append(f" - FAILED: ROI {actual_roi_idx + 1}")
 

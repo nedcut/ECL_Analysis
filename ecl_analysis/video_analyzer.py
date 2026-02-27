@@ -7,7 +7,6 @@ from string import Template
 from typing import List, Optional, Tuple
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -50,7 +49,7 @@ from .constants import (
     ROI_DUPLICATE_OFFSET,
     ROI_THICKNESS_SELECTED,
 )
-from .dependencies import PLOTLY_AVAILABLE, go, make_subplots
+from .dependencies import get_plotly
 from .export.csv_exporter import save_analysis_outputs
 from .workers import (
     AnalysisWorker,
@@ -3436,7 +3435,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.results_label.setText("Load a video first.")
             return
         
-        if not self.audio_analyzer.available:
+        if not self.audio_analyzer.is_available():
             QtWidgets.QMessageBox.warning(self, "Audio Detection", 
                 "Audio analysis not available. Please install librosa:\npip install librosa soundfile")
             return
@@ -3839,6 +3838,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     background_array = candidate_background
 
             # Create enhanced plot with dual subplots
+            import matplotlib.pyplot as plt
+
             plt.style.use('seaborn-v0_8-darkgrid')
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
 
@@ -3938,12 +3939,13 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             plt.close(fig)
             png_path = plot_save_path
 
-            if PLOTLY_AVAILABLE:
+            plotly_go, plotly_make_subplots = get_plotly()
+            if plotly_go is not None and plotly_make_subplots is not None:
                 try:
                     interactive_filename = f"{base_filename}_interactive.html"
                     interactive_save_path = os.path.join(save_dir, interactive_filename)
 
-                    fig_interactive = make_subplots(
+                    fig_interactive = plotly_make_subplots(
                         rows=2,
                         cols=1,
                         shared_xaxes=True,
@@ -3956,7 +3958,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                     upper_mean_band = (brightness_mean + std_of_means).tolist()
                     lower_mean_band = (brightness_mean - std_of_means).tolist()
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=upper_mean_band,
                             mode='lines',
@@ -3968,7 +3970,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=lower_mean_band,
                             mode='lines',
@@ -3987,7 +3989,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                     upper_median_band = (brightness_median + std_of_medians).tolist()
                     lower_median_band = (brightness_median - std_of_medians).tolist()
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=upper_median_band,
                             mode='lines',
@@ -3999,7 +4001,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=lower_median_band,
                             mode='lines',
@@ -4016,7 +4018,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
 
                     # Brightness lines
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=brightness_mean_values,
                             mode='lines',
@@ -4028,7 +4030,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=brightness_median_values,
                             mode='lines',
@@ -4043,7 +4045,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                     # Background level
                     if background_array is not None:
                         fig_interactive.add_trace(
-                            go.Scatter(
+                            plotly_go.Scatter(
                                 x=frame_list,
                                 y=background_array.tolist(),
                                 mode='lines',
@@ -4057,7 +4059,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
 
                     # Peak annotations
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=[frame_peak_mean],
                             y=[val_peak_mean],
                             mode='markers',
@@ -4069,7 +4071,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=[frame_peak_median],
                             y=[val_peak_median],
                             mode='markers',
@@ -4081,7 +4083,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=[frame_peak_mean],
                             y=[val_peak_mean],
                             mode='markers',
@@ -4100,7 +4102,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
 
                     # Horizontal averages
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=[mean_of_means] * len(frame_list),
                             mode='lines',
@@ -4112,7 +4114,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=[mean_of_medians] * len(frame_list),
                             mode='lines',
@@ -4128,7 +4130,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                     upper_blue_mean_band = (blue_mean + std_of_blue_means).tolist()
                     lower_blue_mean_band = (blue_mean - std_of_blue_means).tolist()
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=upper_blue_mean_band,
                             mode='lines',
@@ -4140,7 +4142,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=lower_blue_mean_band,
                             mode='lines',
@@ -4158,7 +4160,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                     upper_blue_median_band = (blue_median + std_of_blue_medians).tolist()
                     lower_blue_median_band = (blue_median - std_of_blue_medians).tolist()
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=upper_blue_median_band,
                             mode='lines',
@@ -4170,7 +4172,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=lower_blue_median_band,
                             mode='lines',
@@ -4187,7 +4189,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
 
                     # Blue channel lines
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=blue_mean_values,
                             mode='lines',
@@ -4199,7 +4201,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=blue_median_values,
                             mode='lines',
@@ -4213,7 +4215,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
 
                     # Blue channel peaks
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=[frame_peak_blue_mean],
                             y=[val_peak_blue_mean],
                             mode='markers',
@@ -4225,7 +4227,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=[frame_peak_blue_median],
                             y=[val_peak_blue_median],
                             mode='markers',
@@ -4237,7 +4239,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=[frame_peak_blue_mean],
                             y=[val_peak_blue_mean],
                             mode='markers',
@@ -4256,7 +4258,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
 
                     # Blue channel averages
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=[mean_of_blue_means] * len(frame_list),
                             mode='lines',
@@ -4268,7 +4270,7 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                         col=1
                     )
                     fig_interactive.add_trace(
-                        go.Scatter(
+                        plotly_go.Scatter(
                             x=frame_list,
                             y=[mean_of_blue_medians] * len(frame_list),
                             mode='lines',
@@ -4337,10 +4339,11 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
                     interactive_path = interactive_save_path
 
                     try:
-                        import subprocess
-                        subprocess.run(['open', interactive_save_path], check=True)
-                    except Exception as e:
-                        logging.warning(f"Could not automatically open interactive plot {interactive_save_path}: {e}")
+                        opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(interactive_save_path))
+                        if not opened:
+                            logging.warning("Could not automatically open interactive plot %s", interactive_save_path)
+                    except Exception as exc:
+                        logging.warning("Could not automatically open interactive plot %s: %s", interactive_save_path, exc)
                 except Exception as plotly_error:
                     logging.warning(f"Failed to generate interactive plot for ROI {r_idx+1}: {plotly_error}")
             else:

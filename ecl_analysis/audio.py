@@ -1,15 +1,14 @@
 """Audio management and analysis helpers."""
 
+import importlib
 import logging
 from typing import List, Optional, Tuple
 
 import numpy as np
 
 from .dependencies import (
-    LIBROSA_AVAILABLE,
-    PYGAME_AVAILABLE,
-    librosa,
-    pygame,
+    get_librosa,
+    get_pygame,
 )
 
 
@@ -17,13 +16,19 @@ class AudioManager:
     """Handle all audio feedback in the application."""
 
     def __init__(self, enabled: bool = True, volume: float = 0.7):
-        self.enabled = enabled and PYGAME_AVAILABLE
+        self._pygame = get_pygame() if enabled else None
+        self.enabled = enabled and self._pygame is not None
         self.volume = max(0.0, min(1.0, volume))
         self._initialized = False
 
-        if self.enabled and pygame is not None:
+        if self.enabled and self._pygame is not None:
+            if not self._has_pygame_mixer():
+                self.enabled = False
+                logging.info("pygame.mixer not available - audio feedback disabled")
+                return
+
             try:
-                pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+                self._pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
                 self._initialized = True
             except (ImportError, OSError, RuntimeError) as exc:
                 logging.warning("Failed to initialize audio: %s", exc)
@@ -54,18 +59,30 @@ class AudioManager:
             logging.warning("Failed to play run detected sound: %s", exc)
 
     def set_enabled(self, enabled: bool):
-        self.enabled = enabled and PYGAME_AVAILABLE and self._initialized
+        self.enabled = bool(enabled) and self._initialized and self._pygame is not None
 
     def set_volume(self, volume: float):
         self.volume = max(0.0, min(1.0, volume))
 
     def _can_play(self) -> bool:
-        return self.enabled and self._initialized and PYGAME_AVAILABLE and pygame is not None
+        return self.enabled and self._initialized and self._pygame is not None
+
+    def _has_pygame_mixer(self) -> bool:
+        if self._pygame is None:
+            return False
+
+        try:
+            importlib.import_module("pygame.mixer")
+        except ImportError as exc:
+            logging.info("pygame.mixer unavailable: %s", exc)
+            return False
+
+        return hasattr(self._pygame, "mixer")
 
     def _play_tone_sequence(self, frequencies: List[float], duration: float = 0.2):
         if not self._can_play():
             return
-        assert pygame is not None
+        assert self._pygame is not None
 
         try:
             sample_rate = 22050
@@ -82,9 +99,9 @@ class AudioManager:
                 stereo_wave[:, 0] = wave
                 stereo_wave[:, 1] = wave
 
-                sound = pygame.sndarray.make_sound(stereo_wave)
+                sound = self._pygame.sndarray.make_sound(stereo_wave)
                 sound.play()
-                pygame.time.wait(int(duration * 1000))
+                self._pygame.time.wait(int(duration * 1000))
         except (RuntimeError, OSError, AttributeError) as exc:
             logging.warning("Failed to generate tone sequence: %s", exc)
 
@@ -93,18 +110,37 @@ class AudioAnalyzer:
     """Analyze video audio to detect completion beeps and calculate frame ranges."""
 
     def __init__(self):
-        self.available = LIBROSA_AVAILABLE
+        self._librosa = None
+        self._soundfile = None
+        self._logged_missing_backend = False
+        self.available = False
         self.sample_rate = 44100
         self.hop_length = 512
         self.n_fft = 2048
 
+    def _ensure_backend(self) -> bool:
+        if self._librosa is not None:
+            self.available = True
+            return True
+
+        self._librosa, self._soundfile = get_librosa()
+        self.available = self._librosa is not None and self._soundfile is not None
+        if not self.available and not self._logged_missing_backend:
+            logging.info("librosa not available - audio analysis disabled")
+            self._logged_missing_backend = True
+        return self.available
+
+    def is_available(self) -> bool:
+        """Return whether librosa-based analysis backend is available."""
+        return self._ensure_backend()
+
     def extract_audio_from_video(self, video_path: str) -> Tuple[Optional[np.ndarray], Optional[float]]:
-        if not self.available or librosa is None:
-            logging.warning("librosa not available - cannot extract audio")
+        if not self._ensure_backend():
             return None, None
 
         try:
-            audio_data, sr = librosa.load(video_path, sr=self.sample_rate, mono=True)
+            assert self._librosa is not None
+            audio_data, sr = self._librosa.load(video_path, sr=self.sample_rate, mono=True)
             logging.info("Extracted audio: %.2f seconds at %s Hz", len(audio_data) / sr, sr)
             return audio_data, sr
         except Exception as exc:
@@ -120,14 +156,15 @@ class AudioAnalyzer:
         threshold_percentile: float = 95.0,
         min_duration: float = 0.1,
     ) -> List[float]:
-        if not self.available or librosa is None or audio_data is None:
+        if audio_data is None or not self._ensure_backend():
             return []
 
         try:
-            stft = librosa.stft(audio_data, hop_length=self.hop_length, n_fft=self.n_fft)
+            assert self._librosa is not None
+            stft = self._librosa.stft(audio_data, hop_length=self.hop_length, n_fft=self.n_fft)
             magnitude = np.abs(stft)
 
-            freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=self.n_fft)
+            freqs = self._librosa.fft_frequencies(sr=sample_rate, n_fft=self.n_fft)
             freq_resolution = freqs[1] - freqs[0] if len(freqs) > 1 else 0.0
 
             min_frequency = target_frequency - frequency_tolerance
@@ -160,7 +197,7 @@ class AudioAnalyzer:
             logging.info("Energy stats: mean=%.2f, max=%.2f, threshold=%.2f", mean_energy, max_energy, threshold)
 
             above_threshold = energy_per_frame > threshold
-            times = librosa.frames_to_time(
+            times = self._librosa.frames_to_time(
                 np.arange(len(energy_per_frame)), sr=sample_rate, hop_length=self.hop_length
             )
 
@@ -194,7 +231,7 @@ class AudioAnalyzer:
         video_path: str,
         expected_run_duration: float = 0.0,
     ) -> List[Tuple[float, int]]:
-        if not self.available or librosa is None:
+        if not self._ensure_backend():
             return []
 
         audio_data, sample_rate = self.extract_audio_from_video(video_path)

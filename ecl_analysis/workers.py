@@ -222,7 +222,7 @@ class AudioDetectionWorker(QtCore.QObject):
     @QtCore.pyqtSlot()
     def run(self) -> None:
         analyzer = AudioAnalyzer()
-        if not analyzer.available:
+        if not analyzer.is_available():
             self.error.emit("Audio analysis not available. Please install librosa and soundfile.")
             return
 
