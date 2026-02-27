@@ -64,6 +64,32 @@ python main.py
 python main.py /path/to/video.mp4
 ```
 
+### Development Checks
+```bash
+# Install runtime + developer tooling
+pip install -r requirements-dev.txt
+
+# Fast quality gate
+python -m compileall ecl_analysis
+pytest -q
+ruff check ecl_analysis tests
+```
+
+If you are using the project venv:
+```bash
+.venv/bin/python -m compileall ecl_analysis
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check ecl_analysis tests
+```
+
+Manual smoke workflow for UI-affecting changes:
+1. Launch `python main.py`
+2. Open a short sample MP4
+3. Draw at least one ROI
+4. Run auto-detect
+5. Run analysis
+6. Confirm CSV and plot outputs are produced
+
 ## Usage
 
 ### Getting Started
@@ -117,6 +143,16 @@ Each analysis generates:
 
 ## Technical Details
 
+### Architecture Map
+- `main.py` launches the app.
+- `ecl_analysis/video_analyzer.py` is the main Qt window/orchestrator.
+- `ecl_analysis/analysis/` contains pure analysis logic and typed request/result models.
+- `ecl_analysis/workers.py` runs long tasks (`analysis`, `audio detect`, `mask scans`) off the UI thread.
+- `ecl_analysis/export/` handles CSV/plot export orchestration from `AnalysisResult`.
+- `ecl_analysis/roi_geometry.py` owns frame/label coordinate mapping helpers.
+- `ecl_analysis/cache.py` provides LRU frame caching.
+- `ecl_analysis/audio.py` provides playback cues and optional beep detection.
+
 ### Brightness Calculation
 - Converts BGR video frames to CIE LAB color space
 - Uses L* channel for perceptually uniform brightness
@@ -128,6 +164,13 @@ Each analysis generates:
 - **Efficient Seeking**: Smart frame reading with minimal video file access
 - **Progress Tracking**: Real-time feedback during long analyses
 - **Memory Management**: Automatic cleanup and resource management
+- **Background Workers**: Analysis/audio/mask scans run in `QThread` workers
+
+### Benchmark Harness
+Run lightweight local benchmarks:
+```bash
+python tests/performance/benchmark_analysis.py
+```
 
 ### File Support
 Supported video formats:
