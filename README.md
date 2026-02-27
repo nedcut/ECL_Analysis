@@ -107,7 +107,9 @@ Manual smoke workflow for UI-affecting changes:
 ### Keyboard Shortcuts
 
 #### Navigation
-- **Arrow Keys**: Previous/Next frame
+- **Left/Right Arrow**: Previous/Next frame (or nudge selected ROI)
+- **Up/Down Arrow**: Nudge selected ROI vertically
+- **Shift + Arrows**: Large 10px ROI nudge
 - **Space**: Play/Pause video playback
 - **Backspace**: Previous frame
 - **Page Up/Down**: Jump 10 frames
@@ -119,6 +121,8 @@ Manual smoke workflow for UI-affecting changes:
 
 #### ROI Management
 - **Delete**: Remove selected ROI
+- **Ctrl+Shift+D**: Duplicate selected ROI
+- **Ctrl+Alt+D**: Duplicate selected ROI multiple times
 - **Escape**: Cancel current drawing/editing action
 
 #### File Operations

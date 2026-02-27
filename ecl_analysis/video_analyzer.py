@@ -47,6 +47,7 @@ from .constants import (
     ROI_LABEL_FONT_SCALE,
     ROI_LABEL_THICKNESS,
     ROI_THICKNESS_DEFAULT,
+    ROI_DUPLICATE_OFFSET,
     ROI_THICKNESS_SELECTED,
 )
 from .dependencies import PLOTLY_AVAILABLE, go, make_subplots
@@ -79,6 +80,60 @@ def _hex_to_rgba(color: str, alpha: float) -> str:
     b = int(stripped[4:6], 16)
     clamped_alpha = max(0.0, min(1.0, float(alpha)))
     return f"rgba({r},{g},{b},{clamped_alpha})"
+
+
+def _offset_rect_within_bounds(
+    rect: Tuple[Tuple[int, int], Tuple[int, int]],
+    dx: int,
+    dy: int,
+    frame_shape: Optional[Tuple[int, int]] = None,
+) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """Return a rectangle shifted by (dx, dy), clamped to optional frame bounds."""
+    (x1, y1), (x2, y2) = rect
+    left, right = sorted((int(x1), int(x2)))
+    top, bottom = sorted((int(y1), int(y2)))
+
+    new_left = left + int(dx)
+    new_right = right + int(dx)
+    new_top = top + int(dy)
+    new_bottom = bottom + int(dy)
+
+    if frame_shape is not None:
+        frame_h, frame_w = frame_shape
+
+        if frame_w > 0:
+            min_x = 0
+            max_x = frame_w - 1
+            if new_left < min_x:
+                shift_x = min_x - new_left
+                new_left += shift_x
+                new_right += shift_x
+            if new_right > max_x:
+                shift_x = new_right - max_x
+                new_left -= shift_x
+                new_right -= shift_x
+            new_left = max(min_x, min(new_left, max_x))
+            new_right = max(min_x, min(new_right, max_x))
+            if new_right <= new_left and frame_w > 1:
+                new_right = min(max_x, new_left + 1)
+
+        if frame_h > 0:
+            min_y = 0
+            max_y = frame_h - 1
+            if new_top < min_y:
+                shift_y = min_y - new_top
+                new_top += shift_y
+                new_bottom += shift_y
+            if new_bottom > max_y:
+                shift_y = new_bottom - max_y
+                new_top -= shift_y
+                new_bottom -= shift_y
+            new_top = max(min_y, min(new_top, max_y))
+            new_bottom = max(min_y, min(new_bottom, max_y))
+            if new_bottom <= new_top and frame_h > 1:
+                new_bottom = min(max_y, new_top + 1)
+
+    return ((new_left, new_top), (new_right, new_bottom))
 
 class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better menu support
     """Main application window for video brightness analysis."""
@@ -137,6 +192,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.end_point = None
         self.move_offset = None
         self.resize_corner = None
+        self.resize_origin_rect = None
+        self.resize_aspect_ratio = None
         self._current_image_size = None
         
         # Frame range
@@ -340,11 +397,23 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Space), self, 
                           self.toggle_playback)
         
-        # Frame navigation shortcuts
+        # Frame navigation / ROI nudge shortcuts
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left), self, 
-                          lambda: self.step_frames(-1))
+                          lambda: self._handle_horizontal_shortcut(-1, accelerated=False))
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right), self, 
-                          lambda: self.step_frames(1))
+                          lambda: self._handle_horizontal_shortcut(1, accelerated=False))
+        QtWidgets.QShortcut(QtGui.QKeySequence("Shift+Left"), self, 
+                          lambda: self._handle_horizontal_shortcut(-1, accelerated=True))
+        QtWidgets.QShortcut(QtGui.QKeySequence("Shift+Right"), self, 
+                          lambda: self._handle_horizontal_shortcut(1, accelerated=True))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Up), self, 
+                          lambda: self._handle_vertical_nudge_shortcut(-1, accelerated=False))
+        QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Down), self, 
+                          lambda: self._handle_vertical_nudge_shortcut(1, accelerated=False))
+        QtWidgets.QShortcut(QtGui.QKeySequence("Shift+Up"), self, 
+                          lambda: self._handle_vertical_nudge_shortcut(-1, accelerated=True))
+        QtWidgets.QShortcut(QtGui.QKeySequence("Shift+Down"), self, 
+                          lambda: self._handle_vertical_nudge_shortcut(1, accelerated=True))
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Backspace), self, 
                           lambda: self.step_frames(-1))
         
@@ -363,6 +432,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # ROI shortcuts
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Delete), self, 
                           self.delete_selected_rectangle)
+        QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Shift+D"), self, 
+                          self.duplicate_selected_rectangle)
+        QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Alt+D"), self, 
+                          self.duplicate_selected_rectangle_multiple)
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Escape), self, 
                           self._cancel_current_action)
 
@@ -382,6 +455,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.end_point = None
             self.move_offset = None
             self.resize_corner = None
+            self.resize_origin_rect = None
+            self.resize_aspect_ratio = None
             self.image_label.unsetCursor()
             self.show_frame()
 
@@ -414,7 +489,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 <b>Space:</b> Play/Pause video<br>
 
 <h3>Navigation Shortcuts:</h3>
-<b>Left/Right Arrow:</b> Previous/Next frame<br>
+<b>Left/Right Arrow:</b> Previous/Next frame (or nudge selected ROI)<br>
+<b>Up/Down Arrow:</b> Nudge selected ROI up/down<br>
+<b>Shift + Arrows:</b> Large 10px nudge<br>
 <b>Backspace:</b> Previous frame<br>
 <b>Page Down/Up:</b> Jump 10 frames<br>
 <b>Home/End:</b> Go to first/last frame<br>
@@ -425,6 +502,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
 <h3>ROI Shortcuts:</h3>
 <b>Delete:</b> Delete selected ROI<br>
+<b>Ctrl+Shift+D:</b> Duplicate selected ROI<br>
+<b>Ctrl+Alt+D:</b> Duplicate selected ROI multiple times<br>
 <b>Escape:</b> Cancel current action<br>
 
 <h3>File Shortcuts:</h3>
@@ -636,12 +715,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                            stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
                 color: white;
                 border: 1px solid {COLOR_ACCENT_HOVER};
-                padding: 9px 16px;
+                padding: 8px 15px;
             }}
             QPushButton:pressed {{
                 background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
                            stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
-                padding: 7px 14px;
+                padding: 8px 15px;
                 border: 1px solid {COLOR_ACCENT};
             }}
             QPushButton:disabled {{
@@ -1006,8 +1085,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Enhanced responsive sizing
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 1)
-        self.right_scroll.setMinimumWidth(320)  # Slightly reduced for smaller screens
-        self.right_scroll.setMaximumWidth(480)  # Prevent right panel from being too wide
+        self.right_scroll.setMinimumWidth(360)
+        self.right_scroll.setMaximumWidth(560)
 
         # Prevent either pane from collapsing to zero
         self.splitter.setCollapsible(0, False)
@@ -1033,13 +1112,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 ratio = 0.65
 
             left = int(total * ratio)
-            right = max(320, min(480, total - left))  # Clamp right panel size
+            right = max(360, min(560, total - left))  # Clamp right panel size
             self.splitter.setSizes([left, right])
         except Exception:
             # Fallback sizes for different screen types
             total = max(1, self.width())
             if total <= 1000:
-                self.splitter.setSizes([720, 320])
+                self.splitter.setSizes([700, 360])
             else:
                 self.splitter.setSizes([900, 420])
 
@@ -1314,7 +1393,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Background ROI controls
         bg_layout = QtWidgets.QHBoxLayout()
-        self.set_bg_btn = QtWidgets.QPushButton("Set Selected ROI as Background")
+        self.set_bg_btn = QtWidgets.QPushButton("Use Selected ROI as Background")
         bg_layout.addWidget(self.set_bg_btn)
         th_layout.addLayout(bg_layout)
         
@@ -1339,20 +1418,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.use_fixed_mask_checkbox.setToolTip("Apply a pixel mask captured on a specific frame to all frames during analysis and visualization")
         viz_layout.addWidget(self.use_fixed_mask_checkbox)
 
-        mask_btn_layout = QtWidgets.QHBoxLayout()
+        mask_btn_layout = QtWidgets.QGridLayout()
+        mask_btn_layout.setHorizontalSpacing(8)
+        mask_btn_layout.setVerticalSpacing(6)
         self.capture_mask_btn = QtWidgets.QPushButton("Capture From Current")
         self.capture_mask_btn.setToolTip("Compute the analyzed-pixel mask for each ROI based on the current frame and reuse it for all frames")
-        mask_btn_layout.addWidget(self.capture_mask_btn)
+        mask_btn_layout.addWidget(self.capture_mask_btn, 0, 0)
 
         self.auto_brightest_mask_btn = QtWidgets.QPushButton("Auto (Global)")
         self.auto_brightest_mask_btn.setToolTip("Find one brightest frame (averaged across all ROIs) and capture all masks from it")
-        mask_btn_layout.addWidget(self.auto_brightest_mask_btn)
+        mask_btn_layout.addWidget(self.auto_brightest_mask_btn, 0, 1)
 
         self.per_roi_brightest_btn = QtWidgets.QPushButton("Auto (Per-ROI)")
         self.per_roi_brightest_btn.setToolTip("Find the brightest frame for EACH ROI independently - best for sequential electrode activation")
-        mask_btn_layout.addWidget(self.per_roi_brightest_btn)
-
-        mask_btn_layout.addStretch()
+        mask_btn_layout.addWidget(self.per_roi_brightest_btn, 1, 0, 1, 2)
         viz_layout.addLayout(mask_btn_layout)
 
         self.mask_status_label = QtWidgets.QLabel("Mask: none")
@@ -1419,25 +1498,34 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         rect_groupbox_layout.addWidget(self.rect_list)
 
         rect_btn_layout = QtWidgets.QHBoxLayout()
+        rect_btn_layout.setSpacing(6)
         self.add_rect_btn = QtWidgets.QPushButton("Add ROI")
         self.add_rect_btn.setCheckable(True)
         self.add_rect_btn.setToolTip("Click then draw a rectangle on the video frame")
         rect_btn_layout.addWidget(self.add_rect_btn)
 
-        self.del_rect_btn = QtWidgets.QPushButton("Delete ROI")
-        self.del_rect_btn.setToolTip("Delete the selected ROI from the list (Delete key)")
-        rect_btn_layout.addWidget(self.del_rect_btn)
+        self.dup_rect_btn = QtWidgets.QPushButton("Duplicate ROI")
+        self.dup_rect_btn.setToolTip("Duplicate selected ROI with a small offset (Ctrl+Shift+D)")
+        rect_btn_layout.addWidget(self.dup_rect_btn)
 
-        self.clear_rect_btn = QtWidgets.QPushButton("Clear All")
-        self.clear_rect_btn.setToolTip("Remove all ROIs")
-        rect_btn_layout.addWidget(self.clear_rect_btn)
+        self.dup_multi_rect_btn = QtWidgets.QPushButton("Duplicate xN...")
+        self.dup_multi_rect_btn.setToolTip("Duplicate selected ROI multiple times (Ctrl+Alt+D)")
+        rect_btn_layout.addWidget(self.dup_multi_rect_btn)
 
         # Second row of buttons
         rect_btn_layout2 = QtWidgets.QHBoxLayout()
+        rect_btn_layout2.setSpacing(6)
+        self.del_rect_btn = QtWidgets.QPushButton("Delete ROI")
+        self.del_rect_btn.setToolTip("Delete the selected ROI from the list (Delete key)")
+        rect_btn_layout2.addWidget(self.del_rect_btn)
+
+        self.clear_rect_btn = QtWidgets.QPushButton("Clear All")
+        self.clear_rect_btn.setToolTip("Remove all ROIs")
+        rect_btn_layout2.addWidget(self.clear_rect_btn)
+
         self.set_bg_roi_btn = QtWidgets.QPushButton("Set as Background")
         self.set_bg_roi_btn.setToolTip("Set the selected ROI as the background reference for threshold calculation")
         rect_btn_layout2.addWidget(self.set_bg_roi_btn)
-        rect_btn_layout2.addStretch()  # Push button to the left
 
         rect_groupbox_layout.addLayout(rect_btn_layout)
         rect_groupbox_layout.addLayout(rect_btn_layout2)
@@ -1457,7 +1545,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.side_tabs = QtWidgets.QTabWidget()
         self.side_tabs.setDocumentMode(True)
         self.side_tabs.setTabPosition(QtWidgets.QTabWidget.North)
-        self.side_tabs.setMinimumWidth(360)
+        self.side_tabs.setMinimumWidth(380)
 
         # Info tab
         info_tab = QtWidgets.QWidget()
@@ -1499,6 +1587,22 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Add the tab widget to the right layout (scroll area content)
         self.right_layout.addWidget(self.side_tabs)
 
+        sidebar_buttons = [
+            self.set_bg_btn,
+            self.capture_mask_btn,
+            self.auto_brightest_mask_btn,
+            self.per_roi_brightest_btn,
+            self.add_rect_btn,
+            self.dup_rect_btn,
+            self.dup_multi_rect_btn,
+            self.del_rect_btn,
+            self.clear_rect_btn,
+            self.set_bg_roi_btn,
+        ]
+        for button in sidebar_buttons:
+            button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            button.setMinimumHeight(34)
+
     def _connect_signals(self):
         """Connect widget signals to their corresponding slots."""
         self.open_btn.clicked.connect(self.open_video_dialog)
@@ -1523,6 +1627,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         self.rect_list.currentRowChanged.connect(self.select_rectangle_from_list)
         self.add_rect_btn.clicked.connect(self.toggle_add_rectangle_mode)
+        self.dup_rect_btn.clicked.connect(self.duplicate_selected_rectangle)
+        self.dup_multi_rect_btn.clicked.connect(self.duplicate_selected_rectangle_multiple)
         self.del_rect_btn.clicked.connect(self.delete_selected_rectangle)
         self.clear_rect_btn.clicked.connect(self.clear_all_rectangles)
         self.set_bg_roi_btn.clicked.connect(self._set_background_roi)
@@ -1563,6 +1669,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.play_pause_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.speed_combo.setEnabled(video_loaded and not self._analysis_in_progress)
         self.add_rect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.dup_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
+        self.dup_multi_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.clear_rect_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
         self.set_bg_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
@@ -2112,10 +2220,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     # --- ROI Management ---
 
-    def update_rect_list(self):
+    def update_rect_list(self, preferred_row: Optional[int] = None):
         """Updates the QListWidget displaying the ROIs."""
         self.rect_list.blockSignals(True) # Prevent selection signals during update
-        current_row = self.rect_list.currentRow() # Remember selection
+        current_row = preferred_row if preferred_row is not None else self.rect_list.currentRow()
         self.rect_list.clear()
         for idx, (pt1, pt2) in enumerate(self.rects):
             x1, y1 = pt1
@@ -2182,6 +2290,142 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._update_widget_states(video_loaded=bool(self.cap), rois_exist=bool(self.rects))
         self.show_frame() # Redraw to highlight selected rectangle
 
+    def _nudge_selected_rectangle(self, dx: int, dy: int) -> bool:
+        """Move selected ROI by dx/dy pixels while clamping to frame bounds."""
+        if self.selected_rect_idx is None or not (0 <= self.selected_rect_idx < len(self.rects)):
+            return False
+        if self.frame is None:
+            return False
+        if dx == 0 and dy == 0:
+            return False
+
+        source_rect = self.rects[self.selected_rect_idx]
+        moved_rect = _offset_rect_within_bounds(source_rect, dx=dx, dy=dy, frame_shape=self.frame.shape[:2])
+        if moved_rect == source_rect:
+            return False
+
+        self.rects[self.selected_rect_idx] = moved_rect
+        self._invalidate_fixed_masks("ROI nudged")
+        self.update_rect_list(preferred_row=self.selected_rect_idx)
+        self._update_current_brightness_display()
+        self.show_frame()
+        return True
+
+    def _handle_horizontal_shortcut(self, direction: int, accelerated: bool):
+        """Left/right key handler: nudge selected ROI or step frames."""
+        if self._analysis_in_progress:
+            return
+
+        step = 10 if accelerated else 1
+        if self.selected_rect_idx is not None and not (self.drawing or self.moving or self.resizing):
+            self._nudge_selected_rectangle(dx=direction * step, dy=0)
+            return
+
+        self.step_frames(direction * step)
+
+    def _handle_vertical_nudge_shortcut(self, direction: int, accelerated: bool):
+        """Up/down key handler for selected ROI vertical nudging."""
+        if self._analysis_in_progress:
+            return
+        if self.selected_rect_idx is None or self.drawing or self.moving or self.resizing:
+            return
+        step = 10 if accelerated else 1
+        self._nudge_selected_rectangle(dx=0, dy=direction * step)
+
+    def _duplicate_from_source_rect(
+        self,
+        source_rect: Tuple[Tuple[int, int], Tuple[int, int]],
+        copies: int,
+    ) -> int:
+        """Create up to `copies` duplicates of source_rect and return count created."""
+        if copies <= 0:
+            return 0
+
+        frame_shape = self.frame.shape[:2] if isinstance(self.frame, np.ndarray) else None
+        normalized_rect = _offset_rect_within_bounds(source_rect, 0, 0, frame_shape)
+
+        occupied = set(self.rects)
+        created = 0
+        for copy_idx in range(copies):
+            scale = copy_idx + 1
+            step = ROI_DUPLICATE_OFFSET * scale
+            candidate_offsets = [
+                (step, step),
+                (-step, step),
+                (step, -step),
+                (-step, -step),
+                (step * 2, 0),
+                (0, step * 2),
+                (-step * 2, 0),
+                (0, -step * 2),
+                (0, 0),
+            ]
+
+            chosen_rect = None
+            for dx, dy in candidate_offsets:
+                candidate = _offset_rect_within_bounds(normalized_rect, dx, dy, frame_shape)
+                if candidate not in occupied:
+                    chosen_rect = candidate
+                    break
+
+            if chosen_rect is None:
+                break
+
+            self.rects.append(chosen_rect)
+            occupied.add(chosen_rect)
+            created += 1
+
+        if created > 0:
+            self.selected_rect_idx = len(self.rects) - 1
+            self._invalidate_fixed_masks("ROI duplicated")
+            self.update_rect_list(preferred_row=self.selected_rect_idx)
+            if self.frame is not None:
+                self.show_frame()
+
+        return created
+
+    def duplicate_selected_rectangle(self):
+        """Duplicate the selected ROI with a small offset."""
+        if self.selected_rect_idx is None or not (0 <= self.selected_rect_idx < len(self.rects)):
+            self.results_label.setText("Select an ROI to duplicate.")
+            return
+
+        source_idx = self.selected_rect_idx
+        created = self._duplicate_from_source_rect(self.rects[source_idx], copies=1)
+        if created == 1 and self.selected_rect_idx is not None:
+            self.results_label.setText(f"Duplicated ROI {source_idx + 1} to ROI {self.selected_rect_idx + 1}.")
+        else:
+            self.results_label.setText("No space to create a distinct duplicate ROI in the current frame.")
+
+    def duplicate_selected_rectangle_multiple(self):
+        """Prompt for count and create multiple duplicates of the selected ROI."""
+        if self.selected_rect_idx is None or not (0 <= self.selected_rect_idx < len(self.rects)):
+            self.results_label.setText("Select an ROI to duplicate.")
+            return
+
+        copies, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            "Duplicate ROI",
+            "Number of copies:",
+            3,
+            2,
+            25,
+            1,
+        )
+        if not ok:
+            return
+
+        source_idx = self.selected_rect_idx
+        created = self._duplicate_from_source_rect(self.rects[source_idx], copies=copies)
+        if created == copies:
+            self.results_label.setText(f"Duplicated ROI {source_idx + 1} into {created} new ROIs.")
+        elif created > 0:
+            self.results_label.setText(
+                f"Created {created}/{copies} duplicates of ROI {source_idx + 1} (reached frame boundary)."
+            )
+        else:
+            self.results_label.setText("No space to create distinct duplicate ROIs in the current frame.")
+
     def delete_selected_rectangle(self):
         """Deletes the currently selected ROI."""
         if self.selected_rect_idx is not None and 0 <= self.selected_rect_idx < len(self.rects):
@@ -2203,7 +2447,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             elif len(self.rects) == 0:
                  self.selected_rect_idx = None
             # No need to explicitly set selection index otherwise, update_rect_list handles it
-            self.update_rect_list()
+            self.update_rect_list(preferred_row=self.selected_rect_idx)
             self.show_frame()
 
     def clear_all_rectangles(self):
@@ -2723,28 +2967,47 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.end_point = pos_in_label
             self.moving = False
             self.resizing = False
+            self.resize_corner = None
+            self.resize_origin_rect = None
+            self.resize_aspect_ratio = None
         elif self.selected_rect_idx is not None:
-            # Check if clicking near a corner of the selected rectangle for resizing
+            # Check if clicking near an edge/corner of selected rectangle for resizing
             pt1, pt2 = self.rects[self.selected_rect_idx]
-            corners = [
-                (pt1[0], pt1[1]), (pt2[0], pt1[1]), # Top-left, Top-right
-                (pt1[0], pt2[1]), (pt2[0], pt2[1])  # Bottom-left, Bottom-right
-            ]
-            resize_margin = self._scale_value_for_pixmap(MOUSE_RESIZE_HANDLE_SENSITIVITY) # Scale sensitivity
+            resize_margin = self._scale_value_for_pixmap(MOUSE_RESIZE_HANDLE_SENSITIVITY)
+            resize_handle = self._get_resize_handle(frame_x, frame_y, (pt1, pt2), resize_margin)
+            if resize_handle is not None:
+                self.resizing = True
+                self.resize_corner = resize_handle
+                self.resize_origin_rect = ((pt1[0], pt1[1]), (pt2[0], pt2[1]))
+                roi_w = abs(pt2[0] - pt1[0])
+                roi_h = abs(pt2[1] - pt1[1])
+                self.resize_aspect_ratio = (roi_w / roi_h) if roi_h > 0 else None
 
-            for i, (cx, cy) in enumerate(corners):
-                if abs(frame_x - cx) < resize_margin and abs(frame_y - cy) < resize_margin:
-                    self.resizing = True
-                    self.resize_corner = i # Store which corner (0=TL, 1=TR, 2=BL, 3=BR)
-                    # Determine the opposite corner, which stays fixed during resize
-                    fixed_corner_index = 3 - i
-                    self.start_point = self._map_frame_to_label_point(corners[fixed_corner_index]) # Store fixed corner in label coords
-                    self.end_point = pos_in_label # Moving point is the current mouse pos
-                    self.moving = False
-                    self.drawing = False
-                    self.image_label.setCursor(self._get_resize_cursor(i)) # Set resize cursor
-                    self.show_frame()
-                    return # Resizing initiated
+                # Corners use fixed opposite point; edges use origin rect directly.
+                if resize_handle == "corner_tl":
+                    fixed_point = (max(pt1[0], pt2[0]), max(pt1[1], pt2[1]))
+                elif resize_handle == "corner_tr":
+                    fixed_point = (min(pt1[0], pt2[0]), max(pt1[1], pt2[1]))
+                elif resize_handle == "corner_bl":
+                    fixed_point = (max(pt1[0], pt2[0]), min(pt1[1], pt2[1]))
+                elif resize_handle == "corner_br":
+                    fixed_point = (min(pt1[0], pt2[0]), min(pt1[1], pt2[1]))
+                else:
+                    fixed_point = None
+
+                self.start_point = self._map_frame_to_label_point(fixed_point) if fixed_point is not None else None
+                if fixed_point is not None and self.start_point is None:
+                    self.resizing = False
+                    self.resize_corner = None
+                    self.resize_origin_rect = None
+                    self.resize_aspect_ratio = None
+                    return
+                self.end_point = pos_in_label
+                self.moving = False
+                self.drawing = False
+                self.image_label.setCursor(self._get_cursor_for_resize_handle(resize_handle))
+                self.show_frame()
+                return # Resizing initiated
 
             # Check if clicking inside the selected rectangle for moving
             pt1, pt2 = self.rects[self.selected_rect_idx]
@@ -2756,6 +3019,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 self.move_offset = (frame_x - rect_x1, frame_y - rect_y1)
                 self.start_point = pos_in_label # Store initial position for smooth dragging
                 self.resizing = False
+                self.resize_corner = None
+                self.resize_origin_rect = None
+                self.resize_aspect_ratio = None
                 self.drawing = False
                 self.image_label.setCursor(QtCore.Qt.SizeAllCursor) # Set move cursor
                 self.show_frame()
@@ -2825,7 +3091,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.update_rect_list() # Update coordinates in the list
             self.show_frame()
 
-        elif self.resizing and self.selected_rect_idx is not None and self.start_point:
+        elif self.resizing and self.selected_rect_idx is not None:
             # Resize the selected rectangle
             frame_x, frame_y = self._map_label_to_frame_point(pos_in_label)
             if frame_x is None or frame_y is None: 
@@ -2834,21 +3100,77 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Clamp mouse position to frame boundaries before calculating new rect
             frame_x = max(0, min(frame_x, frame_w - 1))
             frame_y = max(0, min(frame_y, frame_h - 1))
+            resize_handle = self.resize_corner if isinstance(self.resize_corner, str) else None
+            if resize_handle is None:
+                return
 
-            fixed_corner_frame = self._map_label_to_frame_point(self.start_point)
-            if fixed_corner_frame[0] is None or fixed_corner_frame[1] is None: 
-                return # Mapping failed
+            if resize_handle.startswith("corner"):
+                if self.start_point is None:
+                    return
+                fixed_corner_frame = self._map_label_to_frame_point(self.start_point)
+                if fixed_corner_frame[0] is None or fixed_corner_frame[1] is None:
+                    return
+                fixed_x, fixed_y = fixed_corner_frame
+                raw_dx = frame_x - fixed_x
+                raw_dy = frame_y - fixed_y
+                sign_x = 1 if raw_dx >= 0 else -1
+                sign_y = 1 if raw_dy >= 0 else -1
+                abs_dx = max(1, abs(raw_dx))
+                abs_dy = max(1, abs(raw_dy))
 
-            # New rectangle is defined by the fixed corner and the current mouse pos
-            new_x1 = min(fixed_corner_frame[0], frame_x)
-            new_y1 = min(fixed_corner_frame[1], frame_y)
-            new_x2 = max(fixed_corner_frame[0], frame_x)
-            new_y2 = max(fixed_corner_frame[1], frame_y)
+                modifiers = event.modifiers()
+                aspect_ratio = self.resize_aspect_ratio if self.resize_aspect_ratio else None
+                lock_aspect = bool(modifiers & QtCore.Qt.ShiftModifier) and aspect_ratio and aspect_ratio > 0
+                if lock_aspect and aspect_ratio is not None:
+                    fit_dy = max(1, int(round(abs_dx / aspect_ratio)))
+                    fit_dx = max(1, int(round(abs_dy * aspect_ratio)))
+                    if abs(fit_dy - abs_dy) <= abs(fit_dx - abs_dx):
+                        abs_dy = fit_dy
+                    else:
+                        abs_dx = fit_dx
 
-            # Prevent zero-size rectangles (optional, but good practice)
+                    max_dx = fixed_x if sign_x < 0 else (frame_w - 1 - fixed_x)
+                    max_dy = fixed_y if sign_y < 0 else (frame_h - 1 - fixed_y)
+                    max_dx = max(1, max_dx)
+                    max_dy = max(1, max_dy)
+
+                    scale = 1.0
+                    if abs_dx > max_dx:
+                        scale = min(scale, max_dx / abs_dx)
+                    if abs_dy > max_dy:
+                        scale = min(scale, max_dy / abs_dy)
+                    if scale < 1.0:
+                        abs_dx = max(1, int(round(abs_dx * scale)))
+                        abs_dy = max(1, int(round(abs_dy * scale)))
+
+                    abs_dx = max(1, min(abs_dx, max_dx))
+                    abs_dy = max(1, min(abs_dy, max_dy))
+                    frame_x = fixed_x + sign_x * abs_dx
+                    frame_y = fixed_y + sign_y * abs_dy
+
+                new_x1 = min(fixed_x, frame_x)
+                new_y1 = min(fixed_y, frame_y)
+                new_x2 = max(fixed_x, frame_x)
+                new_y2 = max(fixed_y, frame_y)
+            else:
+                origin = self.resize_origin_rect or self.rects[self.selected_rect_idx]
+                (ox1, oy1), (ox2, oy2) = origin
+                left, right = min(ox1, ox2), max(ox1, ox2)
+                top, bottom = min(oy1, oy2), max(oy1, oy2)
+
+                new_x1, new_y1, new_x2, new_y2 = left, top, right, bottom
+                if resize_handle == "edge_left":
+                    new_x1 = min(max(0, frame_x), new_x2 - 1)
+                elif resize_handle == "edge_right":
+                    new_x2 = max(min(frame_w - 1, frame_x), new_x1 + 1)
+                elif resize_handle == "edge_top":
+                    new_y1 = min(max(0, frame_y), new_y2 - 1)
+                elif resize_handle == "edge_bottom":
+                    new_y2 = max(min(frame_h - 1, frame_y), new_y1 + 1)
+
             if new_x1 < new_x2 and new_y1 < new_y2:
                 self.rects[self.selected_rect_idx] = ((new_x1, new_y1), (new_x2, new_y2))
-                self.update_rect_list()
+                self.update_rect_list(preferred_row=self.selected_rect_idx)
                 self.show_frame()
         else:
             # Update cursor if hovering over a resize handle or a selectable rectangle
@@ -2875,7 +3197,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 final_y2 = max(pt1_frame[1], pt2_frame[1])
                 self.rects.append(((final_x1, final_y1), (final_x2, final_y2)))
                 self.selected_rect_idx = len(self.rects) - 1 # Select the new rectangle
-                self.update_rect_list() # Update list and selection
+                self._invalidate_fixed_masks("ROI added")
+                self.update_rect_list(preferred_row=self.selected_rect_idx)
 
             # Reset drawing state
             self.drawing = False
@@ -2899,6 +3222,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Finalize resizing
             self.resizing = False
             self.resize_corner = None
+            self.resize_origin_rect = None
+            self.resize_aspect_ratio = None
             self.start_point = None
             self.end_point = None
             # Optional: Recalculate brightness display for the final size
@@ -2973,6 +3298,61 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         else:
             return QtGui.QCursor(QtCore.Qt.ArrowCursor) # Default
 
+    def _get_resize_handle(
+        self,
+        frame_x: int,
+        frame_y: int,
+        rect: Tuple[Tuple[int, int], Tuple[int, int]],
+        margin: float,
+    ) -> Optional[str]:
+        """Return active resize handle for a point near selected ROI edges/corners."""
+        (x1, y1), (x2, y2) = rect
+        left, right = min(x1, x2), max(x1, x2)
+        top, bottom = min(y1, y2), max(y1, y2)
+        m = max(2, int(round(margin)))
+
+        # Corners first so they win over edge hits.
+        corners = {
+            "corner_tl": (left, top),
+            "corner_tr": (right, top),
+            "corner_bl": (left, bottom),
+            "corner_br": (right, bottom),
+        }
+        for handle, (cx, cy) in corners.items():
+            if abs(frame_x - cx) <= m and abs(frame_y - cy) <= m:
+                return handle
+
+        within_x = left <= frame_x <= right
+        within_y = top <= frame_y <= bottom
+        near_left = abs(frame_x - left) <= m and within_y
+        near_right = abs(frame_x - right) <= m and within_y
+        near_top = abs(frame_y - top) <= m and within_x
+        near_bottom = abs(frame_y - bottom) <= m and within_x
+
+        if near_left:
+            return "edge_left"
+        if near_right:
+            return "edge_right"
+        if near_top:
+            return "edge_top"
+        if near_bottom:
+            return "edge_bottom"
+        return None
+
+    def _get_cursor_for_resize_handle(self, handle: str) -> QtGui.QCursor:
+        """Map resize handle names to cursor shapes."""
+        mapping = {
+            "corner_tl": QtCore.Qt.SizeFDiagCursor,
+            "corner_br": QtCore.Qt.SizeFDiagCursor,
+            "corner_tr": QtCore.Qt.SizeBDiagCursor,
+            "corner_bl": QtCore.Qt.SizeBDiagCursor,
+            "edge_left": QtCore.Qt.SizeHorCursor,
+            "edge_right": QtCore.Qt.SizeHorCursor,
+            "edge_top": QtCore.Qt.SizeVerCursor,
+            "edge_bottom": QtCore.Qt.SizeVerCursor,
+        }
+        return QtGui.QCursor(mapping.get(handle, QtCore.Qt.ArrowCursor))
+
     def _update_hover_cursor(self, pos_in_label: QtCore.QPoint):
         """Sets the cursor shape based on what the mouse is hovering over."""
         if self.frame is None or self.drawing or self.moving or self.resizing:
@@ -2988,15 +3368,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         # Check for resize handles on the selected rectangle first
         if self.selected_rect_idx is not None:
-            pt1, pt2 = self.rects[self.selected_rect_idx]
-            corners = [(pt1[0], pt1[1]), (pt2[0], pt1[1]), (pt1[0], pt2[1]), (pt2[0], pt2[1])]
             resize_margin = self._scale_value_for_pixmap(MOUSE_RESIZE_HANDLE_SENSITIVITY)
-
-            for i, (cx, cy) in enumerate(corners):
-                if abs(frame_x - cx) < resize_margin and abs(frame_y - cy) < resize_margin:
-                    self.image_label.setCursor(self._get_resize_cursor(i))
-                    cursor_set = True
-                    break
+            selected_rect = self.rects[self.selected_rect_idx]
+            resize_handle = self._get_resize_handle(frame_x, frame_y, selected_rect, resize_margin)
+            if resize_handle is not None:
+                self.image_label.setCursor(self._get_cursor_for_resize_handle(resize_handle))
+                cursor_set = True
 
         # If not hovering over a resize handle, check if hovering over any rectangle
         if not cursor_set:
