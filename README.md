@@ -196,6 +196,37 @@ Settings are automatically saved to `brightness_analyzer_settings.json`:
 - Audio volume level
 
 Window layout and analysis parameters are currently session-based and reset when you relaunch the app.
+## Measurement Considerations
+
+Brightness Sorcerer reports **relative** L\* brightness values derived from smartphone video. The following considerations apply when interpreting results for scientific publication.
+
+### Camera Requirements
+
+- **Manual exposure mode is required.** Auto-exposure adjusts sensor gain between frames, meaning brightness changes in the video may reflect camera behavior rather than electrode behavior. Lock exposure, ISO, and white balance before recording.
+- **sRGB assumption.** The BGR → CIE LAB conversion assumes the input conforms to the sRGB color space (D65 illuminant). Most smartphone cameras produce approximately sRGB output, but manufacturer-specific tone mapping and HDR processing can introduce non-linearities. Disabling HDR, "night mode," and similar post-processing features is strongly recommended.
+- **No camera response function (CRF) calibration.** Results are internally consistent within a single recording session (same device, same settings) but are not directly comparable across different devices or recording sessions unless an external calibration target is used.
+
+### Spatial and Optical Effects
+
+- **Lens vignetting** (brightness falloff toward frame edges) is not corrected. Background subtraction partially compensates when the background ROI is near the analysis ROI, but systematic error increases with spatial separation.
+- **No lens distortion correction.** Minor barrel/pincushion distortion from smartphone lenses may slightly affect ROI pixel counts at frame edges.
+- **ROI placement matters.** For best results, keep analysis and background ROIs in the same region of the frame to minimize vignetting and illumination gradient effects.
+
+### Analysis Pipeline Notes
+
+- **Background subtraction method.** A user-designated background ROI provides a per-frame reference brightness (configurable percentile, default 90th). This adapts to gradual lighting drift but assumes the background ROI contains no glow signal.
+- **Morphological filtering.** The opening operation (erode → dilate) removes isolated bright pixels but may erode the edges of small glow regions. For ROIs smaller than ~50 pixels, smaller kernel sizes (1–3) are recommended.
+- **No temporal smoothing.** Each frame is analyzed independently. Frame-to-frame noise is preserved in the exported data, which allows post-hoc filtering (e.g., moving average, Savitzky-Golay) but means raw traces may appear noisier than time-averaged instruments.
+- **Blue channel values** are reported on the raw 0–255 sensor scale without perceptual correction. They are useful for qualitative spectral trends but should not be treated as calibrated spectral measurements.
+
+### Reporting Recommendations
+
+When citing results from this tool in publications, consider noting:
+1. Brightness values are reported as CIE L\* (0–100, perceptually uniform) relative to a background reference region.
+2. Camera model, recording settings (resolution, frame rate, exposure, ISO, white balance), and any disabled post-processing features.
+3. Background subtraction percentile and morphological kernel size used.
+4. Whether fixed masks or per-frame adaptive thresholding was applied.
+
 ## Troubleshooting
 
 ### Common Issues
