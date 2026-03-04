@@ -1503,13 +1503,19 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.add_rect_btn.setToolTip("Click then draw a rectangle on the video frame")
         rect_btn_layout.addWidget(self.add_rect_btn)
 
+        self.add_sized_roi_btn = QtWidgets.QPushButton("Add ROI by Size...")
+        self.add_sized_roi_btn.setToolTip("Add a new ROI with a specified width and height (centered in frame)")
+        rect_btn_layout.addWidget(self.add_sized_roi_btn)
+
+        rect_btn_layout2a = QtWidgets.QHBoxLayout()
+        rect_btn_layout2a.setSpacing(6)
         self.dup_rect_btn = QtWidgets.QPushButton("Duplicate ROI")
         self.dup_rect_btn.setToolTip("Duplicate selected ROI with a small offset (Ctrl+Shift+D)")
-        rect_btn_layout.addWidget(self.dup_rect_btn)
+        rect_btn_layout2a.addWidget(self.dup_rect_btn)
 
         self.dup_multi_rect_btn = QtWidgets.QPushButton("Duplicate xN...")
         self.dup_multi_rect_btn.setToolTip("Duplicate selected ROI multiple times (Ctrl+Alt+D)")
-        rect_btn_layout.addWidget(self.dup_multi_rect_btn)
+        rect_btn_layout2a.addWidget(self.dup_multi_rect_btn)
 
         # Second row of buttons
         rect_btn_layout2 = QtWidgets.QHBoxLayout()
@@ -1527,6 +1533,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         rect_btn_layout2.addWidget(self.set_bg_roi_btn)
 
         rect_groupbox_layout.addLayout(rect_btn_layout)
+        rect_groupbox_layout.addLayout(rect_btn_layout2a)
         rect_groupbox_layout.addLayout(rect_btn_layout2)
         self.rect_groupbox.setLayout(rect_groupbox_layout)
         # Cache status
@@ -1592,6 +1599,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.auto_brightest_mask_btn,
             self.per_roi_brightest_btn,
             self.add_rect_btn,
+            self.add_sized_roi_btn,
             self.dup_rect_btn,
             self.dup_multi_rect_btn,
             self.del_rect_btn,
@@ -1626,6 +1634,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         self.rect_list.currentRowChanged.connect(self.select_rectangle_from_list)
         self.add_rect_btn.clicked.connect(self.toggle_add_rectangle_mode)
+        self.add_sized_roi_btn.clicked.connect(self.add_roi_by_size)
         self.dup_rect_btn.clicked.connect(self.duplicate_selected_rectangle)
         self.dup_multi_rect_btn.clicked.connect(self.duplicate_selected_rectangle_multiple)
         self.del_rect_btn.clicked.connect(self.delete_selected_rectangle)
@@ -1668,6 +1677,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.play_pause_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.speed_combo.setEnabled(video_loaded and not self._analysis_in_progress)
         self.add_rect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.add_sized_roi_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.dup_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.dup_multi_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
@@ -2276,6 +2286,41 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         else:
             self.image_label.unsetCursor()
         self.show_frame() # Redraw to potentially remove selection highlight
+
+    def add_roi_by_size(self):
+        """Prompt the user for width and height, then add a centered ROI."""
+        if self.frame is None:
+            self.results_label.setText("Load a video before adding an ROI.")
+            return
+
+        fh, fw = self.frame.shape[:2]
+
+        width, ok = QtWidgets.QInputDialog.getInt(
+            self, "ROI Width", f"Enter ROI width in pixels (1\u2013{fw}):", min(100, fw), 1, fw
+        )
+        if not ok:
+            return
+
+        height, ok = QtWidgets.QInputDialog.getInt(
+            self, "ROI Height", f"Enter ROI height in pixels (1\u2013{fh}):", min(100, fh), 1, fh
+        )
+        if not ok:
+            return
+
+        # Center the ROI in the frame
+        x1 = max(0, (fw - width) // 2)
+        y1 = max(0, (fh - height) // 2)
+        x2 = min(fw, x1 + width)
+        y2 = min(fh, y1 + height)
+
+        self.rects.append(((x1, y1), (x2, y2)))
+        self.selected_rect_idx = len(self.rects) - 1
+        self._invalidate_fixed_masks("ROI added")
+        self.update_rect_list(preferred_row=self.selected_rect_idx)
+        self.show_frame()
+        self.results_label.setText(
+            f"Added ROI {self.selected_rect_idx + 1}: {width}\u00d7{height} px at ({x1},{y1})\u2013({x2},{y2})."
+        )
 
     def select_rectangle_from_list(self, row: int):
         """Handles selection changes in the ROI list widget."""
