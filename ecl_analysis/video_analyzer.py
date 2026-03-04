@@ -1503,9 +1503,26 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.add_rect_btn.setToolTip("Click then draw a rectangle on the video frame")
         rect_btn_layout.addWidget(self.add_rect_btn)
 
-        self.add_sized_roi_btn = QtWidgets.QPushButton("Add ROI by Size...")
-        self.add_sized_roi_btn.setToolTip("Add a new ROI with a specified width and height (centered in frame)")
-        rect_btn_layout.addWidget(self.add_sized_roi_btn)
+        # Inline ROI-by-size row: width / height spinboxes + Add button
+        roi_size_layout = QtWidgets.QHBoxLayout()
+        roi_size_layout.setSpacing(4)
+        roi_size_label = QtWidgets.QLabel("Size:")
+        roi_size_layout.addWidget(roi_size_label)
+        self.roi_width_spin = QtWidgets.QSpinBox()
+        self.roi_width_spin.setRange(1, 9999)
+        self.roi_width_spin.setValue(100)
+        self.roi_width_spin.setSuffix(" W")
+        self.roi_width_spin.setToolTip("Width of the new ROI in pixels")
+        roi_size_layout.addWidget(self.roi_width_spin)
+        self.roi_height_spin = QtWidgets.QSpinBox()
+        self.roi_height_spin.setRange(1, 9999)
+        self.roi_height_spin.setValue(100)
+        self.roi_height_spin.setSuffix(" H")
+        self.roi_height_spin.setToolTip("Height of the new ROI in pixels")
+        roi_size_layout.addWidget(self.roi_height_spin)
+        self.add_sized_roi_btn = QtWidgets.QPushButton("Add")
+        self.add_sized_roi_btn.setToolTip("Add a new ROI with the specified width and height (centered in frame)")
+        roi_size_layout.addWidget(self.add_sized_roi_btn)
 
         rect_btn_layout2a = QtWidgets.QHBoxLayout()
         rect_btn_layout2a.setSpacing(6)
@@ -1533,6 +1550,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         rect_btn_layout2.addWidget(self.set_bg_roi_btn)
 
         rect_groupbox_layout.addLayout(rect_btn_layout)
+        rect_groupbox_layout.addLayout(roi_size_layout)
         rect_groupbox_layout.addLayout(rect_btn_layout2a)
         rect_groupbox_layout.addLayout(rect_btn_layout2)
         self.rect_groupbox.setLayout(rect_groupbox_layout)
@@ -1677,7 +1695,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.play_pause_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.speed_combo.setEnabled(video_loaded and not self._analysis_in_progress)
         self.add_rect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.roi_width_spin.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.roi_height_spin.setEnabled(video_loaded and not self._analysis_in_progress)
         self.add_sized_roi_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        if video_loaded and self.frame is not None:
+            fh, fw = self.frame.shape[:2]
+            self.roi_width_spin.setMaximum(fw)
+            self.roi_height_spin.setMaximum(fh)
         self.dup_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.dup_multi_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
         self.del_rect_btn.setEnabled(video_loaded and self.selected_rect_idx is not None and not self._analysis_in_progress)
@@ -2288,24 +2312,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.show_frame() # Redraw to potentially remove selection highlight
 
     def add_roi_by_size(self):
-        """Prompt the user for width and height, then add a centered ROI."""
+        """Add a centered ROI using the width/height from the spinboxes."""
         if self.frame is None:
             self.results_label.setText("Load a video before adding an ROI.")
             return
 
         fh, fw = self.frame.shape[:2]
-
-        width, ok = QtWidgets.QInputDialog.getInt(
-            self, "ROI Width", f"Enter ROI width in pixels (1\u2013{fw}):", min(100, fw), 1, fw
-        )
-        if not ok:
-            return
-
-        height, ok = QtWidgets.QInputDialog.getInt(
-            self, "ROI Height", f"Enter ROI height in pixels (1\u2013{fh}):", min(100, fh), 1, fh
-        )
-        if not ok:
-            return
+        width = min(self.roi_width_spin.value(), fw)
+        height = min(self.roi_height_spin.value(), fh)
 
         # Center the ROI in the frame
         x1 = max(0, (fw - width) // 2)
