@@ -108,6 +108,34 @@ def test_brightest_frame_worker_picks_max_frame(monkeypatch):
     assert result.brightest_frame_idx == 1
 
 
+def test_brightest_frame_worker_handles_edge_touching_roi(monkeypatch):
+    frame0 = np.zeros((4, 4, 3), dtype=np.uint8)
+    frame1 = np.zeros((4, 4, 3), dtype=np.uint8)
+    frame1[:, 3:4, :] = 255
+    frames = [frame0, frame1]
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture(frames))
+
+    request = MaskScanRequest(
+        video_path="dummy.mp4",
+        rects=[((3, 0), (4, 4))],
+        background_roi_idx=None,
+        start_frame=0,
+        end_frame=1,
+        step=1,
+        background_percentile=90.0,
+        morphological_kernel_size=3,
+    )
+
+    worker = BrightestFrameWorker(request)
+    captured: Dict[str, object] = {}
+    worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+    worker.run()
+
+    result = captured.get("result")
+    assert isinstance(result, BrightestFrameResult)
+    assert result.brightest_frame_idx == 1
+
+
 def test_per_roi_mask_capture_worker_returns_sources(monkeypatch):
     frame0 = np.zeros((4, 4, 3), dtype=np.uint8)
     frame1 = np.zeros((4, 4, 3), dtype=np.uint8)

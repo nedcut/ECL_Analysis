@@ -9,7 +9,7 @@ Video brightness analysis tool for electrochemiluminescence (ECL) experiments. M
 ```bash
 # 1. Clone the repo
 git clone https://github.com/nedcut/ECL_Analysis.git
-cd ecl
+cd ECL_Analysis
 
 # 2. Create a virtual environment
 python3 -m venv .venv
@@ -27,7 +27,7 @@ python main.py
 Whenever updates are pushed, run these commands to get the latest version:
 
 ```bash
-cd ecl
+cd ECL_Analysis
 source .venv/bin/activate
 git pull
 pip install -r requirements.txt   # only needed if dependencies changed

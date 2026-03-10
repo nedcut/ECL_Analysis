@@ -57,3 +57,35 @@ def test_compute_background_brightness_without_precomputed_l_star():
 
     assert result is not None
     assert result > 0.0
+
+
+def test_compute_background_brightness_normalizes_and_clamps_rect():
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    frame[0:4, 0:2, :] = 200
+    rects = [((2, 4), (-3, -1))]  # reversed and out-of-bounds
+
+    result = compute_background_brightness(
+        frame=frame,
+        rects=rects,
+        background_roi_idx=0,
+        background_percentile=50.0,
+    )
+
+    expected_l_star = compute_l_star_frame(frame[:, 0:2])
+    expected = float(np.percentile(expected_l_star, 50.0))
+    assert result is not None
+    assert result == pytest.approx(expected, rel=1e-6)
+
+
+def test_compute_background_brightness_returns_none_when_clamped_roi_empty():
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    rects = [((10, 10), (12, 12))]
+
+    result = compute_background_brightness(
+        frame=frame,
+        rects=rects,
+        background_roi_idx=0,
+        background_percentile=90.0,
+    )
+
+    assert result is None
