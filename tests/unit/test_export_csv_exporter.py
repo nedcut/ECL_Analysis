@@ -45,10 +45,11 @@ def test_save_analysis_outputs_writes_csv_and_summary(tmp_path: Path):
     assert export.cancelled is False
     assert export.plot_failed is False
     assert any("Saved CSV:" in line for line in export.summary_lines)
-    assert len(export.out_paths) == 1
-    assert export.out_paths[0].endswith("_brightness.csv")
+    assert len(export.out_paths) == 2
+    csv_path = next(Path(path) for path in export.out_paths if path.endswith("_brightness.csv"))
+    metadata_path = next(Path(path) for path in export.out_paths if path.endswith("_analysis_metadata.json"))
+    assert metadata_path.exists()
 
-    csv_path = Path(export.out_paths[0])
     assert csv_path.exists()
     df = pd.read_csv(csv_path)
     assert list(df.columns) == ["frame", "brightness_mean", "brightness_median", "blue_mean", "blue_median"]

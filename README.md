@@ -48,6 +48,39 @@ If `git pull` shows a conflict or error, reach out before trying to fix it.
 Each analysis produces:
 - **CSV files** — one per ROI with columns: `frame, brightness_mean, brightness_median, blue_mean, blue_median`
 - **Plot images** — dual-panel PNG (brightness trends + difference plot) with statistical annotations
+- **Metadata sidecar** — one `*_analysis_metadata.json` file capturing mask mode, thresholds, source frames, and mask-quality warnings
+
+### Dark-Enclosure Review Workflow
+
+For lab-style review of electrode light inside a dark enclosure:
+
+1. Lock exposure, ISO, white balance, and focus before recording.
+2. Draw tight electrode ROIs and place the background ROI close to the electrodes, but outside visible glow.
+3. Capture a fixed mask, then enable **Show Pixel Mask** to inspect agreement between the fixed mask and the current adaptive mask.
+   Fixed-only pixels render in red, adaptive-only pixels in blue, and agreement in magenta.
+4. Check the mask-quality summary:
+   - `high` / `medium` confidence means the consensus mask is stable enough to review.
+   - `low` confidence, `low_consensus`, `unstable_mask`, or `small_mask` means the mask needs operator review before trusting the run.
+5. Export the analysis and confirm the `*_analysis_metadata.json` sidecar was written next to the CSV/plot files.
+6. Package one or more exported runs into a repeatable review bundle:
+
+```bash
+python tools/run_real_video_review.py \
+  tools/real_video_review_manifest.example.json \
+  --output-dir review_output
+```
+
+The manifest should point at already-exported analysis folders plus the original raw video paths. The review bundle copies metadata, CSVs, and plots into one folder and generates `review_report.md` with a per-run PASS/FAIL summary.
+
+For a direct rerun from raw videos and ROI manifests, use:
+
+```bash
+python tools/run_mask_review.py \
+  tools/mask_review_manifest.example.json \
+  --output-dir mask_review_outputs
+```
+
+That runner performs auto-capture plus full analysis from the raw videos, writes overlay PNGs for source frames, exports fresh CSV/metadata artifacts, and generates a case-by-case review summary.
 
 ### Useful Shortcuts
 
@@ -70,10 +103,11 @@ Arrow keys nudge a selected ROI instead of navigating frames. Shift+Arrow for 10
 
 1. User draws ROIs on the video frame (one can be designated as a background reference).
 2. For each frame in the selected range, the tool converts BGR pixels to **CIE LAB** color space and extracts the **L\* channel** (perceptually uniform brightness, 0–100 scale).
-3. Pixels below a noise threshold (default 5 L\*) are filtered out. An optional morphological opening (erode then dilate) removes isolated bright pixels.
-4. If a background ROI is set, its brightness (configurable percentile, default 90th) is subtracted per-frame to compensate for lighting drift.
-5. Both mean and median brightness are computed per ROI per frame.
-6. Results are exported to CSV and plotted.
+3. Fixed-mask capture scores signal above the background ROI and absolute noise floor, then builds a deterministic consensus mask from the strongest source frames.
+4. Pixels below the noise floor (default 5 L\*) are filtered out. Morphological opening plus connected-component filtering remove isolated bright artifacts.
+5. If a background ROI is set, its brightness (configurable percentile, default 90th) is subtracted per-frame to compensate for lighting drift.
+6. Both mean and median brightness are computed per ROI per frame.
+7. Results are exported to CSV, plots, and metadata.
 
 ### Architecture
 
@@ -123,9 +157,20 @@ Brightness Sorcerer reports **relative** L\* brightness values derived from smar
 ### Pipeline Notes
 
 - **Background subtraction** uses a configurable percentile (default 90th) from the background ROI. This adapts to gradual lighting drift but assumes the background ROI contains no glow signal.
+- **Fixed-mask provenance** records the source frames, consensus score, warning flags, and threshold settings used to create each reusable mask.
 - **Morphological filtering** removes isolated bright pixels but may erode edges of very small glow regions. For ROIs smaller than ~50 px, use smaller kernel sizes (1–3).
 - **No temporal smoothing.** Each frame is analyzed independently. Raw traces may appear noisier than time-averaged instruments; post-hoc filtering (moving average, Savitzky-Golay) can be applied to the exported CSV data.
 - **Blue channel values** are on the raw 0–255 sensor scale without perceptual correction — useful for qualitative spectral trends, not calibrated spectral measurements.
+
+### Mask-Quality Interpretation
+
+- `high` confidence: the fixed mask stayed stable across the strongest source frames and showed no blocking warnings.
+- `medium` confidence: acceptable for review, but verify the overlay and source frames before using the run as a reference.
+- `low` confidence: do not trust the run without manual inspection and likely recapturing the mask.
+- `single_frame_capture`: only one usable source frame contributed to the fixed mask; repeatability is weaker.
+- `low_consensus`: candidate frames disagreed about which pixels belonged to the glow region.
+- `unstable_mask`: the consensus region was much smaller than the total detected union, suggesting drifting or noisy detections.
+- `small_mask`: the retained signal region was near the minimum component-size floor and may be dominated by artifacts.
 
 ### Reporting Recommendations
 

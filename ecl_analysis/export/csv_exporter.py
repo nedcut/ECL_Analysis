@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -119,6 +120,37 @@ def save_analysis_outputs(
             logging.exception("Failed to export ROI %s to %s: %s", actual_roi_idx + 1, save_dir, exc)
             plot_failed = True
             summary_lines.append(f" - FAILED: ROI {actual_roi_idx + 1}")
+
+    metadata_payload: Dict[str, Any] = {
+        "analysis_name": clean_analysis_name,
+        "video_name": base_video_name,
+        "frames_processed": analysis_result.frames_processed,
+        "total_frames": analysis_result.total_frames,
+        "start_frame": analysis_result.start_frame,
+        "end_frame": analysis_result.end_frame,
+        "elapsed_seconds": analysis_result.elapsed_seconds,
+        "use_fixed_mask": analysis_result.use_fixed_mask,
+        "non_background_rois": list(analysis_result.non_background_rois),
+        "analysis_metadata": dict(analysis_result.analysis_metadata),
+        "mask_metadata": [
+            metadata.to_dict() if metadata is not None else None
+            for metadata in analysis_result.mask_metadata
+        ],
+    }
+    metadata_filename = (
+        f"{clean_analysis_name}_{base_video_name}_"
+        f"frames{analysis_result.start_frame + 1}-{analysis_result.end_frame + 1}_analysis_metadata.json"
+    )
+    metadata_path = os.path.join(save_dir, metadata_filename)
+    try:
+        with open(metadata_path, "w", encoding="utf-8") as metadata_file:
+            json.dump(metadata_payload, metadata_file, indent=2)
+        out_paths.append(metadata_path)
+        summary_lines.append(f" - Saved Metadata: {metadata_filename}")
+    except Exception as exc:
+        logging.exception("Failed to export metadata to %s: %s", metadata_path, exc)
+        plot_failed = True
+        summary_lines.append(" - FAILED: analysis metadata export")
 
     return ExportResult(
         summary_lines=summary_lines,

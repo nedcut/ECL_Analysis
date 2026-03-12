@@ -12,7 +12,13 @@ from PyQt5 import QtCore
 
 from .analysis.background import compute_background_brightness
 from .analysis.brightness import compute_brightness_stats, compute_l_star_frame
-from .analysis.models import AnalysisRequest, AnalysisResult, RoiRect
+from .analysis.masking import (
+    MASK_TOP_CANDIDATES,
+    build_consensus_mask,
+    evaluate_mask_candidate,
+    update_top_candidates,
+)
+from .analysis.models import AnalysisRequest, AnalysisResult, MaskCaptureMetadata, RoiRect
 from .audio import AudioAnalyzer
 
 
@@ -46,14 +52,18 @@ class MaskScanRequest:
     step: int
     background_percentile: float
     morphological_kernel_size: int
+    noise_floor_threshold: float
 
 
 @dataclass
 class BrightestFrameResult:
-    """Result payload for global brightest frame detection."""
+    """Result payload for global auto-capture."""
 
-    brightest_frame_idx: int
-    max_brightness: float
+    masks: List[Optional[np.ndarray]]
+    sources: List[Optional[int]]
+    metadata: List[Optional[MaskCaptureMetadata]]
+    candidate_frames: List[int]
+    max_signal_score: float
 
 
 @dataclass
@@ -63,6 +73,7 @@ class PerRoiMaskCaptureResult:
     masks: List[Optional[np.ndarray]]
     sources: List[Optional[int]]
     max_brightness: Dict[int, float]
+    metadata: List[Optional[MaskCaptureMetadata]]
 
 
 class AnalysisWorker(QtCore.QObject):
@@ -209,6 +220,12 @@ class AnalysisWorker(QtCore.QObject):
                     elapsed_seconds=elapsed_seconds,
                     start_frame=req.start_frame,
                     end_frame=req.end_frame,
+                    use_fixed_mask=req.use_fixed_mask,
+                    mask_metadata=[
+                        metadata.clone() if isinstance(metadata, MaskCaptureMetadata) else None
+                        for metadata in req.mask_metadata
+                    ],
+                    analysis_metadata=dict(req.analysis_metadata),
                 )
             )
         except cv2.error as exc:
@@ -255,7 +272,7 @@ class AudioDetectionWorker(QtCore.QObject):
 
 
 class BrightestFrameWorker(QtCore.QObject):
-    """Find one brightest frame averaged across non-background ROIs."""
+    """Capture fixed masks from the strongest shared signal frames."""
 
     progress_changed = QtCore.pyqtSignal(int, int)
     progress_message = QtCore.pyqtSignal(str)
@@ -271,7 +288,7 @@ class BrightestFrameWorker(QtCore.QObject):
     @QtCore.pyqtSlot()
     def run(self) -> None:
         req = self._request
-        frame_indices = list(range(req.start_frame, req.end_frame + 1, max(1, req.step)))
+        frame_indices = list(range(req.start_frame, req.end_frame + 1))
         if not frame_indices:
             self.error.emit("No frames available for brightest-frame scan.")
             return
@@ -286,8 +303,7 @@ class BrightestFrameWorker(QtCore.QObject):
             self.error.emit(f"Could not open video file: {req.video_path}")
             return
 
-        brightest_frame_idx = frame_indices[0]
-        max_brightness = float("-inf")
+        top_global_frames: List[tuple[float, int]] = []
 
         try:
             total = len(frame_indices)
@@ -302,24 +318,35 @@ class BrightestFrameWorker(QtCore.QObject):
                     continue
 
                 l_star_frame = compute_l_star_frame(frame)
+                background_value = compute_background_brightness(
+                    frame=frame,
+                    rects=req.rects,
+                    background_roi_idx=req.background_roi_idx,
+                    background_percentile=req.background_percentile,
+                    frame_l_star=l_star_frame,
+                )
                 frame_height, frame_width = frame.shape[:2]
-                brightness_sum = 0.0
-                roi_count = 0
+                frame_signal_score = 0.0
 
                 for roi_idx in non_background_rois:
                     pt1, pt2 = req.rects[roi_idx]
                     x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
                     if x2 > x1 and y2 > y1:
                         roi_l_star = l_star_frame[y1:y2, x1:x2]
-                        if roi_l_star.size:
-                            brightness_sum += float(np.mean(roi_l_star))
-                            roi_count += 1
+                        candidate = evaluate_mask_candidate(
+                            roi_l_star=roi_l_star,
+                            background_brightness=background_value,
+                            noise_floor_threshold=req.noise_floor_threshold,
+                            morphological_kernel_size=req.morphological_kernel_size,
+                            frame_idx=frame_idx,
+                        )
+                        if candidate is not None:
+                            frame_signal_score += candidate.score
 
-                if roi_count > 0:
-                    frame_brightness = brightness_sum / roi_count
-                    if frame_brightness > max_brightness:
-                        max_brightness = frame_brightness
-                        brightest_frame_idx = frame_idx
+                if frame_signal_score > 0.0:
+                    top_global_frames.append((float(frame_signal_score), int(frame_idx)))
+                    top_global_frames.sort(key=lambda item: (-item[0], item[1]))
+                    del top_global_frames[MASK_TOP_CANDIDATES:]
 
                 self.progress_changed.emit(idx + 1, total)
                 if (idx + 1) % 10 == 0 or idx + 1 == total:
@@ -327,13 +354,62 @@ class BrightestFrameWorker(QtCore.QObject):
                         f"Scanning frame {idx + 1}/{total} for global brightest mask source"
                     )
 
-            if max_brightness == float("-inf"):
-                max_brightness = 0.0
+            candidate_frames = [frame_idx for _score, frame_idx in top_global_frames]
+            per_roi_candidates: Dict[int, List] = {roi_idx: [] for roi_idx in non_background_rois}
+
+            for frame_idx in candidate_frames:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    continue
+
+                l_star_frame = compute_l_star_frame(frame)
+                background_value = compute_background_brightness(
+                    frame=frame,
+                    rects=req.rects,
+                    background_roi_idx=req.background_roi_idx,
+                    background_percentile=req.background_percentile,
+                    frame_l_star=l_star_frame,
+                )
+                frame_height, frame_width = frame.shape[:2]
+
+                for roi_idx in non_background_rois:
+                    pt1, pt2 = req.rects[roi_idx]
+                    x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+
+                    roi_l_star = l_star_frame[y1:y2, x1:x2]
+                    candidate = evaluate_mask_candidate(
+                        roi_l_star=roi_l_star,
+                        background_brightness=background_value,
+                        noise_floor_threshold=req.noise_floor_threshold,
+                        morphological_kernel_size=req.morphological_kernel_size,
+                        frame_idx=frame_idx,
+                    )
+                    per_roi_candidates[roi_idx] = update_top_candidates(per_roi_candidates[roi_idx], candidate)
+
+            masks: List[Optional[np.ndarray]] = [None] * len(req.rects)
+            sources: List[Optional[int]] = [None] * len(req.rects)
+            metadata: List[Optional[MaskCaptureMetadata]] = [None] * len(req.rects)
+            for roi_idx in non_background_rois:
+                mask, mask_metadata = build_consensus_mask(
+                    candidates=per_roi_candidates[roi_idx],
+                    capture_mode="global_auto",
+                    noise_floor_threshold=req.noise_floor_threshold,
+                    morphological_kernel_size=req.morphological_kernel_size,
+                )
+                masks[roi_idx] = mask
+                sources[roi_idx] = mask_metadata.primary_source_frame
+                metadata[roi_idx] = mask_metadata
 
             self.finished.emit(
                 BrightestFrameResult(
-                    brightest_frame_idx=brightest_frame_idx,
-                    max_brightness=max_brightness,
+                    masks=masks,
+                    sources=sources,
+                    metadata=metadata,
+                    candidate_frames=candidate_frames,
+                    max_signal_score=float(top_global_frames[0][0]) if top_global_frames else 0.0,
                 )
             )
         except cv2.error as exc:
@@ -370,7 +446,7 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
             self.error.emit("No non-background ROI available.")
             return
 
-        frame_indices = list(range(req.start_frame, req.end_frame + 1, max(1, req.step)))
+        frame_indices = list(range(req.start_frame, req.end_frame + 1))
         if not frame_indices:
             self.error.emit("No frames available for per-ROI scan.")
             return
@@ -380,11 +456,11 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
             self.error.emit(f"Could not open video file: {req.video_path}")
             return
 
-        brightest_frames: Dict[int, int] = {idx: frame_indices[0] for idx in roi_indices}
-        max_brightness: Dict[int, float] = {idx: float("-inf") for idx in roi_indices}
+        top_candidates: Dict[int, List] = {idx: [] for idx in roi_indices}
+        max_brightness: Dict[int, float] = {idx: 0.0 for idx in roi_indices}
 
         scan_total = len(frame_indices)
-        total = scan_total + len(roi_indices)
+        total = scan_total
 
         try:
             for idx, frame_idx in enumerate(frame_indices):
@@ -399,6 +475,13 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
                     continue
 
                 l_star_frame = compute_l_star_frame(frame)
+                background_value = compute_background_brightness(
+                    frame=frame,
+                    rects=req.rects,
+                    background_roi_idx=req.background_roi_idx,
+                    background_percentile=req.background_percentile,
+                    frame_l_star=l_star_frame,
+                )
                 frame_height, frame_width = frame.shape[:2]
 
                 for roi_idx in roi_indices:
@@ -406,11 +489,16 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
                     x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
                     if x2 > x1 and y2 > y1:
                         roi_l_star = l_star_frame[y1:y2, x1:x2]
-                        if roi_l_star.size:
-                            roi_mean = float(np.mean(roi_l_star))
-                            if roi_mean > max_brightness[roi_idx]:
-                                max_brightness[roi_idx] = roi_mean
-                                brightest_frames[roi_idx] = frame_idx
+                        candidate = evaluate_mask_candidate(
+                            roi_l_star=roi_l_star,
+                            background_brightness=background_value,
+                            noise_floor_threshold=req.noise_floor_threshold,
+                            morphological_kernel_size=req.morphological_kernel_size,
+                            frame_idx=frame_idx,
+                        )
+                        top_candidates[roi_idx] = update_top_candidates(top_candidates[roi_idx], candidate)
+                        if candidate is not None:
+                            max_brightness[roi_idx] = max(max_brightness[roi_idx], candidate.score)
 
                 self.progress_changed.emit(idx + 1, total)
                 if (idx + 1) % 10 == 0 or idx + 1 == scan_total:
@@ -420,63 +508,25 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
 
             masks: List[Optional[np.ndarray]] = [None] * len(req.rects)
             sources: List[Optional[int]] = [None] * len(req.rects)
+            metadata: List[Optional[MaskCaptureMetadata]] = [None] * len(req.rects)
 
-            for idx, roi_idx in enumerate(roi_indices):
-                if self._cancelled:
-                    self.cancelled.emit()
-                    return
-
-                frame_idx = brightest_frames[roi_idx]
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    self.progress_changed.emit(scan_total + idx + 1, total)
-                    continue
-
-                l_star_frame = compute_l_star_frame(frame)
-                background = compute_background_brightness(
-                    frame=frame,
-                    rects=req.rects,
-                    background_roi_idx=req.background_roi_idx,
-                    background_percentile=req.background_percentile,
-                    frame_l_star=l_star_frame,
+            for roi_idx in roi_indices:
+                mask, mask_metadata = build_consensus_mask(
+                    candidates=top_candidates[roi_idx],
+                    capture_mode="per_roi_auto",
+                    noise_floor_threshold=req.noise_floor_threshold,
+                    morphological_kernel_size=req.morphological_kernel_size,
                 )
-
-                frame_height, frame_width = frame.shape[:2]
-                pt1, pt2 = req.rects[roi_idx]
-                x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
-
-                if x2 > x1 and y2 > y1:
-                    roi_l_star = l_star_frame[y1:y2, x1:x2]
-                    if background is not None:
-                        mask = roi_l_star > background
-                        if np.any(mask):
-                            kernel = cv2.getStructuringElement(
-                                cv2.MORPH_ELLIPSE,
-                                (req.morphological_kernel_size, req.morphological_kernel_size),
-                            )
-                            mask_uint8 = mask.astype(np.uint8) * 255
-                            cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-                            mask = cleaned > 0
-                    else:
-                        mask = np.ones(roi_l_star.shape, dtype=bool)
-                    masks[roi_idx] = mask
-                    sources[roi_idx] = frame_idx
-
-                self.progress_changed.emit(scan_total + idx + 1, total)
-                self.progress_message.emit(
-                    f"Capturing mask {idx + 1}/{len(roi_indices)} from frame {frame_idx}"
-                )
-
-            for roi_idx, value in max_brightness.items():
-                if value == float("-inf"):
-                    max_brightness[roi_idx] = 0.0
+                masks[roi_idx] = mask
+                sources[roi_idx] = mask_metadata.primary_source_frame
+                metadata[roi_idx] = mask_metadata
 
             self.finished.emit(
                 PerRoiMaskCaptureResult(
                     masks=masks,
                     sources=sources,
                     max_brightness=max_brightness,
+                    metadata=metadata,
                 )
             )
         except cv2.error as exc:

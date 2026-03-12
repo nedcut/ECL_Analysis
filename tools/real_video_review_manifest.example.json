@@ -1,0 +1,13 @@
+{
+  "runs": [
+    {
+      "label": "electrode-series-a",
+      "video_path": "/absolute/path/to/raw_videos/electrode-series-a.mp4",
+      "analysis_dir": "/absolute/path/to/exported_results/electrode-series-a",
+      "require_fixed_mask": true,
+      "min_confidence": "medium",
+      "max_warning_count": 2,
+      "expected_non_background_rois": 3
+    }
+  ]
+}
