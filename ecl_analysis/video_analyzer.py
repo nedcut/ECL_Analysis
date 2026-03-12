@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from dataclasses import dataclass
 from string import Template
 from typing import List, Optional, Tuple
 
@@ -134,6 +135,249 @@ def _offset_rect_within_bounds(
 
     return ((new_left, new_top), (new_right, new_bottom))
 
+
+@dataclass
+class EditorSnapshot:
+    """Serializable snapshot of the mutable editor state."""
+
+    current_frame_index: int
+    start_frame: int
+    end_frame: Optional[int]
+    rects: List[Tuple[Tuple[int, int], Tuple[int, int]]]
+    selected_rect_idx: Optional[int]
+    background_roi_idx: Optional[int]
+    manual_threshold: float
+    morphological_kernel_size: int
+    background_percentile: float
+    noise_floor_threshold: float
+    use_fixed_mask: bool
+    fixed_roi_masks: List[Optional[np.ndarray]]
+    mask_source_frames: List[Optional[int]]
+
+
+@dataclass
+class HistoryEntry:
+    """Undo/redo entry for editor changes."""
+
+    label: str
+    before: EditorSnapshot
+    after: EditorSnapshot
+
+
+class AnalysisRangeSlider(QtWidgets.QWidget):
+    """Compact range editor that shows and drags the active analysis window."""
+
+    rangeChanged = QtCore.pyqtSignal(int, int)
+    rangeEditStarted = QtCore.pyqtSignal()
+    rangeEditFinished = QtCore.pyqtSignal()
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self._minimum = 0
+        self._maximum = 0
+        self._start = 0
+        self._end = 0
+        self._current = 0
+        self._drag_mode: Optional[str] = None
+        self._drag_origin_pos = 0
+        self._drag_origin_range = (0, 0)
+        self.setMinimumHeight(28)
+        self.setMouseTracking(True)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+    def set_range(self, minimum: int, maximum: int):
+        self._minimum = int(minimum)
+        self._maximum = max(int(minimum), int(maximum))
+        self._start = max(self._minimum, min(self._start, self._maximum))
+        self._end = max(self._start, min(self._end, self._maximum))
+        self._current = max(self._minimum, min(self._current, self._maximum))
+        self.update()
+
+    def set_values(self, start: int, end: int):
+        clamped_start = max(self._minimum, min(int(start), self._maximum))
+        clamped_end = max(clamped_start, min(int(end), self._maximum))
+        if (clamped_start, clamped_end) == (self._start, self._end):
+            return
+        self._start = clamped_start
+        self._end = clamped_end
+        self.update()
+
+    def set_current_value(self, value: int):
+        clamped_value = max(self._minimum, min(int(value), self._maximum))
+        if clamped_value == self._current:
+            return
+        self._current = clamped_value
+        self.update()
+
+    def _track_rect(self) -> QtCore.QRectF:
+        margin_x = 12.0
+        track_height = 8.0
+        y = (self.height() - track_height) / 2.0
+        return QtCore.QRectF(
+            margin_x,
+            y,
+            max(1.0, self.width() - (margin_x * 2.0)),
+            track_height,
+        )
+
+    def _value_to_pos(self, value: int) -> float:
+        track = self._track_rect()
+        span = max(1, self._maximum - self._minimum)
+        ratio = (value - self._minimum) / span
+        return track.left() + (track.width() * ratio)
+
+    def _pos_to_value(self, pos_x: float) -> int:
+        track = self._track_rect()
+        if track.width() <= 0:
+            return self._minimum
+        ratio = (pos_x - track.left()) / track.width()
+        ratio = max(0.0, min(1.0, ratio))
+        value = self._minimum + round(ratio * (self._maximum - self._minimum))
+        return max(self._minimum, min(value, self._maximum))
+
+    def _handle_hit_test(self, pos: QtCore.QPoint) -> Optional[str]:
+        if self._maximum <= self._minimum:
+            return None
+
+        x = pos.x()
+        start_x = self._value_to_pos(self._start)
+        end_x = self._value_to_pos(self._end)
+        tolerance = 12.0
+
+        if abs(x - start_x) <= tolerance:
+            return "start"
+        if abs(x - end_x) <= tolerance:
+            return "end"
+
+        window_left = min(start_x, end_x)
+        window_right = max(start_x, end_x)
+        if window_left <= x <= window_right:
+            return "window"
+        return None
+
+    def _emit_drag_update(self, pos_x: float):
+        if self._drag_mode is None:
+            return
+
+        if self._drag_mode == "window":
+            anchor_value = self._pos_to_value(self._drag_origin_pos)
+            current_value = self._pos_to_value(pos_x)
+            delta = current_value - anchor_value
+            origin_start, origin_end = self._drag_origin_range
+            width = origin_end - origin_start
+            new_start = origin_start + delta
+            new_end = origin_end + delta
+            if new_start < self._minimum:
+                new_end += self._minimum - new_start
+                new_start = self._minimum
+            if new_end > self._maximum:
+                new_start -= new_end - self._maximum
+                new_end = self._maximum
+            new_start = max(self._minimum, min(new_start, self._maximum))
+            new_end = max(new_start, min(new_end, self._maximum))
+        elif self._drag_mode == "start":
+            new_start = self._pos_to_value(pos_x)
+            new_start = min(new_start, self._end)
+            new_end = self._end
+        else:
+            new_end = self._pos_to_value(pos_x)
+            new_end = max(new_end, self._start)
+            new_start = self._start
+
+        if (new_start, new_end) != (self._start, self._end):
+            self._start = new_start
+            self._end = new_end
+            self.rangeChanged.emit(self._start, self._end)
+            self.update()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent):
+        if event.button() != QtCore.Qt.LeftButton or self._maximum <= self._minimum:
+            super().mousePressEvent(event)
+            return
+
+        self._drag_mode = self._handle_hit_test(event.pos())
+        if self._drag_mode is None:
+            midpoint = (self._value_to_pos(self._start) + self._value_to_pos(self._end)) / 2.0
+            self._drag_mode = "start" if event.pos().x() <= midpoint else "end"
+
+        self._drag_origin_pos = event.pos().x()
+        self._drag_origin_range = (self._start, self._end)
+        self.rangeEditStarted.emit()
+        self._emit_drag_update(event.pos().x())
+        event.accept()
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent):
+        if self._drag_mode is not None:
+            self._emit_drag_update(event.pos().x())
+            event.accept()
+            return
+
+        hovered = self._handle_hit_test(event.pos())
+        if hovered in {"start", "end"}:
+            self.setCursor(QtCore.Qt.SizeHorCursor)
+        elif hovered == "window":
+            self.setCursor(QtCore.Qt.OpenHandCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent):
+        if event.button() == QtCore.Qt.LeftButton and self._drag_mode is not None:
+            self._drag_mode = None
+            self.unsetCursor()
+            self.rangeEditFinished.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event: QtGui.QPaintEvent):
+        super().paintEvent(event)
+
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        track = self._track_rect()
+        base_color = QtGui.QColor(COLOR_SECONDARY_LIGHT)
+        base_color.setAlpha(220)
+        window_color = QtGui.QColor(COLOR_ACCENT)
+        window_color.setAlpha(170)
+        handle_fill = QtGui.QColor(COLOR_BACKGROUND)
+        handle_border = QtGui.QColor(COLOR_ACCENT)
+        current_line = QtGui.QColor(COLOR_INFO)
+
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(base_color)
+        painter.drawRoundedRect(track, 4, 4)
+
+        if self._maximum > self._minimum:
+            start_x = self._value_to_pos(self._start)
+            end_x = self._value_to_pos(self._end)
+            selected = QtCore.QRectF(
+                min(start_x, end_x),
+                track.top(),
+                max(6.0, abs(end_x - start_x)),
+                track.height(),
+            )
+            painter.setBrush(window_color)
+            painter.drawRoundedRect(selected, 4, 4)
+
+            painter.setPen(QtGui.QPen(current_line, 2))
+            current_x = self._value_to_pos(self._current)
+            painter.drawLine(
+                QtCore.QPointF(current_x, track.top() - 6),
+                QtCore.QPointF(current_x, track.bottom() + 6),
+            )
+
+            for value, label in ((self._start, "S"), (self._end, "E")):
+                handle_x = self._value_to_pos(value)
+                handle_rect = QtCore.QRectF(handle_x - 7, track.center().y() - 7, 14, 14)
+                painter.setPen(QtGui.QPen(handle_border, 1.5))
+                painter.setBrush(handle_fill)
+                painter.drawEllipse(handle_rect)
+                painter.setPen(QtGui.QPen(handle_border))
+                painter.setFont(QtGui.QFont(DEFAULT_FONT_FAMILY, 7, QtGui.QFont.Bold))
+                painter.drawText(handle_rect, QtCore.Qt.AlignCenter, label)
+
 class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better menu support
     """Main application window for video brightness analysis."""
     
@@ -201,6 +445,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Analysis state
         self._analysis_in_progress = False
+        self._history_restoring = False
+        self._undo_history: List[HistoryEntry] = []
+        self._redo_history: List[HistoryEntry] = []
+        self._pending_history_entry: Optional[Tuple[str, EditorSnapshot]] = None
         
         # Settings
         self.settings = {}
@@ -282,7 +530,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
         self.main_layout = QtWidgets.QHBoxLayout(central_widget)
-        
+
+        self._create_actions()
         self._create_layouts()
         self._create_widgets()
         self._connect_signals()
@@ -290,6 +539,22 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._update_widget_states()
         # After widgets exist, set a sensible initial split
         self._set_default_splitter_sizes()
+
+    def _create_actions(self):
+        """Create shared actions used across menus, buttons, and shortcuts."""
+        self.undo_action = QtWidgets.QAction("Undo", self)
+        self.undo_action.setStatusTip("Undo the last editor change")
+        self.undo_action.triggered.connect(self.undo_last_action)
+
+        self.redo_action = QtWidgets.QAction("Redo", self)
+        self.redo_action.setStatusTip("Redo the most recently undone change")
+        self.redo_action.triggered.connect(self.redo_last_action)
+
+        self.clear_rect_btn_action = QtWidgets.QAction("Clear All ROIs", self)
+        self.clear_rect_btn_action.setStatusTip("Delete all ROIs")
+        self.clear_rect_btn_action.triggered.connect(self.clear_all_rectangles)
+
+        self._update_history_actions()
 
     def _create_menus(self):
         """Create application menus."""
@@ -317,6 +582,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         exit_action.setStatusTip('Exit the application')
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+        edit_menu = menubar.addMenu('&Edit')
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addAction(self.redo_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.clear_rect_btn_action)
         
         # Analysis menu
         analysis_menu = menubar.addMenu('&Analysis')
@@ -392,6 +663,21 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _setup_shortcuts(self):
         """Setup keyboard shortcuts."""
+        self.undo_action.setShortcuts(
+            [
+                QtGui.QKeySequence.Undo,
+                QtGui.QKeySequence("Ctrl+Z"),
+                QtGui.QKeySequence("Meta+Z"),
+            ]
+        )
+        self.redo_action.setShortcuts(
+            [
+                QtGui.QKeySequence.Redo,
+                QtGui.QKeySequence("Ctrl+Y"),
+                QtGui.QKeySequence("Meta+Shift+Z"),
+            ]
+        )
+
         # Playback shortcuts
         QtWidgets.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Space), self, 
                           self.toggle_playback)
@@ -445,9 +731,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
 
         if self.drawing:
+            self._restore_pending_history_snapshot()
             self.add_rect_btn.setChecked(False)
             self.toggle_add_rectangle_mode(False)
         elif self.moving or self.resizing:
+            self._restore_pending_history_snapshot()
             self.moving = False
             self.resizing = False
             self.start_point = None
@@ -458,6 +746,218 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.resize_aspect_ratio = None
             self.image_label.unsetCursor()
             self.show_frame()
+
+    def _clone_mask_list(self, masks: List[Optional[np.ndarray]]) -> List[Optional[np.ndarray]]:
+        """Deep-copy masks for history snapshots."""
+        return [mask.copy() if isinstance(mask, np.ndarray) else None for mask in masks]
+
+    def _capture_editor_snapshot(self) -> EditorSnapshot:
+        """Capture the mutable editor state for undo/redo."""
+        return EditorSnapshot(
+            current_frame_index=int(self.current_frame_index),
+            start_frame=int(self.start_frame or 0),
+            end_frame=None if self.end_frame is None else int(self.end_frame),
+            rects=[((int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1]))) for pt1, pt2 in self.rects],
+            selected_rect_idx=self.selected_rect_idx,
+            background_roi_idx=self.background_roi_idx,
+            manual_threshold=float(self.manual_threshold),
+            morphological_kernel_size=int(self.morphological_kernel_size),
+            background_percentile=float(self.background_percentile),
+            noise_floor_threshold=float(self.noise_floor_threshold),
+            use_fixed_mask=bool(self.use_fixed_mask),
+            fixed_roi_masks=self._clone_mask_list(self.fixed_roi_masks),
+            mask_source_frames=[None if value is None else int(value) for value in self.mask_source_frames],
+        )
+
+    def _snapshots_equal(self, first: EditorSnapshot, second: EditorSnapshot) -> bool:
+        """Compare two editor snapshots, including mask arrays."""
+        scalar_fields_match = (
+            first.current_frame_index == second.current_frame_index
+            and first.start_frame == second.start_frame
+            and first.end_frame == second.end_frame
+            and first.rects == second.rects
+            and first.selected_rect_idx == second.selected_rect_idx
+            and first.background_roi_idx == second.background_roi_idx
+            and first.manual_threshold == second.manual_threshold
+            and first.morphological_kernel_size == second.morphological_kernel_size
+            and first.background_percentile == second.background_percentile
+            and first.noise_floor_threshold == second.noise_floor_threshold
+            and first.use_fixed_mask == second.use_fixed_mask
+            and first.mask_source_frames == second.mask_source_frames
+        )
+        if not scalar_fields_match or len(first.fixed_roi_masks) != len(second.fixed_roi_masks):
+            return False
+
+        for first_mask, second_mask in zip(first.fixed_roi_masks, second.fixed_roi_masks):
+            if first_mask is None and second_mask is None:
+                continue
+            if (first_mask is None) != (second_mask is None):
+                return False
+            if not np.array_equal(first_mask, second_mask):
+                return False
+        return True
+
+    def _begin_history_action(self, label: str):
+        """Start recording a multi-step edit gesture."""
+        if self._history_restoring:
+            return
+        self._pending_history_entry = (label, self._capture_editor_snapshot())
+
+    def _record_history_change(self, label: str, before: EditorSnapshot):
+        """Push a completed history entry when state changed."""
+        if self._history_restoring:
+            return
+
+        after = self._capture_editor_snapshot()
+        if self._snapshots_equal(before, after):
+            return
+
+        self._undo_history.append(HistoryEntry(label=label, before=before, after=after))
+        self._redo_history.clear()
+        self._update_history_actions()
+
+    def _commit_history_action(self):
+        """Finish the active multi-step edit gesture."""
+        if self._pending_history_entry is None:
+            return
+        label, before = self._pending_history_entry
+        self._pending_history_entry = None
+        self._record_history_change(label, before)
+
+    def _restore_pending_history_snapshot(self):
+        """Revert the active gesture to its starting point without recording history."""
+        if self._pending_history_entry is None:
+            return
+        _label, before = self._pending_history_entry
+        self._pending_history_entry = None
+        self._restore_editor_snapshot(before)
+
+    def _reset_history(self):
+        """Clear undo/redo history, typically when loading a new video."""
+        self._undo_history.clear()
+        self._redo_history.clear()
+        self._pending_history_entry = None
+        self._update_history_actions()
+
+    def _update_history_actions(self):
+        """Sync enabled state and labels for undo/redo actions."""
+        can_undo = bool(getattr(self, "_undo_history", []))
+        can_redo = bool(getattr(self, "_redo_history", []))
+
+        undo_label = self._undo_history[-1].label if can_undo else None
+        redo_label = self._redo_history[-1].label if can_redo else None
+
+        can_use_history = not getattr(self, "_analysis_in_progress", False)
+        self.undo_action.setEnabled(can_undo and can_use_history)
+        self.redo_action.setEnabled(can_redo and can_use_history)
+        self.undo_action.setText(f"Undo {undo_label}" if undo_label else "Undo")
+        self.redo_action.setText(f"Redo {redo_label}" if redo_label else "Redo")
+
+        if hasattr(self, "undo_btn"):
+            self.undo_btn.setEnabled(can_undo and can_use_history)
+            self.undo_btn.setToolTip(
+                f"Undo {undo_label} ({QtGui.QKeySequence(QtGui.QKeySequence.Undo).toString()})"
+                if undo_label
+                else f"Undo ({QtGui.QKeySequence(QtGui.QKeySequence.Undo).toString()})"
+            )
+        if hasattr(self, "redo_btn"):
+            self.redo_btn.setEnabled(can_redo and can_use_history)
+            self.redo_btn.setToolTip(
+                f"Redo {redo_label} ({QtGui.QKeySequence(QtGui.QKeySequence.Redo).toString()})"
+                if redo_label
+                else f"Redo ({QtGui.QKeySequence(QtGui.QKeySequence.Redo).toString()})"
+            )
+
+    def _restore_editor_snapshot(self, snapshot: EditorSnapshot):
+        """Restore a prior editor state without creating a new history entry."""
+        self._history_restoring = True
+        try:
+            self.rects = [((pt1[0], pt1[1]), (pt2[0], pt2[1])) for pt1, pt2 in snapshot.rects]
+            self.selected_rect_idx = snapshot.selected_rect_idx
+            self.background_roi_idx = snapshot.background_roi_idx
+            self.start_frame = snapshot.start_frame
+            self.end_frame = snapshot.end_frame
+            self.manual_threshold = snapshot.manual_threshold
+            self.morphological_kernel_size = snapshot.morphological_kernel_size
+            self.background_percentile = snapshot.background_percentile
+            self.noise_floor_threshold = snapshot.noise_floor_threshold
+            self.use_fixed_mask = snapshot.use_fixed_mask
+            self.fixed_roi_masks = self._clone_mask_list(snapshot.fixed_roi_masks)
+            self.mask_source_frames = list(snapshot.mask_source_frames)
+
+            if hasattr(self, "threshold_spin"):
+                self.threshold_spin.blockSignals(True)
+                self.threshold_spin.setValue(self.manual_threshold)
+                self.threshold_spin.blockSignals(False)
+            if hasattr(self, "kernel_size_slider"):
+                self.kernel_size_slider.blockSignals(True)
+                self.kernel_size_slider.setValue(self.morphological_kernel_size)
+                self.kernel_size_slider.blockSignals(False)
+                self.kernel_size_label.setText(f"{self.morphological_kernel_size}×{self.morphological_kernel_size}")
+            if hasattr(self, "bg_percentile_slider"):
+                self.bg_percentile_slider.blockSignals(True)
+                self.bg_percentile_slider.setValue(int(round(self.background_percentile)))
+                self.bg_percentile_slider.blockSignals(False)
+                self.bg_percentile_label.setText(f"{self.background_percentile:.0f}%")
+            if hasattr(self, "noise_floor_slider"):
+                self.noise_floor_slider.blockSignals(True)
+                self.noise_floor_slider.setValue(int(round(self.noise_floor_threshold * 2)))
+                self.noise_floor_slider.blockSignals(False)
+                self.noise_floor_label.setText(f"{self.noise_floor_threshold:.1f}")
+            if hasattr(self, "use_fixed_mask_checkbox"):
+                self.use_fixed_mask_checkbox.blockSignals(True)
+                self.use_fixed_mask_checkbox.setChecked(self.use_fixed_mask)
+                self.use_fixed_mask_checkbox.blockSignals(False)
+            if hasattr(self, "mask_status_label"):
+                has_masks = any(isinstance(mask, np.ndarray) for mask in self.fixed_roi_masks)
+                if self.use_fixed_mask and has_masks:
+                    self.mask_status_label.setText("Mask: active")
+                elif has_masks:
+                    self.mask_status_label.setText("Mask: disabled")
+                else:
+                    self.mask_status_label.setText("Mask: none")
+
+            self.update_rect_list(preferred_row=self.selected_rect_idx)
+            self._sync_analysis_range_widgets()
+
+            if self.cap and self.cap.isOpened() and self.total_frames > 0:
+                target_frame = max(0, min(snapshot.current_frame_index, self.total_frames - 1))
+                self.frame_slider.blockSignals(True)
+                self.frame_spinbox.blockSignals(True)
+                self.frame_slider.setValue(target_frame)
+                self.frame_spinbox.setValue(target_frame)
+                self.frame_slider.blockSignals(False)
+                self.frame_spinbox.blockSignals(False)
+                self._seek_to_frame(target_frame)
+            else:
+                self.current_frame_index = snapshot.current_frame_index
+                self.update_frame_label(reset=self.total_frames == 0)
+                self._sync_analysis_range_widgets()
+
+            self._update_current_brightness_display()
+            self.show_frame()
+        finally:
+            self._history_restoring = False
+
+    def undo_last_action(self):
+        """Restore the editor state before the last recorded change."""
+        if not self._undo_history:
+            return
+        entry = self._undo_history.pop()
+        self._redo_history.append(entry)
+        self._restore_editor_snapshot(entry.before)
+        self.statusBar().showMessage(f"Undid: {entry.label}", 3000)
+        self._update_history_actions()
+
+    def redo_last_action(self):
+        """Reapply the most recently undone change."""
+        if not self._redo_history:
+            return
+        entry = self._redo_history.pop()
+        self._undo_history.append(entry)
+        self._restore_editor_snapshot(entry.after)
+        self.statusBar().showMessage(f"Redid: {entry.label}", 3000)
+        self._update_history_actions()
 
     def _cancel_active_worker(self):
         """Request cancellation of any currently running worker."""
@@ -498,6 +998,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 <h3>Analysis Shortcuts:</h3>
 <b>F5:</b> Run analysis<br>
 <b>Ctrl+D:</b> Detect from audio<br>
+<b>Cmd/Ctrl+Z:</b> Undo last edit<br>
+<b>Cmd/Ctrl+Shift+Z or Ctrl+Y:</b> Redo last edit<br>
 
 <h3>ROI Shortcuts:</h3>
 <b>Delete:</b> Delete selected ROI<br>
@@ -723,6 +1225,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 border: 1px solid {COLOR_ACCENT};
             }}
             QPushButton:disabled {{
+                background: {COLOR_SECONDARY};
+                color: #888888;
+                border: 1px solid {COLOR_SECONDARY};
+            }}
+            QToolButton {{
+                background: {COLOR_SECONDARY};
+                color: {COLOR_FOREGROUND};
+                border: 1px solid {COLOR_SECONDARY_LIGHT};
+                border-radius: 6px;
+                padding: 6px 10px;
+                min-height: 18px;
+            }}
+            QToolButton:hover {{
+                background: {COLOR_SECONDARY_LIGHT};
+                border: 1px solid {COLOR_ACCENT};
+                color: white;
+            }}
+            QToolButton:disabled {{
                 background: {COLOR_SECONDARY};
                 color: #888888;
                 border: 1px solid {COLOR_SECONDARY};
@@ -1198,6 +1718,53 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.frame_slider.setObjectName("timelineSlider")
         timeline_container.addWidget(self.frame_slider)
 
+        self.analysis_range_slider = AnalysisRangeSlider(self)
+        self.analysis_range_slider.setToolTip("Drag the handles to adjust the analysis start and end frames")
+        timeline_container.addWidget(self.analysis_range_slider)
+
+        range_summary_layout = QtWidgets.QHBoxLayout()
+        range_summary_layout.setSpacing(8)
+        self.analysis_range_summary_label = QtWidgets.QLabel("Analysis Window: full video")
+        self.analysis_range_summary_label.setMinimumWidth(240)
+        range_summary_layout.addWidget(self.analysis_range_summary_label)
+        range_summary_layout.addStretch()
+        timeline_container.addLayout(range_summary_layout)
+
+        range_editor_layout = QtWidgets.QHBoxLayout()
+        range_editor_layout.setSpacing(6)
+        range_editor_layout.addWidget(QtWidgets.QLabel("Start"))
+        self.range_start_spinbox = QtWidgets.QSpinBox()
+        self.range_start_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.range_start_spinbox.setAlignment(QtCore.Qt.AlignCenter)
+        self.range_start_spinbox.setToolTip("Analysis start frame (1-based)")
+        self.range_start_spinbox.setFixedWidth(84)
+        range_editor_layout.addWidget(self.range_start_spinbox)
+
+        self.range_start_current_btn = QtWidgets.QToolButton()
+        self.range_start_current_btn.setText("Current")
+        self.range_start_current_btn.setToolTip("Use the current frame as the analysis start")
+        range_editor_layout.addWidget(self.range_start_current_btn)
+
+        range_editor_layout.addWidget(QtWidgets.QLabel("End"))
+        self.range_end_spinbox = QtWidgets.QSpinBox()
+        self.range_end_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.range_end_spinbox.setAlignment(QtCore.Qt.AlignCenter)
+        self.range_end_spinbox.setToolTip("Analysis end frame (1-based)")
+        self.range_end_spinbox.setFixedWidth(84)
+        range_editor_layout.addWidget(self.range_end_spinbox)
+
+        self.range_end_current_btn = QtWidgets.QToolButton()
+        self.range_end_current_btn.setText("Current")
+        self.range_end_current_btn.setToolTip("Use the current frame as the analysis end")
+        range_editor_layout.addWidget(self.range_end_current_btn)
+
+        self.range_full_btn = QtWidgets.QToolButton()
+        self.range_full_btn.setText("Full Video")
+        self.range_full_btn.setToolTip("Reset the analysis range to the full video")
+        range_editor_layout.addWidget(self.range_full_btn)
+        range_editor_layout.addStretch()
+        timeline_container.addLayout(range_editor_layout)
+
         # Frame info row
         frame_info_layout = QtWidgets.QHBoxLayout()
         frame_info_layout.setSpacing(8)
@@ -1273,17 +1840,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         analysis_group = QtWidgets.QHBoxLayout()
         analysis_group.setSpacing(6)
 
-        self.set_start_btn = QtWidgets.QPushButton("Set Start")
-        self.set_start_btn.setToolTip("Set current frame as analysis start")
-        self.set_start_btn.setFixedHeight(32)
-        self.set_start_btn.setObjectName("analysisButton")
-        analysis_group.addWidget(self.set_start_btn)
+        self.undo_btn = QtWidgets.QPushButton("Undo")
+        self.undo_btn.setToolTip("Undo the last editor change")
+        self.undo_btn.setFixedHeight(32)
+        self.undo_btn.setObjectName("analysisButton")
+        analysis_group.addWidget(self.undo_btn)
 
-        self.set_end_btn = QtWidgets.QPushButton("Set End")
-        self.set_end_btn.setToolTip("Set current frame as analysis end")
-        self.set_end_btn.setFixedHeight(32)
-        self.set_end_btn.setObjectName("analysisButton")
-        analysis_group.addWidget(self.set_end_btn)
+        self.redo_btn = QtWidgets.QPushButton("Redo")
+        self.redo_btn.setToolTip("Redo the most recently undone change")
+        self.redo_btn.setFixedHeight(32)
+        self.redo_btn.setObjectName("analysisButton")
+        analysis_group.addWidget(self.redo_btn)
 
         self.auto_detect_btn = QtWidgets.QPushButton("🎵 Detect from Audio")
         self.auto_detect_btn.setToolTip("Detect completion beeps in audio and calculate frame ranges (Ctrl+D)")
@@ -1299,7 +1866,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.video_controls_groupbox.setLayout(controls_layout)
         # Keep controls compact to avoid crowding
         self.video_controls_groupbox.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
-        self.video_controls_groupbox.setMaximumHeight(210)
+        self.video_controls_groupbox.setMaximumHeight(285)
         self.left_layout.addWidget(self.video_controls_groupbox)
 
         # Analysis Section with improved grouping and spacing
@@ -1634,13 +2201,23 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         self.frame_slider.valueChanged.connect(self.slider_frame_changed)
         self.frame_spinbox.valueChanged.connect(self.spinbox_frame_changed)
+        self.analysis_range_slider.rangeEditStarted.connect(
+            lambda: self._begin_history_action("Adjust Analysis Window")
+        )
+        self.analysis_range_slider.rangeChanged.connect(self._on_analysis_range_slider_changed)
+        self.analysis_range_slider.rangeEditFinished.connect(self._commit_history_action)
+        self.range_start_spinbox.valueChanged.connect(self._on_range_start_spinbox_changed)
+        self.range_end_spinbox.valueChanged.connect(self._on_range_end_spinbox_changed)
+        self.range_start_current_btn.clicked.connect(self.set_start_frame)
+        self.range_end_current_btn.clicked.connect(self.set_end_frame)
+        self.range_full_btn.clicked.connect(self.reset_analysis_range_to_full_video)
 
         self.prev_frame_btn.clicked.connect(lambda: self.step_frames(-1))
         self.next_frame_btn.clicked.connect(lambda: self.step_frames(1))
         self.jump_back_btn.clicked.connect(lambda: self.step_frames(-JUMP_FRAMES))
         self.jump_forward_btn.clicked.connect(lambda: self.step_frames(JUMP_FRAMES))
-        self.set_start_btn.clicked.connect(self.set_start_frame)
-        self.set_end_btn.clicked.connect(self.set_end_frame)
+        self.undo_btn.clicked.connect(self.undo_last_action)
+        self.redo_btn.clicked.connect(self.redo_last_action)
         self.auto_detect_btn.clicked.connect(self.auto_detect_range)
         
         # Playback controls
@@ -1686,8 +2263,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.next_frame_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.jump_back_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.jump_forward_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.set_start_btn.setEnabled(video_loaded and not self._analysis_in_progress)
-        self.set_end_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.analysis_range_slider.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.range_start_spinbox.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.range_end_spinbox.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.range_start_current_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.range_end_current_btn.setEnabled(video_loaded and not self._analysis_in_progress)
+        self.range_full_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.auto_detect_btn.setEnabled(video_loaded and not self._analysis_in_progress)
         self.analyze_btn.setEnabled(video_loaded and rois_exist and not self._analysis_in_progress)
         
@@ -1724,6 +2305,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._analysis_in_progress = busy
         video_loaded = bool(self.cap and self.cap.isOpened())
         self._update_widget_states(video_loaded=video_loaded, rois_exist=bool(self.rects))
+        self._update_history_actions()
 
     def _update_cache_status(self):
         """Update cache status display."""
@@ -1787,7 +2369,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 <b>Frames:</b> {self.total_frames}<br>
 <b>FPS:</b> {fps:.2f}<br>
 <b>Duration:</b> {duration_sec:.1f}s<br>
-<b>Analysis Range:</b> {self.start_frame + 1}-{(self.end_frame or 0) + 1}
+<b>Analysis Range:</b> {self._normalized_analysis_range()[0] + 1}-{self._normalized_analysis_range()[1] + 1}
         """.strip()
         
         self.video_info_label.setText(info_text)
@@ -1924,6 +2506,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.current_frame_index = 0
         self.start_frame = 0
         self.end_frame = self.total_frames - 1
+        self._reset_history()
 
         # Load the first frame
         ret, frame = self.cap.read()
@@ -1940,6 +2523,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.frame_spinbox.setRange(0, self.total_frames - 1)
             self.frame_spinbox.setValue(0)
             self.update_frame_label()
+            self._sync_analysis_range_widgets()
             self.show_frame()
             self._update_video_info()
             self._update_cache_status()
@@ -1984,6 +2568,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.end_frame = None
         self.out_paths = []
         self.frame_cache.clear()
+        self._reset_history()
         
         # Stop playback and reset controls
         self.stop_playback()
@@ -2000,6 +2585,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.video_info_label.setText("No video loaded")
         self.frame_slider.setRange(0, 0)
         self.frame_spinbox.setRange(0, 0)
+        self._sync_analysis_range_widgets()
         self._update_cache_status()
         self._update_widget_states(video_loaded=False, rois_exist=False)
         self.statusBar().showMessage("Ready - Load a video to begin")
@@ -2129,6 +2715,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         else:
             # Display 1-based index for user-friendliness
             self.frame_label.setText(f"Frame: {self.current_frame_index + 1} / {self.total_frames}")
+        self._sync_analysis_range_widgets()
 
     def show_frame(self):
         """Displays the current self.frame in the image_label, drawing ROIs."""
@@ -2317,6 +2904,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.results_label.setText("Load a video before adding an ROI.")
             return
 
+        before = self._capture_editor_snapshot()
         fh, fw = self.frame.shape[:2]
         width = min(self.roi_width_spin.value(), fw)
         height = min(self.roi_height_spin.value(), fh)
@@ -2335,6 +2923,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.results_label.setText(
             f"Added ROI {self.selected_rect_idx + 1}: {width}\u00d7{height} px at ({x1},{y1})\u2013({x2},{y2})."
         )
+        self._record_history_change("Add ROI", before)
 
     def select_rectangle_from_list(self, row: int):
         """Handles selection changes in the ROI list widget."""
@@ -2362,11 +2951,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if moved_rect == source_rect:
             return False
 
+        before = self._capture_editor_snapshot()
         self.rects[self.selected_rect_idx] = moved_rect
         self._invalidate_fixed_masks("ROI nudged")
         self.update_rect_list(preferred_row=self.selected_rect_idx)
         self._update_current_brightness_display()
         self.show_frame()
+        self._record_history_change("Move ROI", before)
         return True
 
     def _handle_horizontal_shortcut(self, direction: int, accelerated: bool):
@@ -2448,10 +3039,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.results_label.setText("Select an ROI to duplicate.")
             return
 
+        before = self._capture_editor_snapshot()
         source_idx = self.selected_rect_idx
         created = self._duplicate_from_source_rect(self.rects[source_idx], copies=1)
         if created == 1 and self.selected_rect_idx is not None:
             self.results_label.setText(f"Duplicated ROI {source_idx + 1} to ROI {self.selected_rect_idx + 1}.")
+            self._record_history_change("Duplicate ROI", before)
         else:
             self.results_label.setText("No space to create a distinct duplicate ROI in the current frame.")
 
@@ -2473,20 +3066,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if not ok:
             return
 
+        before = self._capture_editor_snapshot()
         source_idx = self.selected_rect_idx
         created = self._duplicate_from_source_rect(self.rects[source_idx], copies=copies)
         if created == copies:
             self.results_label.setText(f"Duplicated ROI {source_idx + 1} into {created} new ROIs.")
+            self._record_history_change("Duplicate ROI", before)
         elif created > 0:
             self.results_label.setText(
                 f"Created {created}/{copies} duplicates of ROI {source_idx + 1} (reached frame boundary)."
             )
+            self._record_history_change("Duplicate ROI", before)
         else:
             self.results_label.setText("No space to create distinct duplicate ROIs in the current frame.")
 
     def delete_selected_rectangle(self):
         """Deletes the currently selected ROI."""
         if self.selected_rect_idx is not None and 0 <= self.selected_rect_idx < len(self.rects):
+            before = self._capture_editor_snapshot()
             del self.rects[self.selected_rect_idx]
             # Remove corresponding fixed mask and invalidate
             if self.selected_rect_idx is not None and self.selected_rect_idx < len(self.fixed_roi_masks):
@@ -2507,6 +3104,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # No need to explicitly set selection index otherwise, update_rect_list handles it
             self.update_rect_list(preferred_row=self.selected_rect_idx)
             self.show_frame()
+            self.results_label.setText("Deleted selected ROI.")
+            self._record_history_change("Delete ROI", before)
 
     def clear_all_rectangles(self):
         """Removes all defined ROIs."""
@@ -2516,6 +3115,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                                                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                                                QtWidgets.QMessageBox.No)
         if reply == QtWidgets.QMessageBox.Yes:
+            before = self._capture_editor_snapshot()
             self.rects.clear()
             self.selected_rect_idx = None
             self.background_roi_idx = None
@@ -2526,6 +3126,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_mask_pixel_count_display()
             self.update_rect_list()
             self.show_frame()
+            self.results_label.setText("Cleared all ROIs.")
+            self._record_history_change("Clear All ROIs", before)
 
     def _set_background_roi(self):
         """Mark current ROI as background reference for auto-detect."""
@@ -2533,7 +3135,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             QtWidgets.QMessageBox.information(self, "Background ROI",
                                               "Select an ROI first.")
             return
-        
+
+        before = self._capture_editor_snapshot()
         self.background_roi_idx = self.selected_rect_idx
         
         # Calculate background threshold for display
@@ -2549,6 +3152,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.results_label.setText(f"Background ROI set to ROI {self.selected_rect_idx + 1}")
         
         self.update_rect_list()
+        self._record_history_change("Set Background ROI", before)
 
     def _calculate_background_threshold(self) -> Optional[float]:
         """Calculate the current background threshold based on background ROI or manual setting."""
@@ -2658,12 +3262,22 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _on_threshold_changed(self, value: float):
         """Handle changes to the manual threshold spinbox."""
+        if self._history_restoring:
+            self.manual_threshold = value
+            self._update_threshold_display()
+            return
+        before = self._capture_editor_snapshot()
         self.manual_threshold = value
         self._update_threshold_display()
+        self._record_history_change("Adjust Manual Threshold", before)
 
     def _on_use_fixed_mask_toggled(self, checked: bool):
         """Enable/disable using a fixed mask across frames."""
-        self.use_fixed_mask = checked
+        if self._history_restoring:
+            self.use_fixed_mask = checked
+        else:
+            before = self._capture_editor_snapshot()
+            self.use_fixed_mask = checked
         if checked and (not self.fixed_roi_masks or all(m is None for m in self.fixed_roi_masks)):
             self.mask_status_label.setText("Mask: none (capture from a frame)")
         elif checked:
@@ -2671,7 +3285,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         else:
             self.mask_status_label.setText("Mask: disabled")
         if self.frame is not None:
+            self._update_current_brightness_display()
             self.show_frame()
+        if not self._history_restoring:
+            self._record_history_change("Toggle Fixed Mask", before)
 
     def _capture_fixed_masks(self, source_frame_idx: Optional[int] = None):
         """Capture analyzed-pixel masks for all ROIs based on the current frame.
@@ -2693,6 +3310,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Determine source frame index
         if source_frame_idx is None:
             source_frame_idx = self.frame_slider.value()
+        before = None if self._history_restoring else self._capture_editor_snapshot()
 
         masks: List[Optional[np.ndarray]] = []
         sources: List[Optional[int]] = []
@@ -2737,12 +3355,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.mask_status_label.setText(f"Mask: captured from frame {source_frame_idx}")
             if not self.use_fixed_mask:
                 # Auto-enable usage for convenience
+                self.use_fixed_mask = True
+                self.use_fixed_mask_checkbox.blockSignals(True)
                 self.use_fixed_mask_checkbox.setChecked(True)
+                self.use_fixed_mask_checkbox.blockSignals(False)
         else:
             self.mask_status_label.setText("Mask: none (could not capture)")
         self._update_mask_pixel_count_display()
         if self.frame is not None:
+            self._update_current_brightness_display()
             self.show_frame()
+        if before is not None:
+            self._record_history_change("Capture Fixed Masks", before)
 
     def _auto_capture_brightest_frame_masks(self):
         """Find the brightest frame in the current range and capture masks from it."""
@@ -2909,6 +3533,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.results_label.setText("Per-ROI auto-capture failed: invalid worker result.")
             return
 
+        before = self._capture_editor_snapshot()
         self.fixed_roi_masks = result.masks
         self.mask_source_frames = result.sources
 
@@ -2921,13 +3546,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if created_count > 0:
             self.mask_status_label.setText(f"Mask: frames [{', '.join(frame_info)}]")
             if not self.use_fixed_mask:
+                self.use_fixed_mask = True
+                self.use_fixed_mask_checkbox.blockSignals(True)
                 self.use_fixed_mask_checkbox.setChecked(True)
+                self.use_fixed_mask_checkbox.blockSignals(False)
         else:
             self.mask_status_label.setText("Mask: none (could not capture)")
 
         self._update_mask_pixel_count_display()
         if self.frame is not None:
+            self._update_current_brightness_display()
             self.show_frame()
+        self._record_history_change("Capture Fixed Masks", before)
 
         unique_frames = len(set(f for f in result.sources if f is not None))
         QtWidgets.QMessageBox.information(
@@ -2966,6 +3596,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _on_kernel_size_changed(self, value: int):
         """Handle morphological kernel size slider change."""
+        before = None if self._history_restoring else self._capture_editor_snapshot()
         self.morphological_kernel_size = max(1, value if value % 2 == 1 else value - 1)  # Ensure odd value
         self.kernel_size_label.setText(f"{self.morphological_kernel_size}×{self.morphological_kernel_size}")
         # Update display and invalidate cached masks since filtering changed
@@ -2973,9 +3604,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.frame is not None:
             self._update_current_brightness_display()
             self.show_frame()
+        if before is not None:
+            self._record_history_change("Adjust Mask Kernel", before)
 
     def _on_bg_percentile_changed(self, value: int):
         """Handle background percentile slider change."""
+        before = None if self._history_restoring else self._capture_editor_snapshot()
         self.background_percentile = float(value)
         self.bg_percentile_label.setText(f"{self.background_percentile:.0f}%")
         # Update display since background calculation changed
@@ -2983,9 +3617,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             self._update_threshold_display()
             self.show_frame()
+        if before is not None:
+            self._record_history_change("Adjust Background Percentile", before)
 
     def _on_noise_floor_changed(self, value: int):
         """Handle noise floor threshold slider change."""
+        before = None if self._history_restoring else self._capture_editor_snapshot()
         self.noise_floor_threshold = value / 2.0  # Convert back from 0.5 precision
         self.noise_floor_label.setText(f"{self.noise_floor_threshold:.1f}")
         # Update display since noise filtering changed
@@ -2993,6 +3630,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.frame is not None:
             self._update_current_brightness_display()
             self.show_frame()
+        if before is not None:
+            self._record_history_change("Adjust Noise Floor", before)
 
     def _on_cache_size_changed(self, value: int):
         """Handle frame cache size changes."""
@@ -3021,6 +3660,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         if self.drawing:
             # Start drawing a new rectangle
+            self._begin_history_action("Draw ROI")
             self.start_point = pos_in_label # Store label coordinates for drawing feedback
             self.end_point = pos_in_label
             self.moving = False
@@ -3034,6 +3674,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             resize_margin = self._scale_value_for_pixmap(MOUSE_RESIZE_HANDLE_SENSITIVITY)
             resize_handle = self._get_resize_handle(frame_x, frame_y, (pt1, pt2), resize_margin)
             if resize_handle is not None:
+                self._begin_history_action("Resize ROI")
                 self.resizing = True
                 self.resize_corner = resize_handle
                 self.resize_origin_rect = ((pt1[0], pt1[1]), (pt2[0], pt2[1]))
@@ -3072,6 +3713,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             rect_x1, rect_y1 = min(pt1[0], pt2[0]), min(pt1[1], pt2[1])
             rect_x2, rect_y2 = max(pt1[0], pt2[0]), max(pt1[1], pt2[1])
             if rect_x1 <= frame_x <= rect_x2 and rect_y1 <= frame_y <= rect_y2:
+                self._begin_history_action("Move ROI")
                 self.moving = True
                 # Calculate offset from top-left corner of the rect
                 self.move_offset = (frame_x - rect_x1, frame_y - rect_y1)
@@ -3264,6 +3906,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.end_point = None
             self.add_rect_btn.setChecked(False) # Uncheck button
             self.show_frame() # Redraw
+            self._commit_history_action()
 
         elif self.moving:
             # Finalize moving
@@ -3275,6 +3918,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Moving ROI invalidates any captured masks (shape/position may change)
             self._invalidate_fixed_masks("ROI moved")
             self.show_frame() # Redraw in final state
+            self._commit_history_action()
 
         elif self.resizing:
             # Finalize resizing
@@ -3289,6 +3933,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Resizing ROI invalidates any captured masks (shape changed)
             self._invalidate_fixed_masks("ROI resized")
             self.show_frame() # Redraw in final state
+            self._commit_history_action()
 
     def _get_pixmap_rect_in_label(self) -> Optional[QtCore.QRect]:
         """Calculates the QRect occupied by the scaled pixmap within the image label."""
@@ -3455,27 +4100,172 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     # --- Frame Range Selection ---
 
+    def _normalized_analysis_range(
+        self,
+        start_frame: Optional[int] = None,
+        end_frame: Optional[int] = None,
+    ) -> Tuple[int, int]:
+        """Clamp and normalize an analysis range to the loaded video bounds."""
+        if self.total_frames <= 0:
+            return 0, 0
+
+        start = self.start_frame if start_frame is None else start_frame
+        end = self.end_frame if end_frame is None else end_frame
+        safe_start = max(0, min(int(start), self.total_frames - 1))
+        default_end = self.total_frames - 1 if end is None else int(end)
+        safe_end = max(0, min(default_end, self.total_frames - 1))
+        if safe_end < safe_start:
+            safe_end = safe_start
+        return safe_start, safe_end
+
+    def _format_analysis_window_summary(self) -> str:
+        """Build the compact analysis-range summary shown in the timeline."""
+        if self.total_frames <= 0:
+            return "Analysis Window: not set"
+
+        start, end = self._normalized_analysis_range()
+        frame_count = (end - start) + 1
+        duration = frame_count / self.playback_fps if self.playback_fps > 0 else 0.0
+        return (
+            f"Analysis Window: Frames {start + 1}-{end + 1} "
+            f"({frame_count:,} frames, {duration:.2f}s)"
+        )
+
+    def _sync_analysis_range_widgets(self):
+        """Refresh the range editor widgets from the current start/end values."""
+        if not hasattr(self, "analysis_range_slider"):
+            return
+
+        if self.total_frames <= 0:
+            self.analysis_range_slider.set_range(0, 0)
+            self.analysis_range_slider.set_values(0, 0)
+            self.analysis_range_slider.set_current_value(0)
+            self.analysis_range_summary_label.setText("Analysis Window: not set")
+
+            for spinbox in (self.range_start_spinbox, self.range_end_spinbox):
+                spinbox.blockSignals(True)
+                spinbox.setRange(0, 0)
+                spinbox.setValue(0)
+                spinbox.blockSignals(False)
+            return
+
+        start, end = self._normalized_analysis_range()
+        self.start_frame = start
+        self.end_frame = end
+
+        self.analysis_range_slider.set_range(0, self.total_frames - 1)
+        self.analysis_range_slider.set_values(start, end)
+        self.analysis_range_slider.set_current_value(self.current_frame_index)
+        self.analysis_range_summary_label.setText(self._format_analysis_window_summary())
+
+        self.range_start_spinbox.blockSignals(True)
+        self.range_start_spinbox.setRange(1, self.total_frames)
+        self.range_start_spinbox.setValue(start + 1)
+        self.range_start_spinbox.blockSignals(False)
+
+        self.range_end_spinbox.blockSignals(True)
+        self.range_end_spinbox.setRange(1, self.total_frames)
+        self.range_end_spinbox.setValue(end + 1)
+        self.range_end_spinbox.blockSignals(False)
+
+        if self.cap and self.cap.isOpened():
+            self._update_video_info()
+
+    def _apply_analysis_range(
+        self,
+        start_frame: int,
+        end_frame: int,
+        *,
+        result_message: Optional[str] = None,
+        seek_to_frame: Optional[int] = None,
+    ) -> bool:
+        """Apply a new analysis range and update the coupled widgets."""
+        if not self.cap or not self.cap.isOpened() or self.total_frames <= 0:
+            return False
+
+        normalized_start, normalized_end = self._normalized_analysis_range(start_frame, end_frame)
+        changed = (
+            normalized_start != self.start_frame
+            or normalized_end != self.end_frame
+        )
+
+        self.start_frame = normalized_start
+        self.end_frame = normalized_end
+        self._sync_analysis_range_widgets()
+        self._update_threshold_display()
+
+        if seek_to_frame is not None:
+            target = max(0, min(int(seek_to_frame), self.total_frames - 1))
+            self.frame_slider.blockSignals(True)
+            self.frame_spinbox.blockSignals(True)
+            self.frame_slider.setValue(target)
+            self.frame_spinbox.setValue(target)
+            self.frame_slider.blockSignals(False)
+            self.frame_spinbox.blockSignals(False)
+            self._seek_to_frame(target)
+
+        if result_message:
+            self.results_label.setText(result_message)
+        return changed
+
+    def _on_analysis_range_slider_changed(self, start_frame: int, end_frame: int):
+        """Handle direct manipulation of the analysis range slider."""
+        self._apply_analysis_range(start_frame, end_frame)
+
+    def _on_range_start_spinbox_changed(self, value: int):
+        """Handle typed start-frame updates from the range editor."""
+        if self._history_restoring or self.total_frames <= 0:
+            return
+        before = self._capture_editor_snapshot()
+        changed = self._apply_analysis_range(value - 1, self.end_frame if self.end_frame is not None else value - 1)
+        if changed:
+            self._record_history_change("Set Analysis Start", before)
+
+    def _on_range_end_spinbox_changed(self, value: int):
+        """Handle typed end-frame updates from the range editor."""
+        if self._history_restoring or self.total_frames <= 0:
+            return
+        before = self._capture_editor_snapshot()
+        changed = self._apply_analysis_range(self.start_frame, value - 1)
+        if changed:
+            self._record_history_change("Set Analysis End", before)
+
+    def reset_analysis_range_to_full_video(self):
+        """Reset the analysis range to cover the entire loaded video."""
+        if not self.cap or not self.cap.isOpened() or self.total_frames <= 0:
+            return
+        before = self._capture_editor_snapshot()
+        changed = self._apply_analysis_range(
+            0,
+            self.total_frames - 1,
+            result_message="Analysis window reset to the full video.",
+        )
+        if changed:
+            self._record_history_change("Reset Analysis Window", before)
+
     def set_start_frame(self):
         """Sets the current frame as the start frame for analysis."""
         if self.cap and self.cap.isOpened():
-            self.start_frame = self.current_frame_index
-            self.results_label.setText(f"Start frame set to {self.start_frame + 1}") # Display 1-based index
-            # Ensure end frame is not before start frame
-            if self.end_frame is not None and self.end_frame < self.start_frame:
-                self.end_frame = self.start_frame
-                self.results_label.setText(f"Start frame set to {self.start_frame + 1}. End frame adjusted.")
-        self._update_threshold_display() # Update threshold display after setting frames
+            before = self._capture_editor_snapshot()
+            changed = self._apply_analysis_range(
+                self.current_frame_index,
+                self.end_frame if self.end_frame is not None else self.current_frame_index,
+                result_message=f"Start frame set to {self.current_frame_index + 1}",
+            )
+            if changed:
+                self._record_history_change("Set Analysis Start", before)
 
     def set_end_frame(self):
         """Sets the current frame as the end frame for analysis."""
         if self.cap and self.cap.isOpened():
-            self.end_frame = self.current_frame_index
-            self.results_label.setText(f"End frame set to {self.end_frame + 1}") # Display 1-based index
-            # Ensure start frame is not after end frame
-            if self.start_frame > self.end_frame:
-                self.start_frame = self.end_frame
-                self.results_label.setText(f"End frame set to {self.end_frame + 1}. Start frame adjusted.")
-        self._update_threshold_display() # Update threshold display after setting frames
+            before = self._capture_editor_snapshot()
+            changed = self._apply_analysis_range(
+                self.start_frame,
+                self.current_frame_index,
+                result_message=f"End frame set to {self.current_frame_index + 1}",
+            )
+            if changed:
+                self._record_history_change("Set Analysis End", before)
 
     def auto_detect_range(self):
         """
@@ -3574,18 +4364,19 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         calculated_end_frame = min(selected_end_frame, total_frames - 1)
         calculated_start_frame = min(calculated_start_frame, calculated_end_frame)
 
-        self.start_frame = calculated_start_frame
-        self.end_frame = calculated_end_frame
-
-        self.frame_slider.blockSignals(True)
-        self.frame_spinbox.blockSignals(True)
-        self.frame_slider.setValue(self.start_frame)
-        self.frame_spinbox.setValue(self.start_frame)
-        self.frame_slider.blockSignals(False)
-        self.frame_spinbox.blockSignals(False)
-
-        self._seek_to_frame(self.start_frame)
-        self.update_frame_label()
+        before = self._capture_editor_snapshot()
+        changed = self._apply_analysis_range(
+            calculated_start_frame,
+            calculated_end_frame,
+            result_message=(
+                f"✅ Audio-detected range: Frame {calculated_start_frame + 1} to {calculated_end_frame + 1} "
+                f"(Duration: {((calculated_end_frame - calculated_start_frame) + 1) / fps:.1f}s, "
+                f"Expected: {expected_duration:.1f}s)"
+            ),
+            seek_to_frame=calculated_start_frame,
+        )
+        if changed:
+            self._record_history_change("Auto-Detect Analysis Window", before)
 
         actual_duration = (self.end_frame - self.start_frame + 1) / fps
         self.results_label.setText(
