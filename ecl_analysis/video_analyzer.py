@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass
 from string import Template
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -20,7 +20,8 @@ from .analysis.brightness import (
     compute_l_star_frame as analysis_compute_l_star_frame,
 )
 from .analysis.duration import validate_run_duration as analysis_validate_run_duration
-from .analysis.models import AnalysisRequest, AnalysisResult
+from .analysis.masking import MASK_TOP_CANDIDATES, build_consensus_mask, build_signal_mask, evaluate_mask_candidate
+from .analysis.models import AnalysisRequest, AnalysisResult, MaskCaptureMetadata
 from .audio import AudioAnalyzer, AudioManager
 from .cache import FrameCache
 from .constants import (
@@ -37,6 +38,7 @@ from .constants import (
     COLOR_WARNING,
     DEFAULT_FONT_FAMILY,
     DEFAULT_MANUAL_THRESHOLD,
+    DEFAULT_NOISE_FLOOR_THRESHOLD,
     DEFAULT_SETTINGS_FILE,
     FRAME_CACHE_SIZE,
     JUMP_FRAMES,
@@ -153,6 +155,7 @@ class EditorSnapshot:
     use_fixed_mask: bool
     fixed_roi_masks: List[Optional[np.ndarray]]
     mask_source_frames: List[Optional[int]]
+    mask_metadata: List[Optional[MaskCaptureMetadata]]
 
 
 @dataclass
@@ -463,11 +466,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.use_fixed_mask = False
         self.fixed_roi_masks: List[Optional[np.ndarray]] = []  # aligned with self.rects
         self.mask_source_frames: List[Optional[int]] = []  # frame index each mask was captured from
+        self.fixed_mask_metadata: List[Optional[MaskCaptureMetadata]] = []  # aligned with self.rects
 
         # Noise filtering parameters (adjustable via UI)
         self.morphological_kernel_size = MORPHOLOGICAL_KERNEL_SIZE
         self.background_percentile = 90.0  # For background ROI threshold calculation
-        self.noise_floor_threshold = 0.0   # Additional noise floor filtering
+        self.noise_floor_threshold = DEFAULT_NOISE_FLOOR_THRESHOLD
 
         # Video playback
         self.is_playing = False
@@ -494,6 +498,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     self.frame_cache_size = max(10, min(2000, configured_cache))
                     self.frame_cache = FrameCache(self.frame_cache_size)
 
+                    # Load mask-analysis defaults
+                    configured_kernel = int(self.settings.get("morphological_kernel_size", MORPHOLOGICAL_KERNEL_SIZE))
+                    if configured_kernel % 2 == 0:
+                        configured_kernel = max(1, configured_kernel - 1)
+                    self.morphological_kernel_size = max(1, min(15, configured_kernel))
+                    self.background_percentile = float(self.settings.get("background_percentile", 90.0))
+                    self.background_percentile = max(50.0, min(99.0, self.background_percentile))
+                    self.noise_floor_threshold = float(
+                        self.settings.get("noise_floor_threshold", DEFAULT_NOISE_FLOOR_THRESHOLD)
+                    )
+                    self.noise_floor_threshold = max(0.0, min(10.0, self.noise_floor_threshold))
+
         except Exception as e:
             logging.warning(f"Could not load settings: {e}")
             self.settings = {}
@@ -506,6 +522,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.settings['audio_enabled'] = self.audio_manager.enabled
             self.settings['audio_volume'] = self.audio_manager.volume
             self.settings['frame_cache_size'] = int(self.frame_cache_size)
+            self.settings['morphological_kernel_size'] = int(self.morphological_kernel_size)
+            self.settings['background_percentile'] = float(self.background_percentile)
+            self.settings['noise_floor_threshold'] = float(self.noise_floor_threshold)
             with open(DEFAULT_SETTINGS_FILE, 'w') as f:
                 json.dump(self.settings, f, indent=2)
         except Exception as e:
@@ -751,6 +770,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Deep-copy masks for history snapshots."""
         return [mask.copy() if isinstance(mask, np.ndarray) else None for mask in masks]
 
+    def _clone_mask_metadata_list(
+        self,
+        metadata_list: List[Optional[MaskCaptureMetadata]],
+    ) -> List[Optional[MaskCaptureMetadata]]:
+        """Deep-copy mask provenance for history snapshots."""
+        return [metadata.clone() if isinstance(metadata, MaskCaptureMetadata) else None for metadata in metadata_list]
+
     def _capture_editor_snapshot(self) -> EditorSnapshot:
         """Capture the mutable editor state for undo/redo."""
         return EditorSnapshot(
@@ -767,6 +793,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             use_fixed_mask=bool(self.use_fixed_mask),
             fixed_roi_masks=self._clone_mask_list(self.fixed_roi_masks),
             mask_source_frames=[None if value is None else int(value) for value in self.mask_source_frames],
+            mask_metadata=self._clone_mask_metadata_list(self.fixed_mask_metadata),
         )
 
     def _snapshots_equal(self, first: EditorSnapshot, second: EditorSnapshot) -> bool:
@@ -785,7 +812,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             and first.use_fixed_mask == second.use_fixed_mask
             and first.mask_source_frames == second.mask_source_frames
         )
-        if not scalar_fields_match or len(first.fixed_roi_masks) != len(second.fixed_roi_masks):
+        if (
+            not scalar_fields_match
+            or len(first.fixed_roi_masks) != len(second.fixed_roi_masks)
+            or len(first.mask_metadata) != len(second.mask_metadata)
+        ):
             return False
 
         for first_mask, second_mask in zip(first.fixed_roi_masks, second.fixed_roi_masks):
@@ -795,6 +826,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 return False
             if not np.array_equal(first_mask, second_mask):
                 return False
+
+        for first_metadata, second_metadata in zip(first.mask_metadata, second.mask_metadata):
+            if first_metadata is None and second_metadata is None:
+                continue
+            if (first_metadata is None) != (second_metadata is None):
+                return False
+            if first_metadata is not None and second_metadata is not None:
+                if first_metadata.to_dict() != second_metadata.to_dict():
+                    return False
         return True
 
     def _begin_history_action(self, label: str):
@@ -884,6 +924,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.use_fixed_mask = snapshot.use_fixed_mask
             self.fixed_roi_masks = self._clone_mask_list(snapshot.fixed_roi_masks)
             self.mask_source_frames = list(snapshot.mask_source_frames)
+            self.fixed_mask_metadata = self._clone_mask_metadata_list(snapshot.mask_metadata)
 
             if hasattr(self, "threshold_spin"):
                 self.threshold_spin.blockSignals(True)
@@ -935,6 +976,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 self._sync_analysis_range_widgets()
 
             self._update_current_brightness_display()
+            self._update_mask_pixel_count_display()
+            self._update_mask_quality_display()
             self.show_frame()
         finally:
             self._history_restoring = False
@@ -1975,7 +2018,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         viz_layout = QtWidgets.QVBoxLayout()
         
         self.show_mask_checkbox = QtWidgets.QCheckBox("Show Pixel Mask")
-        self.show_mask_checkbox.setToolTip("Highlight analyzed pixels in red overlay")
+        self.show_mask_checkbox.setToolTip("Highlight adaptive pixels in blue, fixed pixels in red, and overlap in magenta")
         self.show_mask_checkbox.setChecked(self.show_pixel_mask)
         viz_layout.addWidget(self.show_mask_checkbox)
 
@@ -2007,6 +2050,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.mask_pixel_count_label = QtWidgets.QLabel("Mask Pixels: n/a")
         self.mask_pixel_count_label.setObjectName("statusLabel")
         viz_layout.addWidget(self.mask_pixel_count_label)
+
+        self.mask_quality_label = QtWidgets.QLabel("Mask Quality: n/a")
+        self.mask_quality_label.setObjectName("statusLabel")
+        self.mask_quality_label.setWordWrap(True)
+        viz_layout.addWidget(self.mask_quality_label)
 
         # Noise filtering controls
         noise_groupbox = QtWidgets.QGroupBox("Noise Filtering")
@@ -2334,6 +2382,28 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         else:
             self.mask_pixel_count_label.setText("Mask Pixels: n/a")
 
+    def _update_mask_quality_display(self):
+        """Update sidebar label with per-ROI mask provenance and warnings."""
+        if not hasattr(self, "mask_quality_label"):
+            return
+
+        lines: List[str] = []
+        for idx, metadata in enumerate(getattr(self, "fixed_mask_metadata", [])):
+            if idx == self.background_roi_idx:
+                continue
+            if not isinstance(metadata, MaskCaptureMetadata):
+                lines.append(f"ROI {idx + 1}: n/a")
+                continue
+
+            source_text = ",".join(str(frame + 1) for frame in metadata.source_frames[:MASK_TOP_CANDIDATES]) or "n/a"
+            warnings = ", ".join(metadata.warnings) if metadata.warnings else "none"
+            lines.append(
+                f"ROI {idx + 1}: {metadata.confidence_label} | px {metadata.pixel_count} | "
+                f"src {source_text} | cons {metadata.consensus_ratio:.2f} | warn {warnings}"
+            )
+
+        self.mask_quality_label.setText("\n".join(lines) if lines else "Mask Quality: n/a")
+
     def _invalidate_fixed_masks(self, reason: str = ""):
         """Clear captured fixed masks when ROIs change or become invalid.
         Optionally provide a reason for UI feedback.
@@ -2341,11 +2411,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.fixed_roi_masks:
             self.fixed_roi_masks = [None for _ in self.rects]
             self.mask_source_frames = [None for _ in self.rects]
+            self.fixed_mask_metadata = [None for _ in self.rects]
             if reason:
                 self.mask_status_label.setText(f"Mask: cleared ({reason})")
             else:
                 self.mask_status_label.setText("Mask: cleared")
         self._update_mask_pixel_count_display()
+        self._update_mask_quality_display()
 
     def _update_video_info(self):
         """Update video information display."""
@@ -2542,9 +2614,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Reset fixed masks on new video load
             self.fixed_roi_masks = [None for _ in self.rects]
             self.mask_source_frames = [None for _ in self.rects]
+            self.fixed_mask_metadata = [None for _ in self.rects]
             self.use_fixed_mask_checkbox.setChecked(False)
             self.mask_status_label.setText("Mask: none")
             self._update_mask_pixel_count_display()
+            self._update_mask_quality_display()
 
             # Attempt auto-detection if ROIs already exist
             if self.rects:
@@ -2869,6 +2943,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Resize/realign masks; default to None for new or mismatched entries
             new_masks: List[Optional[np.ndarray]] = []
             new_sources: List[Optional[int]] = []
+            new_metadata: List[Optional[MaskCaptureMetadata]] = []
             for i in range(len(self.rects)):
                 if i < len(self.fixed_roi_masks):
                     new_masks.append(self.fixed_roi_masks[i])
@@ -2878,9 +2953,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     new_sources.append(self.mask_source_frames[i])
                 else:
                     new_sources.append(None)
+                if i < len(self.fixed_mask_metadata):
+                    new_metadata.append(self.fixed_mask_metadata[i])
+                else:
+                    new_metadata.append(None)
             self.fixed_roi_masks = new_masks
             self.mask_source_frames = new_sources
+            self.fixed_mask_metadata = new_metadata
         self._update_mask_pixel_count_display()
+        self._update_mask_quality_display()
 
         self._update_widget_states(video_loaded=bool(self.cap), rois_exist=bool(self.rects))
         self._update_threshold_display()
@@ -3088,6 +3169,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Remove corresponding fixed mask and invalidate
             if self.selected_rect_idx is not None and self.selected_rect_idx < len(self.fixed_roi_masks):
                 del self.fixed_roi_masks[self.selected_rect_idx]
+            if self.selected_rect_idx is not None and self.selected_rect_idx < len(self.fixed_mask_metadata):
+                del self.fixed_mask_metadata[self.selected_rect_idx]
             self._invalidate_fixed_masks("ROI deleted")
             
             # Handle background ROI index adjustment
@@ -3121,9 +3204,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.background_roi_idx = None
             self.fixed_roi_masks = []
             self.mask_source_frames = []
+            self.fixed_mask_metadata = []
             self.use_fixed_mask_checkbox.setChecked(False)
             self.mask_status_label.setText("Mask: none")
             self._update_mask_pixel_count_display()
+            self._update_mask_quality_display()
             self.update_rect_list()
             self.show_frame()
             self.results_label.setText("Cleared all ROIs.")
@@ -3138,6 +3223,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         before = self._capture_editor_snapshot()
         self.background_roi_idx = self.selected_rect_idx
+        self._invalidate_fixed_masks("background ROI changed")
         
         # Calculate background threshold for display
         if self.frame is not None:
@@ -3157,22 +3243,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _calculate_background_threshold(self) -> Optional[float]:
         """Calculate the current background threshold based on background ROI or manual setting."""
         if self.background_roi_idx is not None and self.frame is not None:
-            # Calculate threshold from current frame's background ROI
-            if 0 <= self.background_roi_idx < len(self.rects):
-                pt1, pt2 = self.rects[self.background_roi_idx]
-                fh, fw = self.frame.shape[:2]
-                
-                # Ensure ROI coordinates are valid within the frame
-                x1 = max(0, min(pt1[0], fw - 1))
-                y1 = max(0, min(pt1[1], fh - 1))
-                x2 = max(0, min(pt2[0], fw - 1))
-                y2 = max(0, min(pt2[1], fh - 1))
-                
-                if x2 > x1 and y2 > y1:
-                    roi = self.frame[y1:y2, x1:x2]
-                    l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
-                    return l_raw_mean
-        
+            frame_l_star = self._compute_l_star_frame(self.frame)
+            return self._compute_background_brightness(self.frame, frame_l_star=frame_l_star)
+
         # If no background ROI or calculation failed, return manual threshold
         return None
 
@@ -3200,13 +3273,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _apply_pixel_mask_overlay(self, frame: np.ndarray) -> np.ndarray:
         """
-        Apply red overlay to show which pixels are being analyzed in each ROI.
+        Apply adaptive/fixed overlay colors to show analyzed pixels in each ROI.
         
         Args:
             frame: BGR frame to apply overlay to
             
         Returns:
-            Frame with red mask overlay applied
+            Frame with mask overlay applied
         """
         overlay = frame.copy()
 
@@ -3230,27 +3303,34 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 roi = frame[y1:y2, x1:x2]
                 roi_l_star = l_star_frame[y1:y2, x1:x2]
                 try:
-                    use_fixed = self.use_fixed_mask and roi_idx < len(self.fixed_roi_masks) and isinstance(self.fixed_roi_masks[roi_idx], np.ndarray)
-                    mask = None
+                    adaptive_mask, _threshold_value, _min_area = build_signal_mask(
+                        roi_l_star=roi_l_star,
+                        background_brightness=background_brightness,
+                        noise_floor_threshold=self.noise_floor_threshold,
+                        morphological_kernel_size=self.morphological_kernel_size,
+                    )
+                    use_fixed = (
+                        self.use_fixed_mask
+                        and roi_idx < len(self.fixed_roi_masks)
+                        and isinstance(self.fixed_roi_masks[roi_idx], np.ndarray)
+                    )
+                    fixed_mask = None
                     if use_fixed:
-                        fixed_mask = self.fixed_roi_masks[roi_idx]
-                        if fixed_mask is not None and fixed_mask.shape[:2] == roi.shape[:2]:
-                            mask = fixed_mask.astype(bool)
-                        else:
-                            # Shape mismatch - ignore fixed mask
-                            mask = None
+                        candidate_mask = self.fixed_roi_masks[roi_idx]
+                        if candidate_mask is not None and candidate_mask.shape[:2] == roi.shape[:2]:
+                            fixed_mask = candidate_mask.astype(bool)
 
-                    if mask is None:
-                        # Derive mask from current frame using cached L* channel
-                        if background_brightness is not None:
-                            mask = roi_l_star > background_brightness
-                        else:
-                            mask = np.ones_like(roi_l_star, dtype=bool)
-                    
-                    # Apply red overlay to analyzed pixels
                     roi_overlay = roi.copy()
-                    roi_overlay[mask] = roi_overlay[mask] * 0.7 + np.array([0, 0, 255]) * 0.3  # Red tint
-                    
+                    if fixed_mask is not None:
+                        overlap_mask = fixed_mask & adaptive_mask
+                        fixed_only_mask = fixed_mask & ~adaptive_mask
+                        adaptive_only_mask = adaptive_mask & ~fixed_mask
+                        roi_overlay[fixed_only_mask] = roi_overlay[fixed_only_mask] * 0.55 + np.array([0, 0, 255]) * 0.45
+                        roi_overlay[adaptive_only_mask] = roi_overlay[adaptive_only_mask] * 0.55 + np.array([255, 0, 0]) * 0.45
+                        roi_overlay[overlap_mask] = roi_overlay[overlap_mask] * 0.45 + np.array([255, 0, 255]) * 0.55
+                    else:
+                        roi_overlay[adaptive_mask] = roi_overlay[adaptive_mask] * 0.7 + np.array([0, 0, 255]) * 0.3
+
                     # Apply overlay back to main frame
                     overlay[y1:y2, x1:x2] = roi_overlay
                     
@@ -3284,6 +3364,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.mask_status_label.setText("Mask: active")
         else:
             self.mask_status_label.setText("Mask: disabled")
+        self._update_mask_quality_display()
         if self.frame is not None:
             self._update_current_brightness_display()
             self.show_frame()
@@ -3314,11 +3395,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         masks: List[Optional[np.ndarray]] = []
         sources: List[Optional[int]] = []
+        metadata_list: List[Optional[MaskCaptureMetadata]] = []
         created_any = False
         for roi_idx, (pt1, pt2) in enumerate(self.rects):
             if roi_idx == self.background_roi_idx:
                 masks.append(None)
                 sources.append(None)
+                metadata_list.append(None)
                 continue
             x1 = max(0, min(pt1[0], fw - 1))
             y1 = max(0, min(pt1[1], fh - 1))
@@ -3327,30 +3410,44 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if x2 > x1 and y2 > y1:
                 roi_l_star = l_star_frame[y1:y2, x1:x2]
                 try:
-                    if background_brightness is not None:
-                        mask = roi_l_star > background_brightness
-                        # Morphological cleanup similar to analysis
-                        if np.any(mask):
-                            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.morphological_kernel_size, self.morphological_kernel_size))
-                            mask_uint8 = mask.astype(np.uint8) * 255
-                            cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-                            mask = cleaned > 0
-                    else:
-                        # If no background brightness, default to full ROI
-                        mask = np.ones(roi_l_star.shape, dtype=bool)
+                    candidate = evaluate_mask_candidate(
+                        roi_l_star=roi_l_star,
+                        background_brightness=background_brightness,
+                        noise_floor_threshold=self.noise_floor_threshold,
+                        morphological_kernel_size=self.morphological_kernel_size,
+                        frame_idx=source_frame_idx,
+                    )
+                    candidates = [candidate] if candidate is not None else []
+                    mask, metadata = build_consensus_mask(
+                        candidates=candidates,
+                        capture_mode="manual",
+                        noise_floor_threshold=self.noise_floor_threshold,
+                        morphological_kernel_size=self.morphological_kernel_size,
+                    )
                     masks.append(mask)
-                    sources.append(source_frame_idx)
-                    created_any = True
+                    sources.append(metadata.primary_source_frame)
+                    metadata_list.append(metadata)
+                    created_any = created_any or mask is not None
                 except Exception as e:
                     logging.warning(f"Failed to capture mask for ROI {roi_idx+1}: {e}")
                     masks.append(None)
                     sources.append(None)
+                    metadata_list.append(
+                        MaskCaptureMetadata(
+                            capture_mode="manual",
+                            warnings=["capture_error"],
+                            noise_floor_threshold=self.noise_floor_threshold,
+                            morphological_kernel_size=self.morphological_kernel_size,
+                        )
+                    )
             else:
                 masks.append(None)
                 sources.append(None)
+                metadata_list.append(None)
 
         self.fixed_roi_masks = masks
         self.mask_source_frames = sources
+        self.fixed_mask_metadata = metadata_list
         if created_any:
             self.mask_status_label.setText(f"Mask: captured from frame {source_frame_idx}")
             if not self.use_fixed_mask:
@@ -3362,6 +3459,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         else:
             self.mask_status_label.setText("Mask: none (could not capture)")
         self._update_mask_pixel_count_display()
+        self._update_mask_quality_display()
         if self.frame is not None:
             self._update_current_brightness_display()
             self.show_frame()
@@ -3397,20 +3495,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                                             "Invalid frame range for analysis.")
             return
 
-        step = max(1, (end_frame - start_frame) // 100)
         request = MaskScanRequest(
             video_path=self.video_path,
             rects=[((int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1]))) for pt1, pt2 in self.rects],
             background_roi_idx=self.background_roi_idx,
             start_frame=start_frame,
             end_frame=end_frame,
-            step=step,
+            step=1,
             background_percentile=self.background_percentile,
             morphological_kernel_size=self.morphological_kernel_size,
+            noise_floor_threshold=self.noise_floor_threshold,
         )
         self._start_mask_worker(
             worker=BrightestFrameWorker(request),
-            label="Finding brightest frame...",
+            label="Scoring signal-rich frames...",
             title="Auto-Capture Masks",
             task_type="global",
         )
@@ -3451,16 +3549,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                                             "Invalid frame range for analysis.")
             return
 
-        step = max(1, (end_frame - start_frame) // 100)
         request = MaskScanRequest(
             video_path=self.video_path,
             rects=[((int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1]))) for pt1, pt2 in self.rects],
             background_roi_idx=self.background_roi_idx,
             start_frame=start_frame,
             end_frame=end_frame,
-            step=step,
+            step=1,
             background_percentile=self.background_percentile,
             morphological_kernel_size=self.morphological_kernel_size,
+            noise_floor_threshold=self.noise_floor_threshold,
         )
         self._start_mask_worker(
             worker=PerRoiMaskCaptureWorker(request),
@@ -3517,12 +3615,36 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.results_label.setText("Auto-capture failed: invalid worker result.")
             return
 
-        self.frame_slider.setValue(result.brightest_frame_idx)
-        self._capture_fixed_masks(source_frame_idx=result.brightest_frame_idx)
+        before = self._capture_editor_snapshot()
+        self.fixed_roi_masks = result.masks
+        self.mask_source_frames = result.sources
+        self.fixed_mask_metadata = result.metadata
+        created_count = sum(1 for mask in result.masks if mask is not None)
+        candidate_frame_text = ", ".join(str(frame + 1) for frame in result.candidate_frames) or "n/a"
+        if created_count > 0:
+            primary_frame = next((frame for frame in result.sources if frame is not None), None)
+            if primary_frame is not None:
+                self.frame_slider.setValue(primary_frame)
+            self.mask_status_label.setText(f"Mask: global consensus from [{candidate_frame_text}]")
+            if not self.use_fixed_mask:
+                self.use_fixed_mask = True
+                self.use_fixed_mask_checkbox.blockSignals(True)
+                self.use_fixed_mask_checkbox.setChecked(True)
+                self.use_fixed_mask_checkbox.blockSignals(False)
+        else:
+            self.mask_status_label.setText("Mask: none (could not capture)")
+        self._update_mask_pixel_count_display()
+        self._update_mask_quality_display()
+        if self.frame is not None:
+            self._update_current_brightness_display()
+            self.show_frame()
+        self._record_history_change("Capture Fixed Masks", before)
         QtWidgets.QMessageBox.information(
             self,
             "Auto-Capture Complete",
-            f"Captured masks from frame {result.brightest_frame_idx} (brightness: {result.max_brightness:.1f} L*)",
+            f"Captured {created_count} masks from global consensus frames "
+            f"[{candidate_frame_text}].\n\n"
+            f"Best shared signal score: {result.max_signal_score:.1f}",
         )
 
     def _on_per_roi_mask_finished(self, result_obj: object):
@@ -3536,10 +3658,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         before = self._capture_editor_snapshot()
         self.fixed_roi_masks = result.masks
         self.mask_source_frames = result.sources
+        self.fixed_mask_metadata = result.metadata
 
         created_count = sum(1 for m in result.masks if m is not None)
         frame_info = [
-            str(result.sources[i]) if result.sources[i] is not None else "n/a"
+            str(result.sources[i] + 1) if result.sources[i] is not None else "n/a"
             for i in range(len(self.rects))
             if i != self.background_roi_idx
         ]
@@ -3554,6 +3677,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.mask_status_label.setText("Mask: none (could not capture)")
 
         self._update_mask_pixel_count_display()
+        self._update_mask_quality_display()
         if self.frame is not None:
             self._update_current_brightness_display()
             self.show_frame()
@@ -3604,6 +3728,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.frame is not None:
             self._update_current_brightness_display()
             self.show_frame()
+        self._save_settings()
         if before is not None:
             self._record_history_change("Adjust Mask Kernel", before)
 
@@ -3612,11 +3737,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         before = None if self._history_restoring else self._capture_editor_snapshot()
         self.background_percentile = float(value)
         self.bg_percentile_label.setText(f"{self.background_percentile:.0f}%")
+        self._invalidate_fixed_masks("background threshold changed")
         # Update display since background calculation changed
         if self.frame is not None:
             self._update_current_brightness_display()
             self._update_threshold_display()
             self.show_frame()
+        self._save_settings()
         if before is not None:
             self._record_history_change("Adjust Background Percentile", before)
 
@@ -3630,6 +3757,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.frame is not None:
             self._update_current_brightness_display()
             self.show_frame()
+        self._save_settings()
         if before is not None:
             self._record_history_change("Adjust Noise Floor", before)
 
@@ -4189,6 +4317,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             or normalized_end != self.end_frame
         )
 
+        if changed:
+            self._invalidate_fixed_masks("analysis range changed")
         self.start_frame = normalized_start
         self.end_frame = normalized_end
         self._sync_analysis_range_widgets()
@@ -4421,6 +4551,31 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._pending_audio_expected_duration = 0.0
         self._set_busy_state(False)
 
+    def _build_analysis_metadata_snapshot(self) -> Dict[str, Any]:
+        """Capture analysis settings and mask provenance for export/reporting."""
+        return {
+            "background_roi_idx": self.background_roi_idx,
+            "background_percentile": float(self.background_percentile),
+            "noise_floor_threshold": float(self.noise_floor_threshold),
+            "morphological_kernel_size": int(self.morphological_kernel_size),
+            "start_frame": int(self.start_frame),
+            "end_frame": int(self.end_frame if self.end_frame is not None else self.start_frame),
+            "use_fixed_mask": bool(self.use_fixed_mask),
+            "roi_rects": [
+                {
+                    "index": idx,
+                    "pt1": [int(pt1[0]), int(pt1[1])],
+                    "pt2": [int(pt2[0]), int(pt2[1])],
+                    "is_background": idx == self.background_roi_idx,
+                }
+                for idx, (pt1, pt2) in enumerate(self.rects)
+            ],
+            "mask_metadata": [
+                metadata.to_dict() if isinstance(metadata, MaskCaptureMetadata) else None
+                for metadata in self.fixed_mask_metadata
+            ],
+        }
+
 
     # --- Analysis and Plotting ---
 
@@ -4459,6 +4614,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 fixed_masks_snapshot.append(mask.copy())
             else:
                 fixed_masks_snapshot.append(None)
+        fixed_mask_metadata_snapshot = self._clone_mask_metadata_list(self.fixed_mask_metadata)
 
         request = AnalysisRequest(
             video_path=self.video_path,
@@ -4471,6 +4627,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             background_percentile=self.background_percentile,
             morphological_kernel_size=self.morphological_kernel_size,
             noise_floor_threshold=self.noise_floor_threshold,
+            mask_metadata=fixed_mask_metadata_snapshot,
+            analysis_metadata=self._build_analysis_metadata_snapshot(),
         )
 
         self._analysis_save_dir = save_dir

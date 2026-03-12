@@ -96,6 +96,7 @@ def test_brightest_frame_worker_picks_max_frame(monkeypatch):
         step=1,
         background_percentile=90.0,
         morphological_kernel_size=3,
+        noise_floor_threshold=0.0,
     )
 
     worker = BrightestFrameWorker(request)
@@ -105,7 +106,9 @@ def test_brightest_frame_worker_picks_max_frame(monkeypatch):
 
     result = captured.get("result")
     assert isinstance(result, BrightestFrameResult)
-    assert result.brightest_frame_idx == 1
+    assert result.candidate_frames[0] == 1
+    assert result.sources[0] == 1
+    assert result.masks[0] is not None
 
 
 def test_brightest_frame_worker_handles_edge_touching_roi(monkeypatch):
@@ -124,6 +127,7 @@ def test_brightest_frame_worker_handles_edge_touching_roi(monkeypatch):
         step=1,
         background_percentile=90.0,
         morphological_kernel_size=3,
+        noise_floor_threshold=0.0,
     )
 
     worker = BrightestFrameWorker(request)
@@ -133,7 +137,8 @@ def test_brightest_frame_worker_handles_edge_touching_roi(monkeypatch):
 
     result = captured.get("result")
     assert isinstance(result, BrightestFrameResult)
-    assert result.brightest_frame_idx == 1
+    assert result.candidate_frames[0] == 1
+    assert result.sources[0] == 1
 
 
 def test_per_roi_mask_capture_worker_returns_sources(monkeypatch):
@@ -153,6 +158,7 @@ def test_per_roi_mask_capture_worker_returns_sources(monkeypatch):
         step=1,
         background_percentile=90.0,
         morphological_kernel_size=3,
+        noise_floor_threshold=0.0,
     )
 
     worker = PerRoiMaskCaptureWorker(request)
@@ -166,3 +172,5 @@ def test_per_roi_mask_capture_worker_returns_sources(monkeypatch):
     assert result.sources[1] == 1
     assert result.masks[0] is not None
     assert result.masks[1] is not None
+    assert result.metadata[0] is not None
+    assert result.metadata[1] is not None
