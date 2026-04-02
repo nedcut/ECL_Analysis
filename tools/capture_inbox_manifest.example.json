@@ -1,0 +1,21 @@
+{
+  "inbox_dir": "incoming",
+  "output_dir": "incoming_outputs",
+  "archive_dir": "incoming_archive",
+  "include_patterns": ["*.mov", "*.mp4"],
+  "analysis_case": {
+    "name": "e2e_capture",
+    "analysis_name": "InboxAuto",
+    "rects": [
+      [[10, 10], [70, 70]],
+      [[80, 10], [140, 70]]
+    ],
+    "background_roi_idx": 1,
+    "capture_mode": "per_roi_auto",
+    "start_frame": 0,
+    "background_percentile": 90.0,
+    "morphological_kernel_size": 3,
+    "noise_floor_threshold": 5.0,
+    "expected_nonempty_rois": [0]
+  }
+}

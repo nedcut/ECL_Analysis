@@ -54,6 +54,7 @@ from .constants import (
 )
 from .dependencies import get_plotly
 from .export.csv_exporter import save_analysis_outputs
+from .ingest.metadata import validate_capture_metadata
 from .workers import (
     AnalysisWorker,
     AudioDetectionWorker,
@@ -467,6 +468,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.fixed_roi_masks: List[Optional[np.ndarray]] = []  # aligned with self.rects
         self.mask_source_frames: List[Optional[int]] = []  # frame index each mask was captured from
         self.fixed_mask_metadata: List[Optional[MaskCaptureMetadata]] = []  # aligned with self.rects
+        self.capture_metadata_validation = None
 
         # Noise filtering parameters (adjustable via UI)
         self.morphological_kernel_size = MORPHOLOGICAL_KERNEL_SIZE
@@ -2604,10 +2606,28 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Add to recent files
             self._add_recent_file(self.video_path)
             
-            self.results_label.setText(f"✅ Loaded: {os.path.basename(self.video_path)}\n"
-                                       f"📊 Frames: {self.total_frames:,} | ⏱️ FPS: {self.playback_fps:.1f}\n"
-                                       f"⏳ Duration: {self.total_frames/self.playback_fps:.1f}s\n"
-                                       "🎯 Draw ROIs or use Auto-Detect to begin!")
+            self.capture_metadata_validation = validate_capture_metadata(self.video_path)
+            metadata_validation = self.capture_metadata_validation
+            metadata_status_line = "🧾 Metadata: valid capture sidecar detected"
+            if not metadata_validation.is_valid:
+                metadata_status_line = (
+                    "⚠️ Metadata: missing/invalid sidecar (analysis still allowed; provenance reduced)"
+                )
+                logging.warning(
+                    "Capture metadata validation failed for %s: %s",
+                    os.path.basename(self.video_path),
+                    "; ".join(metadata_validation.errors),
+                )
+            elif metadata_validation.warnings:
+                metadata_status_line = "⚠️ Metadata: valid with warnings"
+
+            self.results_label.setText(
+                f"✅ Loaded: {os.path.basename(self.video_path)}\n"
+                f"📊 Frames: {self.total_frames:,} | ⏱️ FPS: {self.playback_fps:.1f}\n"
+                f"⏳ Duration: {self.total_frames/self.playback_fps:.1f}s\n"
+                f"{metadata_status_line}\n"
+                "🎯 Draw ROIs or use Auto-Detect to begin!"
+            )
             self._update_widget_states(video_loaded=True, rois_exist=bool(self.rects))
             self.statusBar().showMessage(f"✅ Successfully loaded: {os.path.basename(self.video_path)}")
 
@@ -2643,6 +2663,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.out_paths = []
         self.frame_cache.clear()
         self._reset_history()
+        self.capture_metadata_validation = None
         
         # Stop playback and reset controls
         self.stop_playback()
@@ -4553,6 +4574,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _build_analysis_metadata_snapshot(self) -> Dict[str, Any]:
         """Capture analysis settings and mask provenance for export/reporting."""
+        capture_validation = (
+            self.capture_metadata_validation.to_dict()
+            if self.capture_metadata_validation is not None
+            else None
+        )
+        capture_metadata = (
+            dict(self.capture_metadata_validation.normalized_metadata)
+            if self.capture_metadata_validation is not None
+            and isinstance(self.capture_metadata_validation.normalized_metadata, dict)
+            else None
+        )
         return {
             "background_roi_idx": self.background_roi_idx,
             "background_percentile": float(self.background_percentile),
@@ -4574,6 +4606,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 metadata.to_dict() if isinstance(metadata, MaskCaptureMetadata) else None
                 for metadata in self.fixed_mask_metadata
             ],
+            "capture_metadata_validation": capture_validation,
+            "capture_metadata": capture_metadata,
+            "capture_provenance": {
+                "validation": capture_validation,
+                "metadata": capture_metadata,
+            },
         }
 
 

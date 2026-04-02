@@ -43,12 +43,47 @@ If `git pull` shows a conflict or error, reach out before trying to fix it.
 3. **Set frame range** — use "Set Start/End" buttons to find the active region automatically
 4. **Run analysis** — click "Analyze Brightness" (or press F5), choose an output folder
 
+### Capture Metadata Sidecar (new)
+
+When a video is loaded, the app now checks for an optional sidecar file named:
+
+`<video_filename>.capture.json`
+
+Example:
+- `experiment_01.mov`
+- `experiment_01.capture.json`
+
+The current schema authority is a lightweight versioned contract with `schema_version: "1.0"`. The validator checks required acquisition fields (`device_model`, exposure/white-balance lock flags, exposure duration, ISO, FPS, resolution, HDR flag), warns on legacy or invalid metadata, and shows a metadata status line in the UI after load.
+
+Reference:
+- `docs/capture_metadata_schema.md`
+
+### Capture Inbox Workflow (new)
+
+For end-to-end testing, you can now point a local inbox at incoming iPhone captures and optionally auto-run analysis with a fixed manifest:
+
+```bash
+python tools/ingest_capture_inbox.py tools/capture_inbox_manifest.example.json
+```
+
+That tool:
+- scans `inbox_dir` for video + `*.capture.json` pairs
+- validates capture metadata using the current schema contract
+- creates deterministic per-capture output folders using `capture_id` when present
+- writes `capture_ingest_summary.json` for each capture
+- optionally runs the existing mask-review analysis path if `analysis_case` is configured
+- optionally archives processed source files out of the inbox
+
+If you want to rerun ingest against the same capture and `output_dir`, pass `--force-reprocess` or set `"force_reprocess": true` in the manifest. Otherwise identical source signatures are skipped on purpose, and the run summary now includes the existing summary path that triggered the skip.
+
+Use `--watch-seconds 5` to keep rescanning during manual device-to-desktop testing.
+
 ### Output
 
 Each analysis produces:
 - **CSV files** — one per ROI with columns: `frame, brightness_mean, brightness_median, blue_mean, blue_median`
 - **Plot images** — dual-panel PNG (brightness trends + difference plot) with statistical annotations
-- **Metadata sidecar** — one `*_analysis_metadata.json` file capturing mask mode, thresholds, source frames, and mask-quality warnings
+- **Metadata sidecar** — one `*_analysis_metadata.json` file capturing mask mode, thresholds, source frames, mask-quality warnings, and normalized capture provenance / validation results when a capture sidecar exists
 
 ### Dark-Enclosure Review Workflow
 
