@@ -3349,7 +3349,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                         roi_overlay[adaptive_only_mask] = roi_overlay[adaptive_only_mask] * 0.55 + np.array([255, 0, 0]) * 0.45
                         roi_overlay[overlap_mask] = roi_overlay[overlap_mask] * 0.45 + np.array([255, 0, 255]) * 0.55
                     else:
-                        roi_overlay[adaptive_mask] = roi_overlay[adaptive_mask] * 0.7 + np.array([0, 0, 255]) * 0.3
+                        roi_overlay[adaptive_mask] = roi_overlay[adaptive_mask] * 0.7 + np.array([255, 0, 0]) * 0.3
 
                     # Apply overlay back to main frame
                     overlay[y1:y2, x1:x2] = roi_overlay
@@ -3391,13 +3391,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if not self._history_restoring:
             self._record_history_change("Toggle Fixed Mask", before)
 
-    def _capture_fixed_masks(self, source_frame_idx: Optional[int] = None):
-        """Capture analyzed-pixel masks for all ROIs based on the current frame.
-
-        Args:
-            source_frame_idx: If provided, record this as the source frame for all masks.
-                            If None, uses the current frame slider position.
-        """
+    def _capture_fixed_masks(self, checked: bool = False):
+        """Capture analyzed-pixel masks for all ROIs based on the current frame."""
         if self.frame is None or not self.rects:
             QtWidgets.QMessageBox.information(self, "Capture Mask", "Load a video and define at least one ROI.")
             return
@@ -3409,8 +3404,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
 
         # Determine source frame index
-        if source_frame_idx is None:
-            source_frame_idx = self.frame_slider.value()
+        source_frame_idx = self.frame_slider.value()
         before = None if self._history_restoring else self._capture_editor_snapshot()
 
         masks: List[Optional[np.ndarray]] = []

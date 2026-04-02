@@ -288,7 +288,8 @@ class BrightestFrameWorker(QtCore.QObject):
     @QtCore.pyqtSlot()
     def run(self) -> None:
         req = self._request
-        frame_indices = list(range(req.start_frame, req.end_frame + 1))
+        step = req.step if req.step and req.step > 0 else 1
+        frame_indices = list(range(req.start_frame, req.end_frame + 1, step))
         if not frame_indices:
             self.error.emit("No frames available for brightest-frame scan.")
             return
@@ -446,7 +447,7 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
             self.error.emit("No non-background ROI available.")
             return
 
-        frame_indices = list(range(req.start_frame, req.end_frame + 1))
+        frame_indices = list(range(req.start_frame, req.end_frame + 1, max(1, req.step)))
         if not frame_indices:
             self.error.emit("No frames available for per-ROI scan.")
             return

@@ -67,6 +67,7 @@ def _overlay_masks(
     fixed_masks: Sequence[Optional[np.ndarray]],
     noise_floor_threshold: float,
     morphological_kernel_size: int,
+    background_percentile: float = 90.0,
 ) -> np.ndarray:
     overlay = frame.copy()
     l_star_frame = compute_l_star_frame(frame)
@@ -74,7 +75,7 @@ def _overlay_masks(
         frame=frame,
         rects=rects,
         background_roi_idx=background_roi_idx,
-        background_percentile=90.0,
+        background_percentile=background_percentile,
         frame_l_star=l_star_frame,
     )
     fh, fw = frame.shape[:2]
@@ -102,7 +103,7 @@ def _overlay_masks(
                 fixed_mask = candidate.astype(bool)
 
         if fixed_mask is None:
-            roi[adaptive_mask] = roi[adaptive_mask] * 0.7 + np.array([0, 0, 255]) * 0.3
+            roi[adaptive_mask] = roi[adaptive_mask] * 0.7 + np.array([255, 0, 0]) * 0.3
             continue
 
         overlap_mask = fixed_mask & adaptive_mask
@@ -124,6 +125,7 @@ def _save_overlay_images(
     sources: Sequence[Optional[int]],
     noise_floor_threshold: float,
     morphological_kernel_size: int,
+    background_percentile: float = 90.0,
 ) -> List[str]:
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -143,6 +145,7 @@ def _save_overlay_images(
                 fixed_masks=fixed_masks,
                 noise_floor_threshold=noise_floor_threshold,
                 morphological_kernel_size=morphological_kernel_size,
+                background_percentile=background_percentile,
             )
             filename = f"mask_overlay_frame{int(frame_idx) + 1:05d}.png"
             out_path = case_dir / filename
@@ -279,6 +282,7 @@ def _run_case(case: Dict[str, Any], root_output_dir: Path) -> Dict[str, Any]:
         sources=mask_sources,
         noise_floor_threshold=noise_floor_threshold,
         morphological_kernel_size=morphological_kernel_size,
+        background_percentile=background_percentile,
     )
     passed, summary_lines = _mask_review_summary(
         metadata=mask_metadata,

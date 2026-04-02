@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 import sys
 import time
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 import cv2
 
@@ -31,7 +31,7 @@ def _load_manifest(path: Path) -> Dict[str, Any]:
 
 def _iter_videos(inbox_dir: Path, patterns: Sequence[str]) -> Iterable[Path]:
     if patterns:
-        seen: set[Path] = set()
+        seen: Set[Path] = set()
         for pattern in patterns:
             for candidate in sorted(inbox_dir.glob(pattern)):
                 if candidate.is_file() and candidate.suffix.lower() in VIDEO_EXTENSIONS and candidate not in seen:
@@ -202,7 +202,7 @@ def process_inbox_once(manifest: Dict[str, Any]) -> Dict[str, Any]:
                 template_case=analysis_case,
                 video_path=video_path,
                 capture_label=capture_label,
-                root_output_dir=output_dir,
+                root_output_dir=capture_dir,
             )
 
         archived_paths = None
