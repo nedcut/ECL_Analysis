@@ -268,7 +268,6 @@ class AnalysisRangeSlider(QtWidgets.QWidget):
             current_value = self._pos_to_value(pos_x)
             delta = current_value - anchor_value
             origin_start, origin_end = self._drag_origin_range
-            width = origin_end - origin_start
             new_start = origin_start + delta
             new_end = origin_end + delta
             if new_start < self._minimum:
