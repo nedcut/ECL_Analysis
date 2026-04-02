@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
@@ -32,6 +33,28 @@ def test_save_analysis_outputs_writes_csv_and_summary(tmp_path: Path):
         elapsed_seconds=0.1,
         start_frame=5,
         end_frame=7,
+        analysis_metadata={
+            "capture_metadata": {
+                "schema_version": "1.0",
+                "device_model": "iPhone 15 Pro",
+            },
+            "capture_metadata_validation": {
+                "is_valid": True,
+                "status": "valid",
+                "errors": [],
+                "warnings": [],
+            },
+            "capture_provenance": {
+                "validation": {
+                    "is_valid": True,
+                    "status": "valid",
+                },
+                "metadata": {
+                    "schema_version": "1.0",
+                    "device_model": "iPhone 15 Pro",
+                },
+            },
+        },
     )
 
     export = save_analysis_outputs(
@@ -45,14 +68,21 @@ def test_save_analysis_outputs_writes_csv_and_summary(tmp_path: Path):
     assert export.cancelled is False
     assert export.plot_failed is False
     assert any("Saved CSV:" in line for line in export.summary_lines)
-    assert len(export.out_paths) == 1
-    assert export.out_paths[0].endswith("_brightness.csv")
+    assert len(export.out_paths) == 2
+    csv_path = next(Path(path) for path in export.out_paths if path.endswith("_brightness.csv"))
+    metadata_path = next(Path(path) for path in export.out_paths if path.endswith("_analysis_metadata.json"))
+    assert metadata_path.exists()
+    assert "Saved Metadata:" in "\n".join(export.summary_lines)
 
-    csv_path = Path(export.out_paths[0])
     assert csv_path.exists()
     df = pd.read_csv(csv_path)
     assert list(df.columns) == ["frame", "brightness_mean", "brightness_median", "blue_mean", "blue_median"]
     assert len(df) == 3
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["analysis_metadata"]["capture_metadata"]["schema_version"] == "1.0"
+    assert metadata["analysis_metadata"]["capture_metadata_validation"]["is_valid"] is True
+    assert metadata["analysis_metadata"]["capture_provenance"]["validation"]["status"] == "valid"
+    assert metadata["analysis_metadata"]["capture_provenance"]["metadata"]["device_model"] == "iPhone 15 Pro"
 
 
 def test_save_analysis_outputs_supports_cancellation(tmp_path: Path):

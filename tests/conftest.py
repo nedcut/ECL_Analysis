@@ -43,6 +43,9 @@ def video_analyzer_factory() -> Callable[..., VideoAnalyzer]:
         instance.background_percentile = overrides.get("background_percentile", 90.0)
         instance.background_roi_idx = overrides.get("background_roi_idx")
         instance.rects = overrides.get("rects", [])
+        instance.fixed_roi_masks = overrides.get("fixed_roi_masks", [])
+        instance.mask_source_frames = overrides.get("mask_source_frames", [])
+        instance.fixed_mask_metadata = overrides.get("fixed_mask_metadata", [])
         instance.frame_cache = overrides.get("frame_cache", FrameCache(FRAME_CACHE_SIZE))
         instance.cap = overrides.get("cap")
         return instance
