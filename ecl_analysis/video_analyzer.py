@@ -51,7 +51,7 @@ from .constants import (
     ROI_THICKNESS_SELECTED,
 )
 from .dependencies import get_plotly
-from .export.csv_exporter import save_analysis_outputs
+from .export.csv_exporter import ExportOptions, save_analysis_outputs
 from .workers import (
     AnalysisWorker,
     AudioDetectionWorker,
@@ -411,6 +411,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._analysis_worker: Optional[AnalysisWorker] = None
         self._analysis_progress: Optional[QtWidgets.QProgressDialog] = None
         self._analysis_save_dir: Optional[str] = None
+        self._pending_export_options: Optional[ExportOptions] = None
 
         self._audio_thread: Optional[QtCore.QThread] = None
         self._audio_worker: Optional[AudioDetectionWorker] = None
@@ -2121,6 +2122,33 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         rect_groupbox_layout.addLayout(rect_btn_layout2a)
         rect_groupbox_layout.addLayout(rect_btn_layout2)
         self.rect_groupbox.setLayout(rect_groupbox_layout)
+
+        # Export Controls
+        self.export_groupbox = QtWidgets.QGroupBox("Export Outputs")
+        export_layout = QtWidgets.QVBoxLayout()
+
+        self.export_csv_checkbox = QtWidgets.QCheckBox("CSV data")
+        self.export_csv_checkbox.setToolTip("Write frame-by-frame brightness measurements as .csv files")
+        self.export_csv_checkbox.setChecked(True)
+        export_layout.addWidget(self.export_csv_checkbox)
+
+        self.export_json_checkbox = QtWidgets.QCheckBox("JSON data")
+        self.export_json_checkbox.setToolTip("Write the same measurements and summary metadata as .json files")
+        self.export_json_checkbox.setChecked(False)
+        export_layout.addWidget(self.export_json_checkbox)
+
+        self.export_plot_checkbox = QtWidgets.QCheckBox("Static plot PNG")
+        self.export_plot_checkbox.setToolTip("Write the current enhanced static plot image for each ROI")
+        self.export_plot_checkbox.setChecked(True)
+        export_layout.addWidget(self.export_plot_checkbox)
+
+        self.export_interactive_checkbox = QtWidgets.QCheckBox("Interactive plot HTML")
+        self.export_interactive_checkbox.setToolTip("Write the interactive Plotly HTML plot for each ROI when Plotly is available")
+        self.export_interactive_checkbox.setChecked(True)
+        export_layout.addWidget(self.export_interactive_checkbox)
+
+        self.export_groupbox.setLayout(export_layout)
+
         # Cache status
         self.cache_status_label = QtWidgets.QLabel("Cache: 0 frames")
         self.cache_status_label.setObjectName("statusLabel")
@@ -2168,6 +2196,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         roi_tab_layout.addWidget(self.rect_groupbox)
         roi_tab_layout.addStretch()
         self.side_tabs.addTab(roi_tab, "ROIs")
+
+        # Export tab
+        self.export_tab = QtWidgets.QWidget()
+        export_tab_layout = QtWidgets.QVBoxLayout(self.export_tab)
+        export_tab_layout.addWidget(self.export_groupbox)
+        export_tab_layout.addStretch()
+        self.side_tabs.addTab(self.export_tab, "Export")
 
         # Status tab
         status_tab = QtWidgets.QWidget()
@@ -4424,6 +4459,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     # --- Analysis and Plotting ---
 
+    def _selected_export_options(self) -> ExportOptions:
+        """Read export choices from the UI."""
+        return ExportOptions(
+            csv=self.export_csv_checkbox.isChecked(),
+            json=self.export_json_checkbox.isChecked(),
+            plot=self.export_plot_checkbox.isChecked(),
+            interactive_plot=self.export_interactive_checkbox.isChecked(),
+        )
+
     def analyze_video(self):
         """Dispatch brightness analysis to a background worker."""
         if self._analysis_in_progress:
@@ -4442,6 +4486,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
         if self.start_frame is None or self.end_frame is None or self.start_frame > self.end_frame:
             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Invalid start/end frame range selected.")
+            return
+
+        export_options = self._selected_export_options()
+        if not export_options.has_outputs():
+            QtWidgets.QMessageBox.warning(self, "Export Options", "Please select at least one export output.")
+            self.side_tabs.setCurrentWidget(self.export_tab)
             return
 
         initial_dir = os.path.dirname(self.video_path) if self.video_path else ""
@@ -4474,6 +4524,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         )
 
         self._analysis_save_dir = save_dir
+        self._pending_export_options = export_options
         self._set_busy_state(True)
         self.stop_playback()
         self.results_label.setText("⚙️ Initializing analysis...")
@@ -4528,6 +4579,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         if result is None:
             self.results_label.setText("Analysis failed: invalid worker result.")
+            self._pending_export_options = None
             self._set_busy_state(False)
             return
 
@@ -4535,16 +4587,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             QtWidgets.QMessageBox.warning(self, "Analysis", "No frames were processed during analysis.")
             self.results_label.setText("Analysis completed, but no frames processed.")
             self._update_current_brightness_display()
+            self._pending_export_options = None
             self._set_busy_state(False)
             return
 
         if self._analysis_save_dir is None:
             self.results_label.setText("Analysis failed: missing save directory.")
+            self._pending_export_options = None
             self._set_busy_state(False)
             return
 
-        self._save_analysis_results(result, self._analysis_save_dir)
+        export_options = self._pending_export_options or ExportOptions()
+        self._save_analysis_results(result, self._analysis_save_dir, export_options)
         self._analysis_save_dir = None
+        self._pending_export_options = None
         self.statusBar().showMessage("Analysis complete")
         self.audio_manager.play_analysis_complete()
 
@@ -4560,6 +4616,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Handle worker analysis failure."""
         self._cleanup_analysis_worker()
         self._analysis_save_dir = None
+        self._pending_export_options = None
         QtWidgets.QMessageBox.critical(self, "Analysis Error", f"An error occurred during analysis:\n{message}")
         self.results_label.setText(f"Analysis failed: {message}")
         logging.error("Analysis error: %s", message)
@@ -4568,6 +4625,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Handle analysis cancellation."""
         self._cleanup_analysis_worker()
         self._analysis_save_dir = None
+        self._pending_export_options = None
         self.results_label.setText("Analysis cancelled by user.")
         self._update_current_brightness_display()
 
@@ -4587,16 +4645,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if reset_busy:
             self._set_busy_state(False)
 
-    def _save_analysis_results(self, analysis_result: AnalysisResult, save_dir: str):
+    def _save_analysis_results(self, analysis_result: AnalysisResult, save_dir: str, export_options: ExportOptions):
         """Save analysis results and generate plots through export helpers."""
         if self.video_path is None:
             return
 
         self.out_paths = []
         analysis_name = self.analysis_name_input.text().strip() or "DefaultAnalysis"
+        progress_label = "Saving selected export outputs..."
 
         progress = QtWidgets.QProgressDialog(
-            "Saving results and generating plots...",
+            progress_label,
             "Cancel",
             0,
             max(1, len(analysis_result.brightness_mean_data)),
@@ -4622,6 +4681,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             video_path=self.video_path,
             analysis_name=analysis_name,
             plot_builder=self._generate_enhanced_plot,
+            export_options=export_options,
             progress_callback=_progress_callback,
         )
         progress.close()
@@ -4638,7 +4698,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             ", ".join(export_result.avg_brightness_summary) if export_result.avg_brightness_summary else "N/A"
         )
 
-    def _generate_enhanced_plot(self, df, base_filename, save_dir, r_idx, analysis_name, base_video_name, background_values_per_frame):
+    def _generate_enhanced_plot(
+        self,
+        df,
+        base_filename,
+        save_dir,
+        r_idx,
+        analysis_name,
+        base_video_name,
+        background_values_per_frame,
+        generate_static=True,
+        generate_interactive=True,
+    ):
         """Generate enhanced plots and an interactive visualization for the ROI."""
         png_path: Optional[str] = None
         interactive_path: Optional[str] = None
@@ -4687,517 +4758,519 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 if np.any(valid_background_mask):
                     background_array = candidate_background
 
-            # Create enhanced plot with dual subplots
-            import matplotlib.pyplot as plt
+            if generate_static:
+                # Create enhanced plot with dual subplots
+                import matplotlib.pyplot as plt
 
-            plt.style.use('seaborn-v0_8-darkgrid')
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+                plt.style.use('seaborn-v0_8-darkgrid')
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
 
-            # Main brightness plot
-            ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
-            ax1.plot(frames, brightness_median, label='Median Brightness', color='#70ad47', linewidth=2, alpha=0.8)
+                # Main brightness plot
+                ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
+                ax1.plot(frames, brightness_median, label='Median Brightness', color='#70ad47', linewidth=2, alpha=0.8)
             
-            # Add background line if background values are available
-            if background_array is not None:
-                ax1.plot(frames, background_array, label='Background Level', color='#808080', 
-                         linewidth=1.5, linestyle=':', alpha=0.9)
+                # Add background line if background values are available
+                if background_array is not None:
+                    ax1.plot(frames, background_array, label='Background Level', color='#808080', 
+                             linewidth=1.5, linestyle=':', alpha=0.9)
             
-            # Add confidence bands (mean ± std)
-            ax1.fill_between(frames, brightness_mean - std_of_means, brightness_mean + std_of_means, 
-                             alpha=0.2, color='#5a9bd5', label=f'Mean ±1σ ({std_of_means:.1f})')
-            ax1.fill_between(frames, brightness_median - std_of_medians, brightness_median + std_of_medians, 
-                             alpha=0.2, color='#70ad47', label=f'Median ±1σ ({std_of_medians:.1f})')
+                # Add confidence bands (mean ± std)
+                ax1.fill_between(frames, brightness_mean - std_of_means, brightness_mean + std_of_means, 
+                                 alpha=0.2, color='#5a9bd5', label=f'Mean ±1σ ({std_of_means:.1f})')
+                ax1.fill_between(frames, brightness_median - std_of_medians, brightness_median + std_of_medians, 
+                                 alpha=0.2, color='#70ad47', label=f'Median ±1σ ({std_of_medians:.1f})')
             
-            # Add horizontal lines for averages
-            ax1.axhline(mean_of_means, color='#5a9bd5', linestyle='--', alpha=0.7, 
-                        label=f'Avg Mean ({mean_of_means:.1f})')
-            ax1.axhline(mean_of_medians, color='#70ad47', linestyle='--', alpha=0.7, 
-                        label=f'Avg Median ({mean_of_medians:.1f})')
+                # Add horizontal lines for averages
+                ax1.axhline(mean_of_means, color='#5a9bd5', linestyle='--', alpha=0.7, 
+                            label=f'Avg Mean ({mean_of_means:.1f})')
+                ax1.axhline(mean_of_medians, color='#70ad47', linestyle='--', alpha=0.7, 
+                            label=f'Avg Median ({mean_of_medians:.1f})')
             
-            # Mark peak points
-            ax1.scatter([frame_peak_mean], [val_peak_mean], color='#ff0000', zorder=5, s=100, 
-                        marker='^', label=f'Peak Mean ({val_peak_mean:.1f})')
-            ax1.scatter([frame_peak_median], [val_peak_median], color='#ed7d31', zorder=5, s=100, 
-                        marker='v', label=f'Peak Median ({val_peak_median:.1f})')
+                # Mark peak points
+                ax1.scatter([frame_peak_mean], [val_peak_mean], color='#ff0000', zorder=5, s=100, 
+                            marker='^', label=f'Peak Mean ({val_peak_mean:.1f})')
+                ax1.scatter([frame_peak_median], [val_peak_median], color='#ed7d31', zorder=5, s=100, 
+                            marker='v', label=f'Peak Median ({val_peak_median:.1f})')
 
-            ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
-            ax1.set_ylabel('L* Brightness', fontsize=12)
-            ax1.legend(fontsize=10, loc='best')
-            ax1.grid(True, alpha=0.3)
+                ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
+                ax1.set_ylabel('L* Brightness', fontsize=12)
+                ax1.legend(fontsize=10, loc='best')
+                ax1.grid(True, alpha=0.3)
             
-            # Adjust y-axis limits to provide more space at the top for statistics panel
-            y_min, y_max = ax1.get_ylim()
-            y_range = y_max - y_min
-            ax1.set_ylim(y_min, y_max + 0.15 * y_range)
+                # Adjust y-axis limits to provide more space at the top for statistics panel
+                y_min, y_max = ax1.get_ylim()
+                y_range = y_max - y_min
+                ax1.set_ylim(y_min, y_max + 0.15 * y_range)
 
-            # Add statistics text box
-            stats_text = f"""Statistics:
+                # Add statistics text box
+                stats_text = f"""Statistics:
 Mean: {mean_of_means:.2f} ± {std_of_means:.2f}
 Median: {mean_of_medians:.2f} ± {std_of_medians:.2f}
 Peak Mean: {val_peak_mean:.2f} @ Frame {frame_peak_mean}
 Peak Median: {val_peak_median:.2f} @ Frame {frame_peak_median}
 Frames Analyzed: {len(frames)}"""
             
-            ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
-                     verticalalignment='top', horizontalalignment='right', 
-                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
+                         verticalalignment='top', horizontalalignment='right', 
+                         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
             
-            # Blue channel plot
-            ax2.plot(frames, blue_mean, label='Blue Mean', color='#0066cc', linewidth=2, alpha=0.8)
-            ax2.plot(frames, blue_median, label='Blue Median', color='#3399ff', linewidth=2, alpha=0.8)
+                # Blue channel plot
+                ax2.plot(frames, blue_mean, label='Blue Mean', color='#0066cc', linewidth=2, alpha=0.8)
+                ax2.plot(frames, blue_median, label='Blue Median', color='#3399ff', linewidth=2, alpha=0.8)
             
-            # Add confidence bands for blue channel
-            ax2.fill_between(frames, blue_mean - std_of_blue_means, blue_mean + std_of_blue_means, 
-                             alpha=0.2, color='#0066cc', label=f'Blue Mean ±1σ ({std_of_blue_means:.1f})')
-            ax2.fill_between(frames, blue_median - std_of_blue_medians, blue_median + std_of_blue_medians, 
-                             alpha=0.2, color='#3399ff', label=f'Blue Median ±1σ ({std_of_blue_medians:.1f})')
+                # Add confidence bands for blue channel
+                ax2.fill_between(frames, blue_mean - std_of_blue_means, blue_mean + std_of_blue_means, 
+                                 alpha=0.2, color='#0066cc', label=f'Blue Mean ±1σ ({std_of_blue_means:.1f})')
+                ax2.fill_between(frames, blue_median - std_of_blue_medians, blue_median + std_of_blue_medians, 
+                                 alpha=0.2, color='#3399ff', label=f'Blue Median ±1σ ({std_of_blue_medians:.1f})')
             
-            # Add horizontal lines for blue averages
-            ax2.axhline(mean_of_blue_means, color='#0066cc', linestyle='--', alpha=0.7, 
-                        label=f'Avg Blue Mean ({mean_of_blue_means:.1f})')
-            ax2.axhline(mean_of_blue_medians, color='#3399ff', linestyle='--', alpha=0.7, 
-                        label=f'Avg Blue Median ({mean_of_blue_medians:.1f})')
+                # Add horizontal lines for blue averages
+                ax2.axhline(mean_of_blue_means, color='#0066cc', linestyle='--', alpha=0.7, 
+                            label=f'Avg Blue Mean ({mean_of_blue_means:.1f})')
+                ax2.axhline(mean_of_blue_medians, color='#3399ff', linestyle='--', alpha=0.7, 
+                            label=f'Avg Blue Median ({mean_of_blue_medians:.1f})')
             
-            # Mark blue peak points
-            ax2.scatter([frame_peak_blue_mean], [val_peak_blue_mean], color='#ff0000', zorder=5, s=100, 
-                        marker='^', label=f'Peak Blue Mean ({val_peak_blue_mean:.1f})')
-            ax2.scatter([frame_peak_blue_median], [val_peak_blue_median], color='#ed7d31', zorder=5, s=100, 
-                        marker='v', label=f'Peak Blue Median ({val_peak_blue_median:.1f})')
+                # Mark blue peak points
+                ax2.scatter([frame_peak_blue_mean], [val_peak_blue_mean], color='#ff0000', zorder=5, s=100, 
+                            marker='^', label=f'Peak Blue Mean ({val_peak_blue_mean:.1f})')
+                ax2.scatter([frame_peak_blue_median], [val_peak_blue_median], color='#ed7d31', zorder=5, s=100, 
+                            marker='v', label=f'Peak Blue Median ({val_peak_blue_median:.1f})')
             
-            ax2.set_xlabel('Frame Number', fontsize=12)
-            ax2.set_ylabel('Blue Channel Value', fontsize=12)
-            ax2.legend(fontsize=10, loc='best')
-            ax2.grid(True, alpha=0.3)
+                ax2.set_xlabel('Frame Number', fontsize=12)
+                ax2.set_ylabel('Blue Channel Value', fontsize=12)
+                ax2.legend(fontsize=10, loc='best')
+                ax2.grid(True, alpha=0.3)
             
-            # Add blue channel statistics text box
-            blue_stats_text = f"""Blue Channel Statistics:
+                # Add blue channel statistics text box
+                blue_stats_text = f"""Blue Channel Statistics:
 Mean: {mean_of_blue_means:.1f} ± {std_of_blue_means:.1f}
 Median: {mean_of_blue_medians:.1f} ± {std_of_blue_medians:.1f}
 Peak Mean: {val_peak_blue_mean:.1f} @ Frame {frame_peak_blue_mean}
 Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             
-            ax2.text(0.98, 0.98, blue_stats_text, transform=ax2.transAxes, fontsize=9,
-                     verticalalignment='top', horizontalalignment='right', 
-                     bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+                ax2.text(0.98, 0.98, blue_stats_text, transform=ax2.transAxes, fontsize=9,
+                         verticalalignment='top', horizontalalignment='right', 
+                         bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
 
-            plt.tight_layout()
+                plt.tight_layout()
 
-            # Save plot
-            plot_filename = f"{base_filename}_plot.png"
-            plot_save_path = os.path.join(save_dir, plot_filename)
-            plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
-            plt.close(fig)
-            png_path = plot_save_path
+                # Save plot
+                plot_filename = f"{base_filename}_plot.png"
+                plot_save_path = os.path.join(save_dir, plot_filename)
+                plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
+                plt.close(fig)
+                png_path = plot_save_path
 
-            plotly_go, plotly_make_subplots = get_plotly()
-            if plotly_go is not None and plotly_make_subplots is not None:
-                try:
-                    interactive_filename = f"{base_filename}_interactive.html"
-                    interactive_save_path = os.path.join(save_dir, interactive_filename)
+            if generate_interactive:
+                plotly_go, plotly_make_subplots = get_plotly()
+                if plotly_go is not None and plotly_make_subplots is not None:
+                    try:
+                        interactive_filename = f"{base_filename}_interactive.html"
+                        interactive_save_path = os.path.join(save_dir, interactive_filename)
 
-                    fig_interactive = plotly_make_subplots(
-                        rows=2,
-                        cols=1,
-                        shared_xaxes=True,
-                        vertical_spacing=0.1,
-                        subplot_titles=("L* Brightness", "Blue Channel")
-                    )
-                    selection_fill = _hex_to_rgba(COLOR_ACCENT, 0.18)
+                        fig_interactive = plotly_make_subplots(
+                            rows=2,
+                            cols=1,
+                            shared_xaxes=True,
+                            vertical_spacing=0.1,
+                            subplot_titles=("L* Brightness", "Blue Channel")
+                        )
+                        selection_fill = _hex_to_rgba(COLOR_ACCENT, 0.18)
 
-                    # L* mean confidence band
-                    upper_mean_band = (brightness_mean + std_of_means).tolist()
-                    lower_mean_band = (brightness_mean - std_of_means).tolist()
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=upper_mean_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo='skip'
-                        ),
-                        row=1,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=lower_mean_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=True,
-                            name=f"Mean ±1σ ({std_of_means:.1f})",
-                            fill='tonexty',
-                            fillcolor='rgba(90,155,213,0.25)',
-                            hoverinfo='skip'
-                        ),
-                        row=1,
-                        col=1
-                    )
-
-                    # Median confidence band
-                    upper_median_band = (brightness_median + std_of_medians).tolist()
-                    lower_median_band = (brightness_median - std_of_medians).tolist()
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=upper_median_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo='skip'
-                        ),
-                        row=1,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=lower_median_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=True,
-                            name=f"Median ±1σ ({std_of_medians:.1f})",
-                            fill='tonexty',
-                            fillcolor='rgba(112,173,71,0.25)',
-                            hoverinfo='skip'
-                        ),
-                        row=1,
-                        col=1
-                    )
-
-                    # Brightness lines
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=brightness_mean_values,
-                            mode='lines',
-                            name='Mean Brightness',
-                            line=dict(color='#5a9bd5', width=2),
-                            hovertemplate="Frame %{x}<br>Mean L*: %{y:.2f}<extra></extra>"
-                        ),
-                        row=1,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=brightness_median_values,
-                            mode='lines',
-                            name='Median Brightness',
-                            line=dict(color='#70ad47', width=2),
-                            hovertemplate="Frame %{x}<br>Median L*: %{y:.2f}<extra></extra>"
-                        ),
-                        row=1,
-                        col=1
-                    )
-
-                    # Background level
-                    if background_array is not None:
+                        # L* mean confidence band
+                        upper_mean_band = (brightness_mean + std_of_means).tolist()
+                        lower_mean_band = (brightness_mean - std_of_means).tolist()
                         fig_interactive.add_trace(
                             plotly_go.Scatter(
                                 x=frame_list,
-                                y=background_array.tolist(),
+                                y=upper_mean_band,
                                 mode='lines',
-                                name='Background Level',
-                                line=dict(color='#808080', width=1.5, dash='dot'),
-                                hovertemplate="Frame %{x}<br>Background L*: %{y:.2f}<extra></extra>"
+                                line=dict(width=0),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ),
+                            row=1,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=lower_mean_band,
+                                mode='lines',
+                                line=dict(width=0),
+                                showlegend=True,
+                                name=f"Mean ±1σ ({std_of_means:.1f})",
+                                fill='tonexty',
+                                fillcolor='rgba(90,155,213,0.25)',
+                                hoverinfo='skip'
                             ),
                             row=1,
                             col=1
                         )
 
-                    # Peak annotations
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=[frame_peak_mean],
-                            y=[val_peak_mean],
-                            mode='markers',
-                            name=f'Peak Mean ({val_peak_mean:.1f})',
-                            marker=dict(color='#ff0000', size=10, symbol='triangle-up'),
-                            hovertemplate="Frame %{x}<br>Peak Mean L*: %{y:.2f}<extra></extra>"
-                        ),
-                        row=1,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=[frame_peak_median],
-                            y=[val_peak_median],
-                            mode='markers',
-                            name=f'Peak Median ({val_peak_median:.1f})',
-                            marker=dict(color='#ed7d31', size=10, symbol='triangle-down'),
-                            hovertemplate="Frame %{x}<br>Peak Median L*: %{y:.2f}<extra></extra>"
-                        ),
-                        row=1,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=[frame_peak_mean],
-                            y=[val_peak_mean],
-                            mode='markers',
-                            name='Selected Range Peak (L*)',
-                            marker=dict(
-                                color=COLOR_WARNING,
-                                size=14,
-                                symbol='star',
-                                line=dict(color='#92400e', width=1.2)
+                        # Median confidence band
+                        upper_median_band = (brightness_median + std_of_medians).tolist()
+                        lower_median_band = (brightness_median - std_of_medians).tolist()
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=upper_median_band,
+                                mode='lines',
+                                line=dict(width=0),
+                                showlegend=False,
+                                hoverinfo='skip'
                             ),
-                            hovertemplate="Frame %{x}<br>Selected L* Peak: %{y:.2f}<extra></extra>"
-                        ),
-                        row=1,
-                        col=1
-                    )
-
-                    # Horizontal averages
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=[mean_of_means] * len(frame_list),
-                            mode='lines',
-                            name=f'Avg Mean ({mean_of_means:.1f})',
-                            line=dict(color='#5a9bd5', dash='dash'),
-                            hoverinfo='skip'
-                        ),
-                        row=1,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=[mean_of_medians] * len(frame_list),
-                            mode='lines',
-                            name=f'Avg Median ({mean_of_medians:.1f})',
-                            line=dict(color='#70ad47', dash='dash'),
-                            hoverinfo='skip'
-                        ),
-                        row=1,
-                        col=1
-                    )
-
-                    # Blue channel confidence bands
-                    upper_blue_mean_band = (blue_mean + std_of_blue_means).tolist()
-                    lower_blue_mean_band = (blue_mean - std_of_blue_means).tolist()
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=upper_blue_mean_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo='skip'
-                        ),
-                        row=2,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=lower_blue_mean_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=True,
-                            name=f'Blue Mean ±1σ ({std_of_blue_means:.1f})',
-                            fill='tonexty',
-                            fillcolor='rgba(0,102,204,0.25)',
-                            hoverinfo='skip'
-                        ),
-                        row=2,
-                        col=1
-                    )
-
-                    upper_blue_median_band = (blue_median + std_of_blue_medians).tolist()
-                    lower_blue_median_band = (blue_median - std_of_blue_medians).tolist()
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=upper_blue_median_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo='skip'
-                        ),
-                        row=2,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=lower_blue_median_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=True,
-                            name=f'Blue Median ±1σ ({std_of_blue_medians:.1f})',
-                            fill='tonexty',
-                            fillcolor='rgba(51,153,255,0.25)',
-                            hoverinfo='skip'
-                        ),
-                        row=2,
-                        col=1
-                    )
-
-                    # Blue channel lines
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=blue_mean_values,
-                            mode='lines',
-                            name='Blue Mean',
-                            line=dict(color='#0066cc', width=2),
-                            hovertemplate="Frame %{x}<br>Blue Mean: %{y:.2f}<extra></extra>"
-                        ),
-                        row=2,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=blue_median_values,
-                            mode='lines',
-                            name='Blue Median',
-                            line=dict(color='#3399ff', width=2),
-                            hovertemplate="Frame %{x}<br>Blue Median: %{y:.2f}<extra></extra>"
-                        ),
-                        row=2,
-                        col=1
-                    )
-
-                    # Blue channel peaks
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=[frame_peak_blue_mean],
-                            y=[val_peak_blue_mean],
-                            mode='markers',
-                            name=f'Peak Blue Mean ({val_peak_blue_mean:.1f})',
-                            marker=dict(color='#ff0000', size=10, symbol='triangle-up'),
-                            hovertemplate="Frame %{x}<br>Peak Blue Mean: %{y:.2f}<extra></extra>"
-                        ),
-                        row=2,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=[frame_peak_blue_median],
-                            y=[val_peak_blue_median],
-                            mode='markers',
-                            name=f'Peak Blue Median ({val_peak_blue_median:.1f})',
-                            marker=dict(color='#ed7d31', size=10, symbol='triangle-down'),
-                            hovertemplate="Frame %{x}<br>Peak Blue Median: %{y:.2f}<extra></extra>"
-                        ),
-                        row=2,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=[frame_peak_blue_mean],
-                            y=[val_peak_blue_mean],
-                            mode='markers',
-                            name='Selected Range Peak (Blue)',
-                            marker=dict(
-                                color=COLOR_INFO,
-                                size=14,
-                                symbol='star',
-                                line=dict(color='#0e7490', width=1.2)
-                            ),
-                            hovertemplate="Frame %{x}<br>Selected Blue Peak: %{y:.2f}<extra></extra>"
-                        ),
-                        row=2,
-                        col=1
-                    )
-
-                    # Blue channel averages
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=[mean_of_blue_means] * len(frame_list),
-                            mode='lines',
-                            name=f'Avg Blue Mean ({mean_of_blue_means:.1f})',
-                            line=dict(color='#0066cc', dash='dash'),
-                            hoverinfo='skip'
-                        ),
-                        row=2,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=[mean_of_blue_medians] * len(frame_list),
-                            mode='lines',
-                            name=f'Avg Blue Median ({mean_of_blue_medians:.1f})',
-                            line=dict(color='#3399ff', dash='dash'),
-                            hoverinfo='skip'
-                        ),
-                        row=2,
-                        col=1
-                    )
-
-                    # Layout
-                    fig_interactive.update_layout(
-                        title=f"{analysis_name} - {base_video_name} - ROI {r_idx+1}",
-                        height=820,
-                        dragmode='select',
-                        selectdirection='h',
-                        hovermode='x unified',
-                        template='plotly_white',
-                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1.0),
-                        margin=dict(t=80, b=60, l=60, r=30),
-                        newselection=dict(
-                            line=dict(color=COLOR_ACCENT, width=2)
+                            row=1,
+                            col=1
                         )
-                    )
-                    fig_interactive.update_xaxes(title_text="Frame Number", row=2, col=1)
-                    fig_interactive.update_yaxes(title_text="L* Brightness", row=1, col=1)
-                    fig_interactive.update_yaxes(title_text="Blue Channel Value", row=2, col=1)
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=lower_median_band,
+                                mode='lines',
+                                line=dict(width=0),
+                                showlegend=True,
+                                name=f"Median ±1σ ({std_of_medians:.1f})",
+                                fill='tonexty',
+                                fillcolor='rgba(112,173,71,0.25)',
+                                hoverinfo='skip'
+                            ),
+                            row=1,
+                            col=1
+                        )
 
-                    # Summary annotation
-                    fig_interactive.add_annotation(
-                        text=(
-                            f"Mean: {mean_of_means:.2f} ± {std_of_means:.2f} | "
-                            f"Median: {mean_of_medians:.2f} ± {std_of_medians:.2f}<br>"
-                            f"Blue Mean: {mean_of_blue_means:.1f} ± {std_of_blue_means:.1f} | "
-                            f"Blue Median: {mean_of_blue_medians:.1f} ± {std_of_blue_medians:.1f}"
-                        ),
-                        xref="paper",
-                        yref="paper",
-                        x=0.0,
-                        y=1.12,
-                        showarrow=False,
-                        align='left',
-                        font=dict(size=12),
-                        bgcolor='rgba(255,255,255,0.8)',
-                        bordercolor='#cccccc',
-                        borderwidth=1,
-                        borderpad=6
-                    )
+                        # Brightness lines
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=brightness_mean_values,
+                                mode='lines',
+                                name='Mean Brightness',
+                                line=dict(color='#5a9bd5', width=2),
+                                hovertemplate="Frame %{x}<br>Mean L*: %{y:.2f}<extra></extra>"
+                            ),
+                            row=1,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=brightness_median_values,
+                                mode='lines',
+                                name='Median Brightness',
+                                line=dict(color='#70ad47', width=2),
+                                hovertemplate="Frame %{x}<br>Median L*: %{y:.2f}<extra></extra>"
+                            ),
+                            row=1,
+                            col=1
+                        )
 
-                    div_id = f"roi-interactive-{r_idx+1}"
-                    selection_script = self._build_selection_post_script(
-                        div_id=div_id,
-                        frames=frame_list,
-                        brightness_values=brightness_mean_values,
-                        blue_values=blue_mean_values,
-                        accent_color=COLOR_ACCENT,
-                        selection_fill=selection_fill,
-                    )
-                    fig_interactive.write_html(
-                        interactive_save_path,
-                        include_plotlyjs='cdn',
-                        div_id=div_id,
-                        post_script=selection_script,
-                    )
-                    interactive_path = interactive_save_path
+                        # Background level
+                        if background_array is not None:
+                            fig_interactive.add_trace(
+                                plotly_go.Scatter(
+                                    x=frame_list,
+                                    y=background_array.tolist(),
+                                    mode='lines',
+                                    name='Background Level',
+                                    line=dict(color='#808080', width=1.5, dash='dot'),
+                                    hovertemplate="Frame %{x}<br>Background L*: %{y:.2f}<extra></extra>"
+                                ),
+                                row=1,
+                                col=1
+                            )
 
-                    try:
-                        opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(interactive_save_path))
-                        if not opened:
-                            logging.warning("Could not automatically open interactive plot %s", interactive_save_path)
-                    except Exception as exc:
-                        logging.warning("Could not automatically open interactive plot %s: %s", interactive_save_path, exc)
-                except Exception as plotly_error:
-                    logging.warning(f"Failed to generate interactive plot for ROI {r_idx+1}: {plotly_error}")
-            else:
-                logging.info("Plotly not available - skipping interactive plot generation.")
+                        # Peak annotations
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=[frame_peak_mean],
+                                y=[val_peak_mean],
+                                mode='markers',
+                                name=f'Peak Mean ({val_peak_mean:.1f})',
+                                marker=dict(color='#ff0000', size=10, symbol='triangle-up'),
+                                hovertemplate="Frame %{x}<br>Peak Mean L*: %{y:.2f}<extra></extra>"
+                            ),
+                            row=1,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=[frame_peak_median],
+                                y=[val_peak_median],
+                                mode='markers',
+                                name=f'Peak Median ({val_peak_median:.1f})',
+                                marker=dict(color='#ed7d31', size=10, symbol='triangle-down'),
+                                hovertemplate="Frame %{x}<br>Peak Median L*: %{y:.2f}<extra></extra>"
+                            ),
+                            row=1,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=[frame_peak_mean],
+                                y=[val_peak_mean],
+                                mode='markers',
+                                name='Selected Range Peak (L*)',
+                                marker=dict(
+                                    color=COLOR_WARNING,
+                                    size=14,
+                                    symbol='star',
+                                    line=dict(color='#92400e', width=1.2)
+                                ),
+                                hovertemplate="Frame %{x}<br>Selected L* Peak: %{y:.2f}<extra></extra>"
+                            ),
+                            row=1,
+                            col=1
+                        )
+
+                        # Horizontal averages
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=[mean_of_means] * len(frame_list),
+                                mode='lines',
+                                name=f'Avg Mean ({mean_of_means:.1f})',
+                                line=dict(color='#5a9bd5', dash='dash'),
+                                hoverinfo='skip'
+                            ),
+                            row=1,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=[mean_of_medians] * len(frame_list),
+                                mode='lines',
+                                name=f'Avg Median ({mean_of_medians:.1f})',
+                                line=dict(color='#70ad47', dash='dash'),
+                                hoverinfo='skip'
+                            ),
+                            row=1,
+                            col=1
+                        )
+
+                        # Blue channel confidence bands
+                        upper_blue_mean_band = (blue_mean + std_of_blue_means).tolist()
+                        lower_blue_mean_band = (blue_mean - std_of_blue_means).tolist()
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=upper_blue_mean_band,
+                                mode='lines',
+                                line=dict(width=0),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ),
+                            row=2,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=lower_blue_mean_band,
+                                mode='lines',
+                                line=dict(width=0),
+                                showlegend=True,
+                                name=f'Blue Mean ±1σ ({std_of_blue_means:.1f})',
+                                fill='tonexty',
+                                fillcolor='rgba(0,102,204,0.25)',
+                                hoverinfo='skip'
+                            ),
+                            row=2,
+                            col=1
+                        )
+
+                        upper_blue_median_band = (blue_median + std_of_blue_medians).tolist()
+                        lower_blue_median_band = (blue_median - std_of_blue_medians).tolist()
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=upper_blue_median_band,
+                                mode='lines',
+                                line=dict(width=0),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ),
+                            row=2,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=lower_blue_median_band,
+                                mode='lines',
+                                line=dict(width=0),
+                                showlegend=True,
+                                name=f'Blue Median ±1σ ({std_of_blue_medians:.1f})',
+                                fill='tonexty',
+                                fillcolor='rgba(51,153,255,0.25)',
+                                hoverinfo='skip'
+                            ),
+                            row=2,
+                            col=1
+                        )
+
+                        # Blue channel lines
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=blue_mean_values,
+                                mode='lines',
+                                name='Blue Mean',
+                                line=dict(color='#0066cc', width=2),
+                                hovertemplate="Frame %{x}<br>Blue Mean: %{y:.2f}<extra></extra>"
+                            ),
+                            row=2,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=blue_median_values,
+                                mode='lines',
+                                name='Blue Median',
+                                line=dict(color='#3399ff', width=2),
+                                hovertemplate="Frame %{x}<br>Blue Median: %{y:.2f}<extra></extra>"
+                            ),
+                            row=2,
+                            col=1
+                        )
+
+                        # Blue channel peaks
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=[frame_peak_blue_mean],
+                                y=[val_peak_blue_mean],
+                                mode='markers',
+                                name=f'Peak Blue Mean ({val_peak_blue_mean:.1f})',
+                                marker=dict(color='#ff0000', size=10, symbol='triangle-up'),
+                                hovertemplate="Frame %{x}<br>Peak Blue Mean: %{y:.2f}<extra></extra>"
+                            ),
+                            row=2,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=[frame_peak_blue_median],
+                                y=[val_peak_blue_median],
+                                mode='markers',
+                                name=f'Peak Blue Median ({val_peak_blue_median:.1f})',
+                                marker=dict(color='#ed7d31', size=10, symbol='triangle-down'),
+                                hovertemplate="Frame %{x}<br>Peak Blue Median: %{y:.2f}<extra></extra>"
+                            ),
+                            row=2,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=[frame_peak_blue_mean],
+                                y=[val_peak_blue_mean],
+                                mode='markers',
+                                name='Selected Range Peak (Blue)',
+                                marker=dict(
+                                    color=COLOR_INFO,
+                                    size=14,
+                                    symbol='star',
+                                    line=dict(color='#0e7490', width=1.2)
+                                ),
+                                hovertemplate="Frame %{x}<br>Selected Blue Peak: %{y:.2f}<extra></extra>"
+                            ),
+                            row=2,
+                            col=1
+                        )
+
+                        # Blue channel averages
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=[mean_of_blue_means] * len(frame_list),
+                                mode='lines',
+                                name=f'Avg Blue Mean ({mean_of_blue_means:.1f})',
+                                line=dict(color='#0066cc', dash='dash'),
+                                hoverinfo='skip'
+                            ),
+                            row=2,
+                            col=1
+                        )
+                        fig_interactive.add_trace(
+                            plotly_go.Scatter(
+                                x=frame_list,
+                                y=[mean_of_blue_medians] * len(frame_list),
+                                mode='lines',
+                                name=f'Avg Blue Median ({mean_of_blue_medians:.1f})',
+                                line=dict(color='#3399ff', dash='dash'),
+                                hoverinfo='skip'
+                            ),
+                            row=2,
+                            col=1
+                        )
+
+                        # Layout
+                        fig_interactive.update_layout(
+                            title=f"{analysis_name} - {base_video_name} - ROI {r_idx+1}",
+                            height=820,
+                            dragmode='select',
+                            selectdirection='h',
+                            hovermode='x unified',
+                            template='plotly_white',
+                            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1.0),
+                            margin=dict(t=80, b=60, l=60, r=30),
+                            newselection=dict(
+                                line=dict(color=COLOR_ACCENT, width=2)
+                            )
+                        )
+                        fig_interactive.update_xaxes(title_text="Frame Number", row=2, col=1)
+                        fig_interactive.update_yaxes(title_text="L* Brightness", row=1, col=1)
+                        fig_interactive.update_yaxes(title_text="Blue Channel Value", row=2, col=1)
+
+                        # Summary annotation
+                        fig_interactive.add_annotation(
+                            text=(
+                                f"Mean: {mean_of_means:.2f} ± {std_of_means:.2f} | "
+                                f"Median: {mean_of_medians:.2f} ± {std_of_medians:.2f}<br>"
+                                f"Blue Mean: {mean_of_blue_means:.1f} ± {std_of_blue_means:.1f} | "
+                                f"Blue Median: {mean_of_blue_medians:.1f} ± {std_of_blue_medians:.1f}"
+                            ),
+                            xref="paper",
+                            yref="paper",
+                            x=0.0,
+                            y=1.12,
+                            showarrow=False,
+                            align='left',
+                            font=dict(size=12),
+                            bgcolor='rgba(255,255,255,0.8)',
+                            bordercolor='#cccccc',
+                            borderwidth=1,
+                            borderpad=6
+                        )
+
+                        div_id = f"roi-interactive-{r_idx+1}"
+                        selection_script = self._build_selection_post_script(
+                            div_id=div_id,
+                            frames=frame_list,
+                            brightness_values=brightness_mean_values,
+                            blue_values=blue_mean_values,
+                            accent_color=COLOR_ACCENT,
+                            selection_fill=selection_fill,
+                        )
+                        fig_interactive.write_html(
+                            interactive_save_path,
+                            include_plotlyjs='cdn',
+                            div_id=div_id,
+                            post_script=selection_script,
+                        )
+                        interactive_path = interactive_save_path
+
+                        try:
+                            opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(interactive_save_path))
+                            if not opened:
+                                logging.warning("Could not automatically open interactive plot %s", interactive_save_path)
+                        except Exception as exc:
+                            logging.warning("Could not automatically open interactive plot %s: %s", interactive_save_path, exc)
+                    except Exception as plotly_error:
+                        logging.warning(f"Failed to generate interactive plot for ROI {r_idx+1}: {plotly_error}")
+                else:
+                    logging.info("Plotly not available - skipping interactive plot generation.")
 
             return png_path, interactive_path
 

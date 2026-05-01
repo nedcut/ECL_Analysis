@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -13,10 +14,23 @@ import pandas as pd
 from ecl_analysis.analysis.models import AnalysisResult
 
 PlotBuilder = Callable[
-    [pd.DataFrame, str, str, int, str, str, Sequence[float]],
+    [pd.DataFrame, str, str, int, str, str, Sequence[float], bool, bool],
     Tuple[Optional[str], Optional[str]],
 ]
 ProgressCallback = Callable[[int, int], bool]
+
+
+@dataclass(frozen=True)
+class ExportOptions:
+    """Output formats to write after analysis."""
+
+    csv: bool = True
+    json: bool = False
+    plot: bool = True
+    interactive_plot: bool = True
+
+    def has_outputs(self) -> bool:
+        return self.csv or self.json or self.plot or self.interactive_plot
 
 
 @dataclass
@@ -36,9 +50,11 @@ def save_analysis_outputs(
     video_path: str,
     analysis_name: str,
     plot_builder: PlotBuilder,
+    export_options: Optional[ExportOptions] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> ExportResult:
     """Persist CSV + plots for each ROI and return a UI-ready summary payload."""
+    options = export_options or ExportOptions()
     base_video_name = os.path.splitext(os.path.basename(video_path))[0]
     clean_analysis_name = "".join(
         c for c in (analysis_name.strip() or "DefaultAnalysis") if c.isalnum() or c in ("_", "-")
@@ -96,25 +112,53 @@ def save_analysis_outputs(
         csv_path = os.path.join(save_dir, csv_file)
 
         try:
-            df.to_csv(csv_path, index=False)
-            out_paths.append(csv_path)
-            summary_lines.append(f" - Saved CSV: {csv_file}")
+            if options.csv:
+                df.to_csv(csv_path, index=False)
+                out_paths.append(csv_path)
+                summary_lines.append(f" - Saved CSV: {csv_file}")
 
-            png_path, interactive_path = plot_builder(
-                df,
-                base_filename,
-                save_dir,
-                actual_roi_idx,
-                clean_analysis_name,
-                base_video_name,
-                analysis_result.background_values_per_frame,
-            )
-            if png_path:
-                summary_lines.append(f" - Saved Plot: {os.path.basename(png_path)}")
-                out_paths.append(png_path)
-            if interactive_path:
-                summary_lines.append(f" - Saved Interactive Plot: {os.path.basename(interactive_path)}")
-                out_paths.append(interactive_path)
+            if options.json:
+                json_file = f"{base_filename}_brightness.json"
+                json_path = os.path.join(save_dir, json_file)
+                payload = {
+                    "analysis_name": clean_analysis_name,
+                    "video_name": base_video_name,
+                    "roi": actual_roi_idx + 1,
+                    "frame_range": {
+                        "start": analysis_result.start_frame + 1,
+                        "end": analysis_result.start_frame + len(mean_data),
+                    },
+                    "summary": {
+                        "brightness_mean": float(avg_mean),
+                        "brightness_median": float(avg_median),
+                        "blue_mean": float(avg_blue_mean),
+                        "blue_median": float(avg_blue_median),
+                    },
+                    "data": df.to_dict(orient="records"),
+                }
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+                out_paths.append(json_path)
+                summary_lines.append(f" - Saved JSON: {json_file}")
+
+            if options.plot or options.interactive_plot:
+                png_path, interactive_path = plot_builder(
+                    df,
+                    base_filename,
+                    save_dir,
+                    actual_roi_idx,
+                    clean_analysis_name,
+                    base_video_name,
+                    analysis_result.background_values_per_frame,
+                    options.plot,
+                    options.interactive_plot,
+                )
+                if png_path:
+                    summary_lines.append(f" - Saved Plot: {os.path.basename(png_path)}")
+                    out_paths.append(png_path)
+                if interactive_path:
+                    summary_lines.append(f" - Saved Interactive Plot: {os.path.basename(interactive_path)}")
+                    out_paths.append(interactive_path)
         except Exception as exc:
             logging.exception("Failed to export ROI %s to %s: %s", actual_roi_idx + 1, save_dir, exc)
             plot_failed = True
