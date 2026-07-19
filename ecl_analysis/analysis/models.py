@@ -9,6 +9,11 @@ Point = Tuple[int, int]
 RoiRect = Tuple[Point, Point]
 
 
+def has_analyzable_rois(rects: Sequence[RoiRect], background_roi_idx: Optional[int]) -> bool:
+    """Return True if at least one ROI is not designated as the background ROI."""
+    return any(i != background_roi_idx for i in range(len(rects)))
+
+
 @dataclass(frozen=True)
 class AnalysisRequest:
     """Immutable snapshot of all inputs required for frame analysis."""

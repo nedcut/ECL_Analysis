@@ -20,7 +20,7 @@ from .analysis.brightness import (
     compute_l_star_frame as analysis_compute_l_star_frame,
 )
 from .analysis.duration import validate_run_duration as analysis_validate_run_duration
-from .analysis.models import AnalysisRequest, AnalysisResult
+from .analysis.models import AnalysisRequest, AnalysisResult, has_analyzable_rois
 from .audio import AudioAnalyzer, AudioManager
 from .cache import FrameCache
 from .constants import (
@@ -4483,6 +4483,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if not self.rects:
             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Please define at least one ROI.")
             return
+        if not has_analyzable_rois(self.rects, self.background_roi_idx):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Analysis Error",
+                "Please define at least one ROI that is not the background ROI.",
+            )
+            return
         if self.start_frame is None or self.end_frame is None or self.start_frame > self.end_frame:
             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Invalid start/end frame range selected.")
             return
@@ -4703,6 +4710,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             summary_lines.append("Note: Some plots failed to generate - check console for details")
         if export_result.cancelled:
             summary_lines.append("Note: Export cancelled by user before all ROIs were written")
+
+        if export_result.no_outputs_produced:
+            summary_lines.append(
+                "ERROR: No output files were produced (selected export format may be unavailable)."
+            )
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Export Failed",
+                "Analysis ran, but no output files were produced. If you only selected the "
+                "interactive plot, the 'plotly' package may not be installed.",
+            )
 
         self.results_label.setText("\n".join(summary_lines))
         self.brightness_display_label.setText(
