@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from string import Template
 from typing import List, Optional, Tuple
@@ -68,6 +69,25 @@ from .roi_geometry import (
     map_label_to_frame_rect as geometry_map_label_to_frame_rect,
     scale_value_for_pixmap as geometry_scale_value_for_pixmap,
 )
+
+
+def _atomic_write_json(path: str, data: dict) -> None:
+    """Write JSON to `path` atomically.
+
+    Serializes to a temp file in the same directory then uses os.replace()
+    to swap it into place, so a crash or error mid-write cannot leave the
+    target file truncated or corrupted.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix='.tmp_settings_', suffix='.json')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
 
 def _hex_to_rgba(color: str, alpha: float) -> str:
@@ -512,8 +532,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.settings['audio_enabled'] = self.audio_manager.enabled
             self.settings['audio_volume'] = self.audio_manager.volume
             self.settings['frame_cache_size'] = int(self.frame_cache_size)
-            with open(DEFAULT_SETTINGS_FILE, 'w') as f:
-                json.dump(self.settings, f, indent=2)
+            _atomic_write_json(DEFAULT_SETTINGS_FILE, self.settings)
         except Exception as e:
             logging.warning(f"Could not save settings: {e}")
 
@@ -524,6 +543,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.recent_files.insert(0, file_path)
         self.recent_files = self.recent_files[:MAX_RECENT_FILES]
         self._update_recent_files_menu()
+        self._save_settings()
 
     def _init_ui(self):
         """Set up the main UI layout and widgets."""
