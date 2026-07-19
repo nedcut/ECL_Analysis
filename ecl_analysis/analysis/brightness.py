@@ -134,6 +134,30 @@ def compute_brightness_stats(
             l_bg_sub_median = 0.0
             b_bg_sub_mean = 0.0
             b_bg_sub_median = 0.0
+    elif noise_floor_threshold > 0:
+        noise_floor_mask = l_star > noise_floor_threshold
+
+        if np.any(noise_floor_mask):
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (morphological_kernel_size, morphological_kernel_size),
+            )
+            mask_uint8 = noise_floor_mask.astype(np.uint8) * 255
+            cleaned_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+            noise_floor_mask = cleaned_mask > 0
+
+        if np.any(noise_floor_mask):
+            filtered_l_pixels = l_star[noise_floor_mask]
+            filtered_b_pixels = blue_chan[noise_floor_mask]
+            l_bg_sub_mean = float(np.mean(filtered_l_pixels))
+            l_bg_sub_median = float(np.median(filtered_l_pixels))
+            b_bg_sub_mean = float(np.mean(filtered_b_pixels))
+            b_bg_sub_median = float(np.median(filtered_b_pixels))
+        else:
+            l_bg_sub_mean = 0.0
+            l_bg_sub_median = 0.0
+            b_bg_sub_mean = 0.0
+            b_bg_sub_median = 0.0
     else:
         l_bg_sub_mean = l_raw_mean
         l_bg_sub_median = l_raw_median

@@ -43,6 +43,11 @@ class ExportResult:
     plot_failed: bool
     cancelled: bool
 
+    @property
+    def no_outputs_produced(self) -> bool:
+        """True when the export ran to completion (not cancelled) but wrote no files."""
+        return not self.cancelled and not self.out_paths
+
 
 def save_analysis_outputs(
     analysis_result: AnalysisResult,
@@ -61,6 +66,11 @@ def save_analysis_outputs(
     ).rstrip()
 
     summary_lines = [f"Analysis Complete ({analysis_result.frames_processed} frames analyzed):"]
+    if analysis_result.truncated:
+        summary_lines.append(
+            " - WARNING: Analysis truncated by early end-of-file "
+            f"({analysis_result.frames_processed} of {analysis_result.total_frames} frames processed)."
+        )
     avg_brightness_summary: List[str] = []
     out_paths: List[str] = []
     plot_failed = False
@@ -96,12 +106,15 @@ def save_analysis_outputs(
         )
 
         avg_mean = np.mean(mean_data)
+        std_mean = np.std(mean_data)
         avg_median = np.mean(median_data)
         avg_blue_mean = np.mean(blue_mean)
+        std_blue_mean = np.std(blue_mean)
         avg_blue_median = np.mean(blue_median)
         avg_brightness_summary.append(
-            f"ROI {actual_roi_idx + 1} L*: {avg_mean:.2f}±{avg_median:.2f}, "
-            f"Blue: {avg_blue_mean:.1f}±{avg_blue_median:.1f}"
+            f"ROI {actual_roi_idx + 1} L*: {avg_mean:.2f}±{std_mean:.2f} (mean±std), "
+            f"median {avg_median:.2f}; "
+            f"Blue: {avg_blue_mean:.1f}±{std_blue_mean:.1f} (mean±std)"
         )
 
         base_filename = (
