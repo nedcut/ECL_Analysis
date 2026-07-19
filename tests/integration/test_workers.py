@@ -75,8 +75,44 @@ def test_analysis_worker_emits_structured_result(monkeypatch):
     result = captured.get("result")
     assert result is not None
     assert result.frames_processed == 3
+    assert result.truncated is False
     assert len(result.brightness_mean_data) == 1
     assert len(result.brightness_mean_data[0]) == 3
+
+
+def test_analysis_worker_flags_truncation_on_early_eof(monkeypatch):
+    frames = [
+        np.full((6, 6, 3), 20, dtype=np.uint8),
+        np.full((6, 6, 3), 40, dtype=np.uint8),
+    ]
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture(frames))
+
+    request = AnalysisRequest(
+        video_path="dummy.mp4",
+        rects=[((0, 0), (6, 6))],
+        background_roi_idx=None,
+        start_frame=0,
+        end_frame=4,
+        use_fixed_mask=False,
+        fixed_roi_masks=[],
+        background_percentile=90.0,
+        morphological_kernel_size=3,
+        noise_floor_threshold=0.0,
+    )
+
+    worker = AnalysisWorker(request)
+    captured: Dict[str, object] = {}
+    worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+    worker.error.connect(lambda message: captured.setdefault("error", message))
+    worker.run()
+
+    assert "error" not in captured
+    result = captured.get("result")
+    assert result is not None
+    assert result.truncated is True
+    assert result.frames_processed == 2
+    assert result.total_frames == 5
+    assert len(result.brightness_mean_data[0]) == 2
 
 
 def test_brightest_frame_worker_picks_max_frame(monkeypatch):
