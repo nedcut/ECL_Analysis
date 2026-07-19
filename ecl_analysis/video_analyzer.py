@@ -4597,11 +4597,23 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._set_busy_state(False)
             return
 
+        if result.truncated:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Analysis Truncated",
+                "The video decoder reached end-of-file early. Only "
+                f"{result.frames_processed} of {result.total_frames} requested frames were "
+                "analyzed; results have been trimmed accordingly.",
+            )
+
         export_options = self._pending_export_options or ExportOptions()
         self._save_analysis_results(result, self._analysis_save_dir, export_options)
         self._analysis_save_dir = None
         self._pending_export_options = None
-        self.statusBar().showMessage("Analysis complete")
+        if result.truncated:
+            self.statusBar().showMessage("Analysis complete (truncated: early end-of-file)")
+        else:
+            self.statusBar().showMessage("Analysis complete")
         self.audio_manager.play_analysis_complete()
 
         expected_duration = self.run_duration_spin.value()

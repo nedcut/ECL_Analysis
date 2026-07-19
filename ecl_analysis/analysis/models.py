@@ -40,3 +40,4 @@ class AnalysisResult:
     elapsed_seconds: float
     start_frame: int
     end_frame: int
+    truncated: bool = False

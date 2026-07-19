@@ -61,6 +61,11 @@ def save_analysis_outputs(
     ).rstrip()
 
     summary_lines = [f"Analysis Complete ({analysis_result.frames_processed} frames analyzed):"]
+    if analysis_result.truncated:
+        summary_lines.append(
+            " - WARNING: Analysis truncated by early end-of-file "
+            f"({analysis_result.frames_processed} of {analysis_result.total_frames} frames processed)."
+        )
     avg_brightness_summary: List[str] = []
     out_paths: List[str] = []
     plot_failed = False
