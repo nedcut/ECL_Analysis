@@ -12,6 +12,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .analysis.background import (
+    BackgroundComputationError,
     compute_background_brightness as analysis_compute_background_brightness,
 )
 from .analysis.brightness import (
@@ -2413,7 +2414,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 cv2.rectangle(frame_to_draw_on, pt1_frame, pt2_frame, (0, 255, 255), ROI_THICKNESS_DEFAULT) # Use a distinct color (cyan)
 
     def _update_current_brightness_display(self):
-        """Calculates and displays comprehensive brightness information for the current frame's ROIs."""
+        """Calculates and displays comprehensive brightness information for the current frame's ROIs.
+
+        Computation failures are shown as an explicit error in the display label
+        rather than crashing the event loop or showing fabricated values.
+        """
+        try:
+            self._update_current_brightness_display_impl()
+        except (BackgroundComputationError, cv2.error):
+            logging.exception("Live brightness display failed")
+            self.brightness_display_label.setText("Brightness: computation error (see log)")
+
+    def _update_current_brightness_display_impl(self):
         if self.frame is None or not self.rects:
             self.brightness_display_label.setText("N/A")
             return
@@ -2805,7 +2817,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         what is actually applied during analysis.
         """
         if self.background_roi_idx is not None and self.frame is not None:
-            return self._compute_background_brightness(self.frame)
+            try:
+                return self._compute_background_brightness(self.frame)
+            except BackgroundComputationError:
+                # Display-only path: log and show no value; the analysis worker
+                # still fails loudly if the same computation breaks during a run.
+                logging.exception("Could not compute displayed background threshold")
+                return None
 
         # If no background ROI or calculation failed, return manual threshold
         return None
@@ -2844,10 +2862,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """
         overlay = frame.copy()
 
-        # Precompute L* for current frame and derive background brightness
+        # Precompute L* and derive the same threshold the analysis worker would
+        # apply (background ROI when configured, manual threshold otherwise).
         l_star_frame = self._compute_l_star_frame(frame)
-        background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
-        
+        try:
+            effective_threshold = self._effective_analysis_threshold(frame, frame_l_star=l_star_frame)
+        except BackgroundComputationError:
+            logging.exception("Pixel mask overlay skipped: background computation failed")
+            self.statusBar().showMessage("Pixel mask overlay unavailable: background computation failed")
+            return frame
+
         for roi_idx, (pt1, pt2) in enumerate(self.rects):
             # Skip background ROI
             if roi_idx == self.background_roi_idx:
@@ -2876,8 +2900,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
                     if mask is None:
                         # Derive mask from current frame using cached L* channel
-                        if background_brightness is not None:
-                            mask = roi_l_star > background_brightness
+                        if effective_threshold is not None:
+                            mask = roi_l_star > effective_threshold
                         else:
                             mask = np.ones_like(roi_l_star, dtype=bool)
                     
@@ -2937,9 +2961,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         frame = self.frame
         fh, fw = frame.shape[:2]
-        # Determine background brightness once from current frame
+        # Determine the analysis-equivalent threshold once from the current frame
         l_star_frame = self._compute_l_star_frame(frame)
-        background_brightness = self._compute_background_brightness(frame, frame_l_star=l_star_frame)
+        try:
+            effective_threshold = self._effective_analysis_threshold(frame, frame_l_star=l_star_frame)
+        except BackgroundComputationError:
+            logging.exception("Mask capture aborted: background computation failed")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Capture Mask",
+                "Could not compute the background threshold for this frame, so no masks were captured.",
+            )
+            return
 
         # Determine source frame index
         if source_frame_idx is None:
@@ -2961,8 +2994,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if x2 > x1 and y2 > y1:
                 roi_l_star = l_star_frame[y1:y2, x1:x2]
                 try:
-                    if background_brightness is not None:
-                        mask = roi_l_star > background_brightness
+                    if effective_threshold is not None:
+                        mask = roi_l_star > effective_threshold
                         # Morphological cleanup similar to analysis
                         if np.any(mask):
                             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.morphological_kernel_size, self.morphological_kernel_size))
@@ -2970,7 +3003,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                             cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
                             mask = cleaned > 0
                     else:
-                        # If no background brightness, default to full ROI
+                        # No thresholding configured - analysis uses the full ROI
                         mask = np.ones(roi_l_star.shape, dtype=bool)
                     masks.append(mask)
                     sources.append(source_frame_idx)
@@ -4397,3 +4430,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             background_percentile=self.background_percentile,
             frame_l_star=frame_l_star,
         )
+
+    def _effective_analysis_threshold(
+        self,
+        frame: np.ndarray,
+        frame_l_star: Optional[np.ndarray] = None,
+    ) -> Optional[float]:
+        """Return the threshold the analysis worker would apply to this frame.
+
+        Mirrors AnalysisWorker semantics: the background-ROI percentile value
+        when a background ROI is configured, otherwise the manual threshold
+        when it is above zero. Returns None when analysis would not gate pixels.
+
+        Raises BackgroundComputationError when a configured background ROI
+        fails to compute; callers must surface the failure rather than fall
+        back to a fabricated threshold.
+        """
+        if self.background_roi_idx is not None:
+            return self._compute_background_brightness(frame, frame_l_star=frame_l_star)
+        if self.manual_threshold > 0:
+            return float(self.manual_threshold)
+        return None
