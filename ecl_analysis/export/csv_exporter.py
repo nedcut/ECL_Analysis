@@ -43,6 +43,11 @@ class ExportResult:
     plot_failed: bool
     cancelled: bool
 
+    @property
+    def no_outputs_produced(self) -> bool:
+        """True when the export ran to completion (not cancelled) but wrote no files."""
+        return not self.cancelled and not self.out_paths
+
 
 def save_analysis_outputs(
     analysis_result: AnalysisResult,
