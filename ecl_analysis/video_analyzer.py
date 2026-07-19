@@ -4769,101 +4769,102 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
                 plt.style.use('seaborn-v0_8-darkgrid')
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-
-                # Main brightness plot
-                ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
-                ax1.plot(frames, brightness_median, label='Median Brightness', color='#70ad47', linewidth=2, alpha=0.8)
-            
-                # Add background line if background values are available
-                if background_array is not None:
-                    ax1.plot(frames, background_array, label='Background Level', color='#808080', 
-                             linewidth=1.5, linestyle=':', alpha=0.9)
-            
-                # Add confidence bands (mean ± std)
-                ax1.fill_between(frames, brightness_mean - std_of_means, brightness_mean + std_of_means, 
-                                 alpha=0.2, color='#5a9bd5', label=f'Mean ±1σ ({std_of_means:.1f})')
-                ax1.fill_between(frames, brightness_median - std_of_medians, brightness_median + std_of_medians, 
-                                 alpha=0.2, color='#70ad47', label=f'Median ±1σ ({std_of_medians:.1f})')
-            
-                # Add horizontal lines for averages
-                ax1.axhline(mean_of_means, color='#5a9bd5', linestyle='--', alpha=0.7, 
-                            label=f'Avg Mean ({mean_of_means:.1f})')
-                ax1.axhline(mean_of_medians, color='#70ad47', linestyle='--', alpha=0.7, 
-                            label=f'Avg Median ({mean_of_medians:.1f})')
-            
-                # Mark peak points
-                ax1.scatter([frame_peak_mean], [val_peak_mean], color='#ff0000', zorder=5, s=100, 
-                            marker='^', label=f'Peak Mean ({val_peak_mean:.1f})')
-                ax1.scatter([frame_peak_median], [val_peak_median], color='#ed7d31', zorder=5, s=100, 
-                            marker='v', label=f'Peak Median ({val_peak_median:.1f})')
-
-                ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
-                ax1.set_ylabel('L* Brightness', fontsize=12)
-                ax1.legend(fontsize=10, loc='best')
-                ax1.grid(True, alpha=0.3)
-            
-                # Adjust y-axis limits to provide more space at the top for statistics panel
-                y_min, y_max = ax1.get_ylim()
-                y_range = y_max - y_min
-                ax1.set_ylim(y_min, y_max + 0.15 * y_range)
-
-                # Add statistics text box
-                stats_text = f"""Statistics:
+                try:
+                    # Main brightness plot
+                    ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
+                    ax1.plot(frames, brightness_median, label='Median Brightness', color='#70ad47', linewidth=2, alpha=0.8)
+                
+                    # Add background line if background values are available
+                    if background_array is not None:
+                        ax1.plot(frames, background_array, label='Background Level', color='#808080', 
+                                 linewidth=1.5, linestyle=':', alpha=0.9)
+                
+                    # Add confidence bands (mean ± std)
+                    ax1.fill_between(frames, brightness_mean - std_of_means, brightness_mean + std_of_means, 
+                                     alpha=0.2, color='#5a9bd5', label=f'Mean ±1σ ({std_of_means:.1f})')
+                    ax1.fill_between(frames, brightness_median - std_of_medians, brightness_median + std_of_medians, 
+                                     alpha=0.2, color='#70ad47', label=f'Median ±1σ ({std_of_medians:.1f})')
+                
+                    # Add horizontal lines for averages
+                    ax1.axhline(mean_of_means, color='#5a9bd5', linestyle='--', alpha=0.7, 
+                                label=f'Avg Mean ({mean_of_means:.1f})')
+                    ax1.axhline(mean_of_medians, color='#70ad47', linestyle='--', alpha=0.7, 
+                                label=f'Avg Median ({mean_of_medians:.1f})')
+                
+                    # Mark peak points
+                    ax1.scatter([frame_peak_mean], [val_peak_mean], color='#ff0000', zorder=5, s=100, 
+                                marker='^', label=f'Peak Mean ({val_peak_mean:.1f})')
+                    ax1.scatter([frame_peak_median], [val_peak_median], color='#ed7d31', zorder=5, s=100, 
+                                marker='v', label=f'Peak Median ({val_peak_median:.1f})')
+    
+                    ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
+                    ax1.set_ylabel('L* Brightness', fontsize=12)
+                    ax1.legend(fontsize=10, loc='best')
+                    ax1.grid(True, alpha=0.3)
+                
+                    # Adjust y-axis limits to provide more space at the top for statistics panel
+                    y_min, y_max = ax1.get_ylim()
+                    y_range = y_max - y_min
+                    ax1.set_ylim(y_min, y_max + 0.15 * y_range)
+    
+                    # Add statistics text box
+                    stats_text = f"""Statistics:
 Mean: {mean_of_means:.2f} ± {std_of_means:.2f}
 Median: {mean_of_medians:.2f} ± {std_of_medians:.2f}
 Peak Mean: {val_peak_mean:.2f} @ Frame {frame_peak_mean}
 Peak Median: {val_peak_median:.2f} @ Frame {frame_peak_median}
 Frames Analyzed: {len(frames)}"""
-            
-                ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
-                         verticalalignment='top', horizontalalignment='right', 
-                         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-            
-                # Blue channel plot
-                ax2.plot(frames, blue_mean, label='Blue Mean', color='#0066cc', linewidth=2, alpha=0.8)
-                ax2.plot(frames, blue_median, label='Blue Median', color='#3399ff', linewidth=2, alpha=0.8)
-            
-                # Add confidence bands for blue channel
-                ax2.fill_between(frames, blue_mean - std_of_blue_means, blue_mean + std_of_blue_means, 
-                                 alpha=0.2, color='#0066cc', label=f'Blue Mean ±1σ ({std_of_blue_means:.1f})')
-                ax2.fill_between(frames, blue_median - std_of_blue_medians, blue_median + std_of_blue_medians, 
-                                 alpha=0.2, color='#3399ff', label=f'Blue Median ±1σ ({std_of_blue_medians:.1f})')
-            
-                # Add horizontal lines for blue averages
-                ax2.axhline(mean_of_blue_means, color='#0066cc', linestyle='--', alpha=0.7, 
-                            label=f'Avg Blue Mean ({mean_of_blue_means:.1f})')
-                ax2.axhline(mean_of_blue_medians, color='#3399ff', linestyle='--', alpha=0.7, 
-                            label=f'Avg Blue Median ({mean_of_blue_medians:.1f})')
-            
-                # Mark blue peak points
-                ax2.scatter([frame_peak_blue_mean], [val_peak_blue_mean], color='#ff0000', zorder=5, s=100, 
-                            marker='^', label=f'Peak Blue Mean ({val_peak_blue_mean:.1f})')
-                ax2.scatter([frame_peak_blue_median], [val_peak_blue_median], color='#ed7d31', zorder=5, s=100, 
-                            marker='v', label=f'Peak Blue Median ({val_peak_blue_median:.1f})')
-            
-                ax2.set_xlabel('Frame Number', fontsize=12)
-                ax2.set_ylabel('Blue Channel Value', fontsize=12)
-                ax2.legend(fontsize=10, loc='best')
-                ax2.grid(True, alpha=0.3)
-            
-                # Add blue channel statistics text box
-                blue_stats_text = f"""Blue Channel Statistics:
+                
+                    ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
+                             verticalalignment='top', horizontalalignment='right', 
+                             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                
+                    # Blue channel plot
+                    ax2.plot(frames, blue_mean, label='Blue Mean', color='#0066cc', linewidth=2, alpha=0.8)
+                    ax2.plot(frames, blue_median, label='Blue Median', color='#3399ff', linewidth=2, alpha=0.8)
+                
+                    # Add confidence bands for blue channel
+                    ax2.fill_between(frames, blue_mean - std_of_blue_means, blue_mean + std_of_blue_means, 
+                                     alpha=0.2, color='#0066cc', label=f'Blue Mean ±1σ ({std_of_blue_means:.1f})')
+                    ax2.fill_between(frames, blue_median - std_of_blue_medians, blue_median + std_of_blue_medians, 
+                                     alpha=0.2, color='#3399ff', label=f'Blue Median ±1σ ({std_of_blue_medians:.1f})')
+                
+                    # Add horizontal lines for blue averages
+                    ax2.axhline(mean_of_blue_means, color='#0066cc', linestyle='--', alpha=0.7, 
+                                label=f'Avg Blue Mean ({mean_of_blue_means:.1f})')
+                    ax2.axhline(mean_of_blue_medians, color='#3399ff', linestyle='--', alpha=0.7, 
+                                label=f'Avg Blue Median ({mean_of_blue_medians:.1f})')
+                
+                    # Mark blue peak points
+                    ax2.scatter([frame_peak_blue_mean], [val_peak_blue_mean], color='#ff0000', zorder=5, s=100, 
+                                marker='^', label=f'Peak Blue Mean ({val_peak_blue_mean:.1f})')
+                    ax2.scatter([frame_peak_blue_median], [val_peak_blue_median], color='#ed7d31', zorder=5, s=100, 
+                                marker='v', label=f'Peak Blue Median ({val_peak_blue_median:.1f})')
+                
+                    ax2.set_xlabel('Frame Number', fontsize=12)
+                    ax2.set_ylabel('Blue Channel Value', fontsize=12)
+                    ax2.legend(fontsize=10, loc='best')
+                    ax2.grid(True, alpha=0.3)
+                
+                    # Add blue channel statistics text box
+                    blue_stats_text = f"""Blue Channel Statistics:
 Mean: {mean_of_blue_means:.1f} ± {std_of_blue_means:.1f}
 Median: {mean_of_blue_medians:.1f} ± {std_of_blue_medians:.1f}
 Peak Mean: {val_peak_blue_mean:.1f} @ Frame {frame_peak_blue_mean}
 Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
-            
-                ax2.text(0.98, 0.98, blue_stats_text, transform=ax2.transAxes, fontsize=9,
-                         verticalalignment='top', horizontalalignment='right', 
-                         bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
-
-                plt.tight_layout()
-
-                # Save plot
-                plot_filename = f"{base_filename}_plot.png"
-                plot_save_path = os.path.join(save_dir, plot_filename)
-                plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
-                plt.close(fig)
+                
+                    ax2.text(0.98, 0.98, blue_stats_text, transform=ax2.transAxes, fontsize=9,
+                             verticalalignment='top', horizontalalignment='right', 
+                             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+    
+                    plt.tight_layout()
+    
+                    # Save plot
+                    plot_filename = f"{base_filename}_plot.png"
+                    plot_save_path = os.path.join(save_dir, plot_filename)
+                    plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
+                finally:
+                    plt.close(fig)
                 png_path = plot_save_path
 
             if generate_interactive:
