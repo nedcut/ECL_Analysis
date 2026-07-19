@@ -125,6 +125,10 @@ class AnalysisWorker(QtCore.QObject):
                     background_percentile=req.background_percentile,
                     frame_l_star=l_star_frame,
                 )
+                if req.background_roi_idx is None and req.manual_threshold > 0:
+                    # Manual threshold mode: no background ROI configured, so the
+                    # user-set manual threshold acts as the active threshold.
+                    background_value = req.manual_threshold
                 background_values_per_frame.append(background_value if background_value is not None else 0.0)
 
                 frame_height, frame_width = frame.shape[:2]

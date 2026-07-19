@@ -264,7 +264,6 @@ class AnalysisRangeSlider(QtWidgets.QWidget):
             current_value = self._pos_to_value(pos_x)
             delta = current_value - anchor_value
             origin_start, origin_end = self._drag_origin_range
-            width = origin_end - origin_start
             new_start = origin_start + delta
             new_end = origin_end + delta
             if new_start < self._minimum:
@@ -4521,6 +4520,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             background_percentile=self.background_percentile,
             morphological_kernel_size=self.morphological_kernel_size,
             noise_floor_threshold=self.noise_floor_threshold,
+            manual_threshold=float(self.manual_threshold),
         )
 
         self._analysis_save_dir = save_dir
