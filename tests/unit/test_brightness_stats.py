@@ -36,6 +36,45 @@ def test_compute_brightness_stats_wrapper_uses_instance_parameters(video_analyze
     assert wrapped_stats == pytest.approx(direct_stats, rel=1e-6)
 
 
+def test_noise_floor_applied_without_background_roi():
+    """Noise floor filtering should apply even when no background ROI is set."""
+    roi = np.array(
+        [
+            [[0, 0, 0], [250, 250, 250], [0, 0, 0]],
+            [[250, 250, 250], [250, 250, 250], [250, 250, 250]],
+            [[0, 0, 0], [250, 250, 250], [0, 0, 0]],
+        ],
+        dtype=np.uint8,
+    )
+
+    unfiltered_stats = compute_brightness_stats(roi_bgr=roi, noise_floor_threshold=0.0)
+    filtered_stats = compute_brightness_stats(
+        roi_bgr=roi, morphological_kernel_size=1, noise_floor_threshold=50.0
+    )
+
+    # Raw stats are unaffected by the noise floor.
+    assert filtered_stats[0] == pytest.approx(unfiltered_stats[0], rel=1e-6)
+    assert filtered_stats[1] == pytest.approx(unfiltered_stats[1], rel=1e-6)
+
+    # Bg-sub stats (here: noise-floor-filtered stats) should differ from the
+    # unfiltered raw values once the threshold excludes the dark pixels.
+    assert filtered_stats[2] != pytest.approx(unfiltered_stats[2], rel=1e-6)
+    assert filtered_stats[2] == pytest.approx(98.43, rel=1e-2)
+    assert filtered_stats[6] == pytest.approx(250.0, rel=1e-2)
+
+
+def test_noise_floor_excludes_all_pixels_without_background_roi():
+    """When every pixel is below the noise floor, bg-sub stats collapse to zero."""
+    roi = np.zeros((3, 3, 3), dtype=np.uint8)
+
+    stats = compute_brightness_stats(roi_bgr=roi, morphological_kernel_size=1, noise_floor_threshold=50.0)
+
+    assert stats[2] == 0.0
+    assert stats[3] == 0.0
+    assert stats[6] == 0.0
+    assert stats[7] == 0.0
+
+
 def test_compute_background_brightness_wrapper_uses_instance_state(video_analyzer_factory):
     analyzer: VideoAnalyzer = video_analyzer_factory(
         rects=[((0, 0), (2, 2))],
