@@ -1,7 +1,10 @@
 import numpy as np
 import pytest
 
-from ecl_analysis.analysis.background import compute_background_brightness
+from ecl_analysis.analysis.background import (
+    BackgroundComputationError,
+    compute_background_brightness,
+)
 from ecl_analysis.analysis.brightness import compute_l_star_frame
 
 
@@ -89,3 +92,25 @@ def test_compute_background_brightness_returns_none_when_clamped_roi_empty():
     )
 
     assert result is None
+
+
+def test_compute_background_brightness_raises_on_computation_failure(monkeypatch):
+    """A configured background ROI that fails to compute must error, not silently
+    return None and let callers mistake it for 'no background ROI configured'."""
+    import ecl_analysis.analysis.background as background_module
+
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    rects = [((0, 0), (2, 2))]
+
+    def boom(*args, **kwargs):
+        raise ValueError("synthetic percentile failure")
+
+    monkeypatch.setattr(background_module.np, "percentile", boom)
+
+    with pytest.raises(BackgroundComputationError):
+        compute_background_brightness(
+            frame=frame,
+            rects=rects,
+            background_roi_idx=0,
+            background_percentile=90.0,
+        )

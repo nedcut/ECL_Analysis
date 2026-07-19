@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -14,25 +15,19 @@ from .analysis.background import (
     compute_background_brightness as analysis_compute_background_brightness,
 )
 from .analysis.brightness import (
-    compute_brightness as analysis_compute_brightness,
     compute_brightness_stats as analysis_compute_brightness_stats,
     compute_l_star_frame as analysis_compute_l_star_frame,
 )
 from .analysis.duration import validate_run_duration as analysis_validate_run_duration
-from .analysis.models import AnalysisRequest, AnalysisResult
+from .analysis.models import AnalysisRequest, AnalysisResult, has_analyzable_rois
 from .audio import AudioAnalyzer, AudioManager
 from .cache import FrameCache
 from .constants import (
     APP_WINDOW_TITLE,
     COLOR_ACCENT,
-    COLOR_ACCENT_HOVER,
     COLOR_BACKGROUND,
-    COLOR_BRIGHTNESS_LABEL,
-    COLOR_FOREGROUND,
     COLOR_INFO,
-    COLOR_SECONDARY,
     COLOR_SECONDARY_LIGHT,
-    COLOR_SUCCESS,
     DEFAULT_FONT_FAMILY,
     DEFAULT_MANUAL_THRESHOLD,
     DEFAULT_SETTINGS_FILE,
@@ -50,6 +45,7 @@ from .constants import (
 )
 from .export.csv_exporter import ExportOptions, save_analysis_outputs
 from .export.plotting import generate_enhanced_plot
+from .ui_theme import build_app_stylesheet
 from .workers import (
     AnalysisWorker,
     AudioDetectionWorker,
@@ -68,6 +64,67 @@ from .roi_geometry import (
 )
 
 
+def _atomic_write_json(path: str, data: dict) -> None:
+    """Write JSON to `path` atomically.
+
+    Serializes to a temp file in the same directory then uses os.replace()
+    to swap it into place, so a crash or error mid-write cannot leave the
+    target file truncated or corrupted.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix='.tmp_settings_', suffix='.json')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+WORKER_STOP_TIMEOUT_MS = 1500
+WORKER_STOP_GRACE_TIMEOUT_MS = 5000
+
+
+def shutdown_worker_thread(
+    thread: Optional[QtCore.QThread],
+    name: str,
+    timeout_ms: int = WORKER_STOP_TIMEOUT_MS,
+    grace_timeout_ms: int = WORKER_STOP_GRACE_TIMEOUT_MS,
+) -> bool:
+    """Stop a worker thread and report whether it actually finished.
+
+    Returns True when the thread is stopped (or was None). Returns False when
+    the thread is still running after the escalated wait; callers must keep
+    their references to the thread and its worker alive in that case, because
+    destroying a running QThread aborts the process.
+    """
+    if thread is None:
+        return True
+
+    thread.quit()
+    if thread.wait(timeout_ms):
+        return True
+
+    logging.warning(
+        "%s worker thread did not stop within %dms; waiting up to %dms more",
+        name,
+        timeout_ms,
+        grace_timeout_ms,
+    )
+    if thread.wait(grace_timeout_ms):
+        return True
+
+    logging.error(
+        "%s worker thread is still running after %dms; keeping its references "
+        "alive to avoid destroying a running QThread",
+        name,
+        timeout_ms + grace_timeout_ms,
+    )
+    return False
+
+
 def _hex_to_rgba(color: str, alpha: float) -> str:
     """Convert a hex color string like '#RRGGBB' to an rgba() string."""
     stripped = color.lstrip('#')
@@ -78,6 +135,11 @@ def _hex_to_rgba(color: str, alpha: float) -> str:
     b = int(stripped[4:6], 16)
     clamped_alpha = max(0.0, min(1.0, float(alpha)))
     return f"rgba({r},{g},{b},{clamped_alpha})"
+
+
+def _parse_speed_text(speed_text: str) -> float:
+    """Parse a playback speed combo label like '2×' or '1x' into a float."""
+    return float(speed_text.strip().rstrip('×').rstrip('x').rstrip('X'))
 
 
 def _offset_rect_within_bounds(
@@ -262,7 +324,6 @@ class AnalysisRangeSlider(QtWidgets.QWidget):
             current_value = self._pos_to_value(pos_x)
             delta = current_value - anchor_value
             origin_start, origin_end = self._drag_origin_range
-            width = origin_end - origin_start
             new_start = origin_start + delta
             new_end = origin_end + delta
             if new_start < self._minimum:
@@ -505,8 +566,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.settings['audio_enabled'] = self.audio_manager.enabled
             self.settings['audio_volume'] = self.audio_manager.volume
             self.settings['frame_cache_size'] = int(self.frame_cache_size)
-            with open(DEFAULT_SETTINGS_FILE, 'w') as f:
-                json.dump(self.settings, f, indent=2)
+            _atomic_write_json(DEFAULT_SETTINGS_FILE, self.settings)
         except Exception as e:
             logging.warning(f"Could not save settings: {e}")
 
@@ -517,6 +577,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.recent_files.insert(0, file_path)
         self.recent_files = self.recent_files[:MAX_RECENT_FILES]
         self._update_recent_files_menu()
+        self._save_settings()
 
     def _init_ui(self):
         """Set up the main UI layout and widgets."""
@@ -959,7 +1020,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._update_history_actions()
 
     def _cancel_active_worker(self):
-        """Request cancellation of any currently running worker."""
+        """Request cancellation of any currently running worker.
+
+        Each worker's cancel() sets a threading.Event-backed token, so calling
+        it from the GUI thread while the worker runs in its own thread is safe.
+        """
         cancelled_any = False
         if self._analysis_worker is not None:
             self._analysis_worker.cancel()
@@ -1103,478 +1168,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     def _apply_stylesheet(self):
         """Apply a modern, clean stylesheet to the application."""
-        self.setStyleSheet(f"""
-            QMainWindow {{
-                background-color: {COLOR_BACKGROUND};
-                color: {COLOR_FOREGROUND};
-                font-family: {DEFAULT_FONT_FAMILY};
-                font-size: 14px;
-            }}
-            QSplitter::handle {{ background: {COLOR_SECONDARY_LIGHT}; }}
-            QMenuBar {{
-                background-color: {COLOR_SECONDARY};
-                color: {COLOR_FOREGROUND};
-                border-bottom: 1px solid {COLOR_SECONDARY_LIGHT};
-            }}
-            QMenuBar::item {{
-                background: transparent;
-                padding: 4px 8px;
-            }}
-            QMenuBar::item:selected {{
-                background-color: {COLOR_ACCENT};
-            }}
-            QMenu {{
-                background-color: {COLOR_SECONDARY};
-                color: {COLOR_FOREGROUND};
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-            }}
-            QMenu::item:selected {{
-                background-color: {COLOR_ACCENT};
-            }}
-            QStatusBar {{
-                background-color: {COLOR_SECONDARY};
-                color: {COLOR_FOREGROUND};
-                border-top: 1px solid {COLOR_SECONDARY_LIGHT};
-            }}
-            QWidget {{
-                background-color: {COLOR_BACKGROUND};
-                color: {COLOR_FOREGROUND};
-                font-family: {DEFAULT_FONT_FAMILY};
-                font-size: 14px;
-            }}
-            QScrollArea, QScrollArea > QWidget > QWidget {{
-                background-color: {COLOR_BACKGROUND};
-            }}
-            QTabWidget::pane {{ border: 1px solid {COLOR_SECONDARY_LIGHT}; border-radius: 6px; }}
-            QTabBar::tab {{ padding: 6px 10px; }}
-            QLabel#titleLabel {{
-                font-size: 24px;
-                font-weight: bold;
-                color: {COLOR_ACCENT};
-                padding-bottom: 10px;
-                qproperty-alignment: AlignCenter;
-            }}
-            QLabel#imageLabel {{
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                background: #1e1e1e;
-                border-radius: 6px;
-            }}
-            QLabel#resultsLabel {{
-                font-size: 13px;
-                color: {COLOR_INFO};
-                background: {COLOR_SECONDARY};
-                border-radius: 4px;
-                padding: 8px;
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-            }}
-            QLabel#brightnessDisplayLabel {{
-                font-size: 28px;
-                font-weight: bold;
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                padding: 10px;
-                color: {COLOR_BRIGHTNESS_LABEL};
-                background: {COLOR_SECONDARY};
-                border-radius: 6px;
-                qproperty-alignment: AlignCenter;
-            }}
-            QLabel#statusLabel {{
-                font-size: 12px;
-                color: {COLOR_INFO};
-                padding: 4px;
-            }}
-            QGroupBox {{
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                border-radius: 6px;
-                margin-top: 10px;
-                background: {COLOR_SECONDARY};
-                font-weight: bold;
-                font-size: 15px;
-                padding-top: 10px;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 10px;
-                padding: 2px 5px;
-                color: {COLOR_ACCENT};
-                background-color: {COLOR_BACKGROUND};
-                border-radius: 3px;
-            }}
-            QPushButton {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
-                color: {COLOR_FOREGROUND};
-                border: 1px solid {COLOR_SECONDARY};
-                border-radius: 6px;
-                padding: 8px 15px;
-                font-size: 14px;
-                min-height: 20px;
-            }}
-            QPushButton:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
-                color: white;
-                border: 1px solid {COLOR_ACCENT_HOVER};
-                padding: 8px 15px;
-            }}
-            QPushButton:pressed {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
-                padding: 8px 15px;
-                border: 1px solid {COLOR_ACCENT};
-            }}
-            QPushButton:disabled {{
-                background: {COLOR_SECONDARY};
-                color: #888888;
-                border: 1px solid {COLOR_SECONDARY};
-            }}
-            QToolButton {{
-                background: {COLOR_SECONDARY};
-                color: {COLOR_FOREGROUND};
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                border-radius: 6px;
-                padding: 6px 10px;
-                min-height: 18px;
-            }}
-            QToolButton:hover {{
-                background: {COLOR_SECONDARY_LIGHT};
-                border: 1px solid {COLOR_ACCENT};
-                color: white;
-            }}
-            QToolButton:disabled {{
-                background: {COLOR_SECONDARY};
-                color: #888888;
-                border: 1px solid {COLOR_SECONDARY};
-            }}
-            QPushButton:checked {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
-                color: white;
-                border: 1px solid {COLOR_ACCENT_HOVER};
-            }}
-            QListWidget {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_BACKGROUND}, stop: 1 {COLOR_SECONDARY});
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                color: {COLOR_FOREGROUND};
-                font-size: 13px;
-                border-radius: 6px;
-                padding: 4px;
-            }}
-            QListWidget::item {{
-                border-radius: 4px;
-                padding: 4px 8px;
-                margin: 1px;
-            }}
-            QListWidget::item:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
-                border: 1px solid {COLOR_ACCENT};
-            }}
-            QListWidget::item:selected {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
-                color: white;
-                border: 1px solid {COLOR_ACCENT_HOVER};
-            }}
-            QListWidget::item:selected:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_ACCENT_HOVER}, stop: 1 {COLOR_ACCENT});
-            }}
-            QSlider::groove:horizontal {{
-                border: 1px solid {COLOR_SECONDARY};
-                height: 6px;
-                background: {COLOR_SECONDARY};
-                border-radius: 3px;
-            }}
-            QSlider::handle:horizontal {{
-                background: {COLOR_ACCENT};
-                border: 1px solid {COLOR_ACCENT_HOVER};
-                width: 16px;
-                margin: -5px 0;
-                border-radius: 8px;
-            }}
-            QSlider::sub-page:horizontal {{
-                background: {COLOR_SUCCESS};
-                border-radius: 3px;
-            }}
-            QSlider::add-page:horizontal {{
-                background: {COLOR_SECONDARY};
-                border-radius: 3px;
-            }}
-            QLineEdit, QSpinBox {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_BACKGROUND}, stop: 1 {COLOR_SECONDARY});
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                padding: 6px 8px;
-                border-radius: 6px;
-                min-height: 20px;
-                color: {COLOR_FOREGROUND};
-            }}
-            QLineEdit:hover, QSpinBox:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_SECONDARY_LIGHT});
-                border: 1px solid {COLOR_ACCENT};
-            }}
-            QLineEdit:focus, QSpinBox:focus {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 white, stop: 1 #f8f9fa);
-                border: 2px solid {COLOR_ACCENT};
-                color: #1a1a1a;
-                padding: 5px 7px;
-            }}
-            QSpinBox::up-button, QSpinBox::down-button {{
-                subcontrol-origin: border;
-                width: 16px;
-                border-left: 1px solid {COLOR_SECONDARY_LIGHT};
-                border-radius: 2px;
-            }}
-            QSpinBox::up-button {{
-                subcontrol-position: top right;
-            }}
-            QSpinBox::down-button {{
-                subcontrol-position: bottom right;
-            }}
-            /* Default platform-provided spin box arrows (no custom icons). */
-            QProgressDialog {{
-                 font-size: 14px;
-            }}
-            QProgressDialog QLabel {{
-                 color: {COLOR_FOREGROUND};
-            }}
-            QProgressBar {{
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                border-radius: 4px;
-                text-align: center;
-                color: {COLOR_FOREGROUND};
-            }}
-            QProgressBar::chunk {{
-                background-color: {COLOR_SUCCESS};
-                border-radius: 3px;
-            }}
-
-            /* Modern Video Control Styling */
-            QPushButton#playButton {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
-                color: white;
-                border: 2px solid {COLOR_ACCENT_HOVER};
-                border-radius: 20px;
-                font-size: 16px;
-                font-weight: bold;
-                min-width: 44px;
-                min-height: 36px;
-            }}
-            QPushButton#playButton:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_ACCENT_HOVER}, stop: 1 {COLOR_ACCENT});
-                border: 2px solid #8fc8ff;
-            }}
-            QPushButton#playButton:pressed {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
-                border: 2px solid {COLOR_ACCENT};
-            }}
-
-            QPushButton#mediaButton {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
-                color: {COLOR_FOREGROUND};
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                border-radius: 20px;
-                font-size: 14px;
-                font-weight: bold;
-                min-width: 36px;
-                min-height: 36px;
-            }}
-            QPushButton#mediaButton:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
-                color: white;
-                border: 1px solid {COLOR_ACCENT_HOVER};
-            }}
-            QPushButton#mediaButton:pressed {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
-            }}
-
-            QPushButton#jumpButton {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
-                color: {COLOR_FOREGROUND};
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                border-radius: 6px;
-                font-size: 12px;
-                font-weight: 500;
-                padding: 6px 12px;
-            }}
-            QPushButton#jumpButton:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_INFO}, stop: 1 #059aa8);
-                color: white;
-                border: 1px solid {COLOR_INFO};
-            }}
-
-            QPushButton#analysisButton {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
-                color: {COLOR_FOREGROUND};
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                border-radius: 6px;
-                font-size: 12px;
-                font-weight: 500;
-                padding: 6px 12px;
-            }}
-            QPushButton#analysisButton:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SUCCESS}, stop: 1 #0d9488);
-                color: white;
-                border: 1px solid {COLOR_SUCCESS};
-            }}
-
-            QSlider#timelineSlider::groove:horizontal {{
-                border: none;
-                height: 8px;
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_BACKGROUND});
-                border-radius: 4px;
-            }}
-            QSlider#timelineSlider::handle:horizontal {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 white, stop: 1 {COLOR_ACCENT});
-                border: 2px solid {COLOR_ACCENT_HOVER};
-                width: 20px;
-                margin: -8px 0;
-                border-radius: 10px;
-            }}
-            QSlider#timelineSlider::handle:horizontal:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 white, stop: 1 {COLOR_ACCENT_HOVER});
-                border: 2px solid #8fc8ff;
-                width: 24px;
-                margin: -10px 0;
-            }}
-            QSlider#timelineSlider::sub-page:horizontal {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SUCCESS}, stop: 1 #059669);
-                border-radius: 4px;
-            }}
-
-            /* Enhanced ComboBox Styling */
-            QComboBox {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SECONDARY_LIGHT}, stop: 1 {COLOR_SECONDARY});
-                border: 1px solid {COLOR_SECONDARY_LIGHT};
-                border-radius: 4px;
-                padding: 4px 8px;
-                min-height: 20px;
-                color: {COLOR_FOREGROUND};
-            }}
-            QComboBox:hover {{
-                border: 1px solid {COLOR_ACCENT};
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
-                color: white;
-            }}
-            QComboBox::drop-down {{
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 20px;
-                border-left: 1px solid {COLOR_SECONDARY_LIGHT};
-            }}
-            QComboBox::down-arrow {{
-                width: 0;
-                height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 6px solid {COLOR_FOREGROUND};
-                margin: 0px 6px;
-            }}
-            QComboBox:hover::down-arrow {{
-                border-top: 6px solid white;
-            }}
-
-            /* Enhanced Frame Separator */
-            QFrame[frameShape="5"] {{ /* VLine */
-                color: {COLOR_SECONDARY_LIGHT};
-                background-color: {COLOR_SECONDARY_LIGHT};
-                max-width: 1px;
-                margin: 4px 8px;
-            }}
-
-            /* Improved GroupBox styling */
-            QGroupBox {{
-                border: 2px solid {COLOR_SECONDARY_LIGHT};
-                border-radius: 8px;
-                margin-top: 12px;
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_BACKGROUND});
-                font-weight: bold;
-                font-size: 14px;
-                padding-top: 12px;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 12px;
-                padding: 4px 8px;
-                color: {COLOR_ACCENT};
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_BACKGROUND}, stop: 1 {COLOR_SECONDARY});
-                border: 1px solid {COLOR_ACCENT};
-                border-radius: 4px;
-            }}
-
-            /* Primary Button Styles */
-            QPushButton#primaryButton {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_ACCENT}, stop: 1 #3c82c4);
-                color: white;
-                border: 1px solid {COLOR_ACCENT_HOVER};
-                border-radius: 6px;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 8px 16px;
-                min-height: 28px;
-            }}
-            QPushButton#primaryButton:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_ACCENT_HOVER}, stop: 1 {COLOR_ACCENT});
-                border: 1px solid #8fc8ff;
-            }}
-            QPushButton#primaryButton:pressed {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 #3170a8, stop: 1 {COLOR_ACCENT});
-            }}
-
-            QPushButton#primaryActionButton {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SUCCESS}, stop: 1 #059669);
-                color: white;
-                border: 2px solid {COLOR_SUCCESS};
-                border-radius: 8px;
-                font-size: 16px;
-                font-weight: bold;
-                padding: 10px 20px;
-                min-height: 32px;
-            }}
-            QPushButton#primaryActionButton:hover {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 #22c55e, stop: 1 {COLOR_SUCCESS});
-                border: 2px solid #22c55e;
-                transform: scale(1.02);
-            }}
-            QPushButton#primaryActionButton:pressed {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 #15803d, stop: 1 #059669);
-            }}
-            QPushButton#primaryActionButton:disabled {{
-                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                           stop: 0 {COLOR_SECONDARY}, stop: 1 {COLOR_BACKGROUND});
-                color: #888888;
-                border: 2px solid {COLOR_SECONDARY};
-            }}
-        """)
+        self.setStyleSheet(build_app_stylesheet())
 
     def _create_layouts(self):
         """Create resizable panes with a splitter and add scrollable side panel."""
@@ -2451,15 +2045,31 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def closeEvent(self, event: QtGui.QCloseEvent):
         """Release resources and save settings when the window closes."""
         self._cancel_active_worker()
-        if self._analysis_thread is not None:
-            self._analysis_thread.quit()
-            self._analysis_thread.wait(1500)
-        if self._audio_thread is not None:
-            self._audio_thread.quit()
-            self._audio_thread.wait(1500)
-        if self._mask_thread is not None:
-            self._mask_thread.quit()
-            self._mask_thread.wait(1500)
+
+        all_stopped = True
+        if shutdown_worker_thread(self._analysis_thread, "analysis"):
+            self._analysis_thread = None
+            self._analysis_worker = None
+        else:
+            all_stopped = False
+        if shutdown_worker_thread(self._audio_thread, "audio"):
+            self._audio_thread = None
+            self._audio_worker = None
+        else:
+            all_stopped = False
+        if shutdown_worker_thread(self._mask_thread, "mask"):
+            self._mask_thread = None
+            self._mask_worker = None
+        else:
+            all_stopped = False
+
+        if not all_stopped:
+            # Keep the window (and the thread/worker references) alive until
+            # the stalled worker stops; destroying a running QThread crashes.
+            self.statusBar().showMessage("Waiting for background tasks to stop before closing...")
+            event.ignore()
+            QtCore.QTimer.singleShot(500, self.close)
+            return
 
         if self.cap:
             self.cap.release()
@@ -2605,7 +2215,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Stop playback and reset controls
         self.stop_playback()
-        self.speed_combo.setCurrentText("1x")
+        self.speed_combo.setCurrentText("1×")
         self.playback_speed = 1.0
         
         self.image_label.setText("Drag & Drop Video File Here")
@@ -2694,7 +2304,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def on_speed_changed(self, speed_text: str):
         """Handle playback speed change."""
         try:
-            speed_value = float(speed_text.replace('x', ''))
+            speed_value = _parse_speed_text(speed_text)
             self.playback_speed = speed_value
             
             # If currently playing, restart timer with new interval
@@ -3188,24 +2798,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._record_history_change("Set Background ROI", before)
 
     def _calculate_background_threshold(self) -> Optional[float]:
-        """Calculate the current background threshold based on background ROI or manual setting."""
+        """Calculate the current background threshold based on background ROI or manual setting.
+
+        Delegates to the same percentile-based helper used by the analysis worker
+        (`_compute_background_brightness`) so the displayed threshold always matches
+        what is actually applied during analysis.
+        """
         if self.background_roi_idx is not None and self.frame is not None:
-            # Calculate threshold from current frame's background ROI
-            if 0 <= self.background_roi_idx < len(self.rects):
-                pt1, pt2 = self.rects[self.background_roi_idx]
-                fh, fw = self.frame.shape[:2]
-                
-                # Ensure ROI coordinates are valid within the frame
-                x1 = max(0, min(pt1[0], fw - 1))
-                y1 = max(0, min(pt1[1], fh - 1))
-                x2 = max(0, min(pt2[0], fw - 1))
-                y2 = max(0, min(pt2[1], fh - 1))
-                
-                if x2 > x1 and y2 > y1:
-                    roi = self.frame[y1:y2, x1:x2]
-                    l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
-                    return l_raw_mean
-        
+            return self._compute_background_brightness(self.frame)
+
         # If no background ROI or calculation failed, return manual threshold
         return None
 
@@ -3618,12 +3219,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._mask_progress.close()
             self._mask_progress = None
 
-        if self._mask_thread is not None:
-            self._mask_thread.quit()
-            self._mask_thread.wait(1500)
+        if shutdown_worker_thread(self._mask_thread, "mask"):
             self._mask_thread = None
+            self._mask_worker = None
 
-        self._mask_worker = None
         self._mask_task_type = None
         self._set_busy_state(False)
 
@@ -3645,6 +3244,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         before = None if self._history_restoring else self._capture_editor_snapshot()
         self.background_percentile = float(value)
         self.bg_percentile_label.setText(f"{self.background_percentile:.0f}%")
+        # Fixed masks were captured using the old percentile; invalidate them so
+        # the user knows they no longer reflect the current threshold.
+        self._invalidate_fixed_masks("background percentile changed")
         # Update display since background calculation changed
         if self.frame is not None:
             self._update_current_brightness_display()
@@ -4024,15 +3626,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         frame_w = self.frame.shape[1]
         return geometry_scale_value_for_pixmap(value_in_frame_coords, pixmap_rect, frame_w)
-
-    def _get_resize_cursor(self, corner_index: int) -> QtGui.QCursor:
-        """Returns the appropriate resize cursor based on the corner index."""
-        if corner_index == 0 or corner_index == 3: # Top-left or Bottom-right
-            return QtGui.QCursor(QtCore.Qt.SizeFDiagCursor)
-        elif corner_index == 1 or corner_index == 2: # Top-right or Bottom-left
-            return QtGui.QCursor(QtCore.Qt.SizeBDiagCursor)
-        else:
-            return QtGui.QCursor(QtCore.Qt.ArrowCursor) # Default
 
     def _get_resize_handle(
         self,
@@ -4445,12 +4038,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._audio_progress.close()
             self._audio_progress = None
 
-        if self._audio_thread is not None:
-            self._audio_thread.quit()
-            self._audio_thread.wait(1500)
+        if shutdown_worker_thread(self._audio_thread, "audio"):
             self._audio_thread = None
+            self._audio_worker = None
 
-        self._audio_worker = None
         self._pending_audio_expected_duration = 0.0
         self._set_busy_state(False)
 
@@ -4481,6 +4072,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
         if not self.rects:
             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Please define at least one ROI.")
+            return
+        if not has_analyzable_rois(self.rects, self.background_roi_idx):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Analysis Error",
+                "Please define at least one ROI that is not the background ROI.",
+            )
             return
         if self.start_frame is None or self.end_frame is None or self.start_frame > self.end_frame:
             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Invalid start/end frame range selected.")
@@ -4519,6 +4117,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             background_percentile=self.background_percentile,
             morphological_kernel_size=self.morphological_kernel_size,
             noise_floor_threshold=self.noise_floor_threshold,
+            manual_threshold=float(self.manual_threshold),
         )
 
         self._analysis_save_dir = save_dir
@@ -4595,11 +4194,23 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._set_busy_state(False)
             return
 
+        if result.truncated:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Analysis Truncated",
+                "The video decoder reached end-of-file early. Only "
+                f"{result.frames_processed} of {result.total_frames} requested frames were "
+                "analyzed; results have been trimmed accordingly.",
+            )
+
         export_options = self._pending_export_options or ExportOptions()
         self._save_analysis_results(result, self._analysis_save_dir, export_options)
         self._analysis_save_dir = None
         self._pending_export_options = None
-        self.statusBar().showMessage("Analysis complete")
+        if result.truncated:
+            self.statusBar().showMessage("Analysis complete (truncated: early end-of-file)")
+        else:
+            self.statusBar().showMessage("Analysis complete")
         self.audio_manager.play_analysis_complete()
 
         expected_duration = self.run_duration_spin.value()
@@ -4633,12 +4244,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._analysis_progress.close()
             self._analysis_progress = None
 
-        if self._analysis_thread is not None:
-            self._analysis_thread.quit()
-            self._analysis_thread.wait(1500)
+        if shutdown_worker_thread(self._analysis_thread, "analysis"):
             self._analysis_thread = None
-
-        self._analysis_worker = None
+            self._analysis_worker = None
 
         if reset_busy:
             self._set_busy_state(False)
@@ -4690,6 +4298,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             summary_lines.append("Note: Some plots failed to generate - check console for details")
         if export_result.cancelled:
             summary_lines.append("Note: Export cancelled by user before all ROIs were written")
+
+        if export_result.no_outputs_produced:
+            summary_lines.append(
+                "ERROR: No output files were produced (selected export format may be unavailable)."
+            )
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Export Failed",
+                "Analysis ran, but no output files were produced. If you only selected the "
+                "interactive plot, the 'plotly' package may not be installed.",
+            )
 
         self.results_label.setText("\n".join(summary_lines))
         self.brightness_display_label.setText(
@@ -4777,15 +4396,4 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             background_roi_idx=self.background_roi_idx,
             background_percentile=self.background_percentile,
             frame_l_star=frame_l_star,
-        )
-
-    def _compute_brightness(self, roi_bgr: np.ndarray) -> float:
-        """
-        Legacy method for backward compatibility.
-        Returns only the mean brightness for existing code that expects a single value.
-        """
-        return analysis_compute_brightness(
-            roi_bgr,
-            morphological_kernel_size=self.morphological_kernel_size,
-            noise_floor_threshold=self.noise_floor_threshold,
         )

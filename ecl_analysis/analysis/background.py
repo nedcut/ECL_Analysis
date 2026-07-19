@@ -12,6 +12,17 @@ Point = Tuple[int, int]
 RoiRect = Tuple[Point, Point]
 
 
+class BackgroundComputationError(RuntimeError):
+    """Raised when background brightness cannot be computed for a configured ROI.
+
+    This is distinct from a `None` return, which means "no background ROI is
+    configured" — an intentional, expected state. This error means a background
+    ROI *is* configured but the computation itself failed, which must not be
+    papered over by silently falling back to raw (non-background-subtracted)
+    measurements.
+    """
+
+
 def compute_background_brightness(
     frame: np.ndarray,
     rects: Sequence[RoiRect],
@@ -19,7 +30,13 @@ def compute_background_brightness(
     background_percentile: float,
     frame_l_star: Optional[np.ndarray] = None,
 ) -> Optional[float]:
-    """Compute percentile L* brightness for a configured background ROI."""
+    """Compute percentile L* brightness for a configured background ROI.
+
+    Returns None only when no background ROI is configured (or the configured
+    index/ROI is degenerate). Raises BackgroundComputationError if a background
+    ROI is configured but the underlying computation fails, so callers cannot
+    mistake a computation fault for "background not configured".
+    """
     if background_roi_idx is None or frame is None:
         return None
 
@@ -53,9 +70,9 @@ def compute_background_brightness(
             return None
 
         return float(np.percentile(roi_l_star, background_percentile))
-    except cv2.error:
+    except cv2.error as exc:
         logging.exception("OpenCV error computing background brightness")
-        return None
-    except Exception:
+        raise BackgroundComputationError(str(exc)) from exc
+    except Exception as exc:
         logging.exception("Error computing background brightness")
-        return None
+        raise BackgroundComputationError(str(exc)) from exc
