@@ -82,6 +82,11 @@ def _hex_to_rgba(color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{clamped_alpha})"
 
 
+def _parse_speed_text(speed_text: str) -> float:
+    """Parse a playback speed combo label like '2×' or '1x' into a float."""
+    return float(speed_text.strip().rstrip('×').rstrip('x').rstrip('X'))
+
+
 def _offset_rect_within_bounds(
     rect: Tuple[Tuple[int, int], Tuple[int, int]],
     dx: int,
@@ -2607,7 +2612,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Stop playback and reset controls
         self.stop_playback()
-        self.speed_combo.setCurrentText("1x")
+        self.speed_combo.setCurrentText("1×")
         self.playback_speed = 1.0
         
         self.image_label.setText("Drag & Drop Video File Here")
@@ -2696,7 +2701,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def on_speed_changed(self, speed_text: str):
         """Handle playback speed change."""
         try:
-            speed_value = float(speed_text.replace('x', ''))
+            speed_value = _parse_speed_text(speed_text)
             self.playback_speed = speed_value
             
             # If currently playing, restart timer with new interval
