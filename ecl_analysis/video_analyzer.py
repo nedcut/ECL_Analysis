@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from string import Template
 from typing import List, Optional, Tuple
@@ -15,12 +16,11 @@ from .analysis.background import (
     compute_background_brightness as analysis_compute_background_brightness,
 )
 from .analysis.brightness import (
-    compute_brightness as analysis_compute_brightness,
     compute_brightness_stats as analysis_compute_brightness_stats,
     compute_l_star_frame as analysis_compute_l_star_frame,
 )
 from .analysis.duration import validate_run_duration as analysis_validate_run_duration
-from .analysis.models import AnalysisRequest, AnalysisResult
+from .analysis.models import AnalysisRequest, AnalysisResult, has_analyzable_rois
 from .audio import AudioAnalyzer, AudioManager
 from .cache import FrameCache
 from .constants import (
@@ -70,6 +70,25 @@ from .roi_geometry import (
 )
 
 
+def _atomic_write_json(path: str, data: dict) -> None:
+    """Write JSON to `path` atomically.
+
+    Serializes to a temp file in the same directory then uses os.replace()
+    to swap it into place, so a crash or error mid-write cannot leave the
+    target file truncated or corrupted.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix='.tmp_settings_', suffix='.json')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
 def _hex_to_rgba(color: str, alpha: float) -> str:
     """Convert a hex color string like '#RRGGBB' to an rgba() string."""
     stripped = color.lstrip('#')
@@ -80,6 +99,11 @@ def _hex_to_rgba(color: str, alpha: float) -> str:
     b = int(stripped[4:6], 16)
     clamped_alpha = max(0.0, min(1.0, float(alpha)))
     return f"rgba({r},{g},{b},{clamped_alpha})"
+
+
+def _parse_speed_text(speed_text: str) -> float:
+    """Parse a playback speed combo label like '2×' or '1x' into a float."""
+    return float(speed_text.strip().rstrip('×').rstrip('x').rstrip('X'))
 
 
 def _offset_rect_within_bounds(
@@ -506,8 +530,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.settings['audio_enabled'] = self.audio_manager.enabled
             self.settings['audio_volume'] = self.audio_manager.volume
             self.settings['frame_cache_size'] = int(self.frame_cache_size)
-            with open(DEFAULT_SETTINGS_FILE, 'w') as f:
-                json.dump(self.settings, f, indent=2)
+            _atomic_write_json(DEFAULT_SETTINGS_FILE, self.settings)
         except Exception as e:
             logging.warning(f"Could not save settings: {e}")
 
@@ -518,6 +541,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.recent_files.insert(0, file_path)
         self.recent_files = self.recent_files[:MAX_RECENT_FILES]
         self._update_recent_files_menu()
+        self._save_settings()
 
     def _init_ui(self):
         """Set up the main UI layout and widgets."""
@@ -2606,7 +2630,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         
         # Stop playback and reset controls
         self.stop_playback()
-        self.speed_combo.setCurrentText("1x")
+        self.speed_combo.setCurrentText("1×")
         self.playback_speed = 1.0
         
         self.image_label.setText("Drag & Drop Video File Here")
@@ -2695,7 +2719,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def on_speed_changed(self, speed_text: str):
         """Handle playback speed change."""
         try:
-            speed_value = float(speed_text.replace('x', ''))
+            speed_value = _parse_speed_text(speed_text)
             self.playback_speed = speed_value
             
             # If currently playing, restart timer with new interval
@@ -3189,24 +3213,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._record_history_change("Set Background ROI", before)
 
     def _calculate_background_threshold(self) -> Optional[float]:
-        """Calculate the current background threshold based on background ROI or manual setting."""
+        """Calculate the current background threshold based on background ROI or manual setting.
+
+        Delegates to the same percentile-based helper used by the analysis worker
+        (`_compute_background_brightness`) so the displayed threshold always matches
+        what is actually applied during analysis.
+        """
         if self.background_roi_idx is not None and self.frame is not None:
-            # Calculate threshold from current frame's background ROI
-            if 0 <= self.background_roi_idx < len(self.rects):
-                pt1, pt2 = self.rects[self.background_roi_idx]
-                fh, fw = self.frame.shape[:2]
-                
-                # Ensure ROI coordinates are valid within the frame
-                x1 = max(0, min(pt1[0], fw - 1))
-                y1 = max(0, min(pt1[1], fh - 1))
-                x2 = max(0, min(pt2[0], fw - 1))
-                y2 = max(0, min(pt2[1], fh - 1))
-                
-                if x2 > x1 and y2 > y1:
-                    roi = self.frame[y1:y2, x1:x2]
-                    l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
-                    return l_raw_mean
-        
+            return self._compute_background_brightness(self.frame)
+
         # If no background ROI or calculation failed, return manual threshold
         return None
 
@@ -3646,6 +3661,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         before = None if self._history_restoring else self._capture_editor_snapshot()
         self.background_percentile = float(value)
         self.bg_percentile_label.setText(f"{self.background_percentile:.0f}%")
+        # Fixed masks were captured using the old percentile; invalidate them so
+        # the user knows they no longer reflect the current threshold.
+        self._invalidate_fixed_masks("background percentile changed")
         # Update display since background calculation changed
         if self.frame is not None:
             self._update_current_brightness_display()
@@ -4025,15 +4043,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         frame_w = self.frame.shape[1]
         return geometry_scale_value_for_pixmap(value_in_frame_coords, pixmap_rect, frame_w)
-
-    def _get_resize_cursor(self, corner_index: int) -> QtGui.QCursor:
-        """Returns the appropriate resize cursor based on the corner index."""
-        if corner_index == 0 or corner_index == 3: # Top-left or Bottom-right
-            return QtGui.QCursor(QtCore.Qt.SizeFDiagCursor)
-        elif corner_index == 1 or corner_index == 2: # Top-right or Bottom-left
-            return QtGui.QCursor(QtCore.Qt.SizeBDiagCursor)
-        else:
-            return QtGui.QCursor(QtCore.Qt.ArrowCursor) # Default
 
     def _get_resize_handle(
         self,
@@ -4483,6 +4492,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if not self.rects:
             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Please define at least one ROI.")
             return
+        if not has_analyzable_rois(self.rects, self.background_roi_idx):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Analysis Error",
+                "Please define at least one ROI that is not the background ROI.",
+            )
+            return
         if self.start_frame is None or self.end_frame is None or self.start_frame > self.end_frame:
             QtWidgets.QMessageBox.warning(self, "Analysis Error", "Invalid start/end frame range selected.")
             return
@@ -4597,11 +4613,23 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._set_busy_state(False)
             return
 
+        if result.truncated:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Analysis Truncated",
+                "The video decoder reached end-of-file early. Only "
+                f"{result.frames_processed} of {result.total_frames} requested frames were "
+                "analyzed; results have been trimmed accordingly.",
+            )
+
         export_options = self._pending_export_options or ExportOptions()
         self._save_analysis_results(result, self._analysis_save_dir, export_options)
         self._analysis_save_dir = None
         self._pending_export_options = None
-        self.statusBar().showMessage("Analysis complete")
+        if result.truncated:
+            self.statusBar().showMessage("Analysis complete (truncated: early end-of-file)")
+        else:
+            self.statusBar().showMessage("Analysis complete")
         self.audio_manager.play_analysis_complete()
 
         expected_duration = self.run_duration_spin.value()
@@ -4693,6 +4721,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if export_result.cancelled:
             summary_lines.append("Note: Export cancelled by user before all ROIs were written")
 
+        if export_result.no_outputs_produced:
+            summary_lines.append(
+                "ERROR: No output files were produced (selected export format may be unavailable)."
+            )
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Export Failed",
+                "Analysis ran, but no output files were produced. If you only selected the "
+                "interactive plot, the 'plotly' package may not be installed.",
+            )
+
         self.results_label.setText("\n".join(summary_lines))
         self.brightness_display_label.setText(
             ", ".join(export_result.avg_brightness_summary) if export_result.avg_brightness_summary else "N/A"
@@ -4764,101 +4803,102 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
                 plt.style.use('seaborn-v0_8-darkgrid')
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-
-                # Main brightness plot
-                ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
-                ax1.plot(frames, brightness_median, label='Median Brightness', color='#70ad47', linewidth=2, alpha=0.8)
-            
-                # Add background line if background values are available
-                if background_array is not None:
-                    ax1.plot(frames, background_array, label='Background Level', color='#808080', 
-                             linewidth=1.5, linestyle=':', alpha=0.9)
-            
-                # Add confidence bands (mean ± std)
-                ax1.fill_between(frames, brightness_mean - std_of_means, brightness_mean + std_of_means, 
-                                 alpha=0.2, color='#5a9bd5', label=f'Mean ±1σ ({std_of_means:.1f})')
-                ax1.fill_between(frames, brightness_median - std_of_medians, brightness_median + std_of_medians, 
-                                 alpha=0.2, color='#70ad47', label=f'Median ±1σ ({std_of_medians:.1f})')
-            
-                # Add horizontal lines for averages
-                ax1.axhline(mean_of_means, color='#5a9bd5', linestyle='--', alpha=0.7, 
-                            label=f'Avg Mean ({mean_of_means:.1f})')
-                ax1.axhline(mean_of_medians, color='#70ad47', linestyle='--', alpha=0.7, 
-                            label=f'Avg Median ({mean_of_medians:.1f})')
-            
-                # Mark peak points
-                ax1.scatter([frame_peak_mean], [val_peak_mean], color='#ff0000', zorder=5, s=100, 
-                            marker='^', label=f'Peak Mean ({val_peak_mean:.1f})')
-                ax1.scatter([frame_peak_median], [val_peak_median], color='#ed7d31', zorder=5, s=100, 
-                            marker='v', label=f'Peak Median ({val_peak_median:.1f})')
-
-                ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
-                ax1.set_ylabel('L* Brightness', fontsize=12)
-                ax1.legend(fontsize=10, loc='best')
-                ax1.grid(True, alpha=0.3)
-            
-                # Adjust y-axis limits to provide more space at the top for statistics panel
-                y_min, y_max = ax1.get_ylim()
-                y_range = y_max - y_min
-                ax1.set_ylim(y_min, y_max + 0.15 * y_range)
-
-                # Add statistics text box
-                stats_text = f"""Statistics:
+                try:
+                    # Main brightness plot
+                    ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
+                    ax1.plot(frames, brightness_median, label='Median Brightness', color='#70ad47', linewidth=2, alpha=0.8)
+                
+                    # Add background line if background values are available
+                    if background_array is not None:
+                        ax1.plot(frames, background_array, label='Background Level', color='#808080', 
+                                 linewidth=1.5, linestyle=':', alpha=0.9)
+                
+                    # Add confidence bands (mean ± std)
+                    ax1.fill_between(frames, brightness_mean - std_of_means, brightness_mean + std_of_means, 
+                                     alpha=0.2, color='#5a9bd5', label=f'Mean ±1σ ({std_of_means:.1f})')
+                    ax1.fill_between(frames, brightness_median - std_of_medians, brightness_median + std_of_medians, 
+                                     alpha=0.2, color='#70ad47', label=f'Median ±1σ ({std_of_medians:.1f})')
+                
+                    # Add horizontal lines for averages
+                    ax1.axhline(mean_of_means, color='#5a9bd5', linestyle='--', alpha=0.7, 
+                                label=f'Avg Mean ({mean_of_means:.1f})')
+                    ax1.axhline(mean_of_medians, color='#70ad47', linestyle='--', alpha=0.7, 
+                                label=f'Avg Median ({mean_of_medians:.1f})')
+                
+                    # Mark peak points
+                    ax1.scatter([frame_peak_mean], [val_peak_mean], color='#ff0000', zorder=5, s=100, 
+                                marker='^', label=f'Peak Mean ({val_peak_mean:.1f})')
+                    ax1.scatter([frame_peak_median], [val_peak_median], color='#ed7d31', zorder=5, s=100, 
+                                marker='v', label=f'Peak Median ({val_peak_median:.1f})')
+    
+                    ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
+                    ax1.set_ylabel('L* Brightness', fontsize=12)
+                    ax1.legend(fontsize=10, loc='best')
+                    ax1.grid(True, alpha=0.3)
+                
+                    # Adjust y-axis limits to provide more space at the top for statistics panel
+                    y_min, y_max = ax1.get_ylim()
+                    y_range = y_max - y_min
+                    ax1.set_ylim(y_min, y_max + 0.15 * y_range)
+    
+                    # Add statistics text box
+                    stats_text = f"""Statistics:
 Mean: {mean_of_means:.2f} ± {std_of_means:.2f}
 Median: {mean_of_medians:.2f} ± {std_of_medians:.2f}
 Peak Mean: {val_peak_mean:.2f} @ Frame {frame_peak_mean}
 Peak Median: {val_peak_median:.2f} @ Frame {frame_peak_median}
 Frames Analyzed: {len(frames)}"""
-            
-                ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
-                         verticalalignment='top', horizontalalignment='right', 
-                         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-            
-                # Blue channel plot
-                ax2.plot(frames, blue_mean, label='Blue Mean', color='#0066cc', linewidth=2, alpha=0.8)
-                ax2.plot(frames, blue_median, label='Blue Median', color='#3399ff', linewidth=2, alpha=0.8)
-            
-                # Add confidence bands for blue channel
-                ax2.fill_between(frames, blue_mean - std_of_blue_means, blue_mean + std_of_blue_means, 
-                                 alpha=0.2, color='#0066cc', label=f'Blue Mean ±1σ ({std_of_blue_means:.1f})')
-                ax2.fill_between(frames, blue_median - std_of_blue_medians, blue_median + std_of_blue_medians, 
-                                 alpha=0.2, color='#3399ff', label=f'Blue Median ±1σ ({std_of_blue_medians:.1f})')
-            
-                # Add horizontal lines for blue averages
-                ax2.axhline(mean_of_blue_means, color='#0066cc', linestyle='--', alpha=0.7, 
-                            label=f'Avg Blue Mean ({mean_of_blue_means:.1f})')
-                ax2.axhline(mean_of_blue_medians, color='#3399ff', linestyle='--', alpha=0.7, 
-                            label=f'Avg Blue Median ({mean_of_blue_medians:.1f})')
-            
-                # Mark blue peak points
-                ax2.scatter([frame_peak_blue_mean], [val_peak_blue_mean], color='#ff0000', zorder=5, s=100, 
-                            marker='^', label=f'Peak Blue Mean ({val_peak_blue_mean:.1f})')
-                ax2.scatter([frame_peak_blue_median], [val_peak_blue_median], color='#ed7d31', zorder=5, s=100, 
-                            marker='v', label=f'Peak Blue Median ({val_peak_blue_median:.1f})')
-            
-                ax2.set_xlabel('Frame Number', fontsize=12)
-                ax2.set_ylabel('Blue Channel Value', fontsize=12)
-                ax2.legend(fontsize=10, loc='best')
-                ax2.grid(True, alpha=0.3)
-            
-                # Add blue channel statistics text box
-                blue_stats_text = f"""Blue Channel Statistics:
+                
+                    ax1.text(0.98, 0.98, stats_text, transform=ax1.transAxes, fontsize=9,
+                             verticalalignment='top', horizontalalignment='right', 
+                             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                
+                    # Blue channel plot
+                    ax2.plot(frames, blue_mean, label='Blue Mean', color='#0066cc', linewidth=2, alpha=0.8)
+                    ax2.plot(frames, blue_median, label='Blue Median', color='#3399ff', linewidth=2, alpha=0.8)
+                
+                    # Add confidence bands for blue channel
+                    ax2.fill_between(frames, blue_mean - std_of_blue_means, blue_mean + std_of_blue_means, 
+                                     alpha=0.2, color='#0066cc', label=f'Blue Mean ±1σ ({std_of_blue_means:.1f})')
+                    ax2.fill_between(frames, blue_median - std_of_blue_medians, blue_median + std_of_blue_medians, 
+                                     alpha=0.2, color='#3399ff', label=f'Blue Median ±1σ ({std_of_blue_medians:.1f})')
+                
+                    # Add horizontal lines for blue averages
+                    ax2.axhline(mean_of_blue_means, color='#0066cc', linestyle='--', alpha=0.7, 
+                                label=f'Avg Blue Mean ({mean_of_blue_means:.1f})')
+                    ax2.axhline(mean_of_blue_medians, color='#3399ff', linestyle='--', alpha=0.7, 
+                                label=f'Avg Blue Median ({mean_of_blue_medians:.1f})')
+                
+                    # Mark blue peak points
+                    ax2.scatter([frame_peak_blue_mean], [val_peak_blue_mean], color='#ff0000', zorder=5, s=100, 
+                                marker='^', label=f'Peak Blue Mean ({val_peak_blue_mean:.1f})')
+                    ax2.scatter([frame_peak_blue_median], [val_peak_blue_median], color='#ed7d31', zorder=5, s=100, 
+                                marker='v', label=f'Peak Blue Median ({val_peak_blue_median:.1f})')
+                
+                    ax2.set_xlabel('Frame Number', fontsize=12)
+                    ax2.set_ylabel('Blue Channel Value', fontsize=12)
+                    ax2.legend(fontsize=10, loc='best')
+                    ax2.grid(True, alpha=0.3)
+                
+                    # Add blue channel statistics text box
+                    blue_stats_text = f"""Blue Channel Statistics:
 Mean: {mean_of_blue_means:.1f} ± {std_of_blue_means:.1f}
 Median: {mean_of_blue_medians:.1f} ± {std_of_blue_medians:.1f}
 Peak Mean: {val_peak_blue_mean:.1f} @ Frame {frame_peak_blue_mean}
 Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
-            
-                ax2.text(0.98, 0.98, blue_stats_text, transform=ax2.transAxes, fontsize=9,
-                         verticalalignment='top', horizontalalignment='right', 
-                         bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
-
-                plt.tight_layout()
-
-                # Save plot
-                plot_filename = f"{base_filename}_plot.png"
-                plot_save_path = os.path.join(save_dir, plot_filename)
-                plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
-                plt.close(fig)
+                
+                    ax2.text(0.98, 0.98, blue_stats_text, transform=ax2.transAxes, fontsize=9,
+                             verticalalignment='top', horizontalalignment='right', 
+                             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+    
+                    plt.tight_layout()
+    
+                    # Save plot
+                    plot_filename = f"{base_filename}_plot.png"
+                    plot_save_path = os.path.join(save_dir, plot_filename)
+                    plt.savefig(plot_save_path, dpi=300, bbox_inches='tight')
+                finally:
+                    plt.close(fig)
                 png_path = plot_save_path
 
             if generate_interactive:
@@ -5592,15 +5632,4 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             background_roi_idx=self.background_roi_idx,
             background_percentile=self.background_percentile,
             frame_l_star=frame_l_star,
-        )
-
-    def _compute_brightness(self, roi_bgr: np.ndarray) -> float:
-        """
-        Legacy method for backward compatibility.
-        Returns only the mean brightness for existing code that expects a single value.
-        """
-        return analysis_compute_brightness(
-            roi_bgr,
-            morphological_kernel_size=self.morphological_kernel_size,
-            noise_floor_threshold=self.noise_floor_threshold,
         )

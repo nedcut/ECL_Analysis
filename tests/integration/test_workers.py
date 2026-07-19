@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 import pytest
 
+import ecl_analysis.workers as workers_module
+from ecl_analysis.analysis.background import BackgroundComputationError
 from ecl_analysis.analysis.brightness import compute_l_star_frame
 from ecl_analysis.analysis.models import AnalysisRequest
 from ecl_analysis.workers import (
@@ -77,6 +79,7 @@ def test_analysis_worker_emits_structured_result(monkeypatch):
     result = captured.get("result")
     assert result is not None
     assert result.frames_processed == 3
+    assert result.truncated is False
     assert len(result.brightness_mean_data) == 1
     assert len(result.brightness_mean_data[0]) == 3
 
@@ -103,6 +106,117 @@ def _run_analysis_worker(frames, monkeypatch, **overrides):
     worker.run()
     assert "error" not in captured
     return captured["result"]
+
+
+def test_analysis_worker_flags_truncation_on_early_eof(monkeypatch):
+    frames = [
+        np.full((6, 6, 3), 20, dtype=np.uint8),
+        np.full((6, 6, 3), 40, dtype=np.uint8),
+    ]
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture(frames))
+
+    request = AnalysisRequest(
+        video_path="dummy.mp4",
+        rects=[((0, 0), (6, 6))],
+        background_roi_idx=None,
+        start_frame=0,
+        end_frame=4,
+        use_fixed_mask=False,
+        fixed_roi_masks=[],
+        background_percentile=90.0,
+        morphological_kernel_size=3,
+        noise_floor_threshold=0.0,
+    )
+
+    worker = AnalysisWorker(request)
+    captured: Dict[str, object] = {}
+    worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+    worker.error.connect(lambda message: captured.setdefault("error", message))
+    worker.run()
+
+    assert "error" not in captured
+    result = captured.get("result")
+    assert result is not None
+    assert result.truncated is True
+    assert result.frames_processed == 2
+    assert result.total_frames == 5
+    assert len(result.brightness_mean_data[0]) == 2
+
+
+def test_analysis_worker_aborts_on_brightness_computation_failure(monkeypatch):
+    """An injected computation fault must surface as an error signal, not silently
+    become fabricated zero-brightness rows in the emitted result."""
+    frames = [
+        np.full((6, 6, 3), 20, dtype=np.uint8),
+        np.full((6, 6, 3), 40, dtype=np.uint8),
+    ]
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture(frames))
+
+    def boom(*args, **kwargs):
+        raise cv2.error("synthetic brightness computation failure")
+
+    monkeypatch.setattr(workers_module, "compute_brightness_stats", boom)
+
+    request = AnalysisRequest(
+        video_path="dummy.mp4",
+        rects=[((0, 0), (6, 6))],
+        background_roi_idx=None,
+        start_frame=0,
+        end_frame=1,
+        use_fixed_mask=False,
+        fixed_roi_masks=[],
+        background_percentile=90.0,
+        morphological_kernel_size=3,
+        noise_floor_threshold=0.0,
+    )
+
+    worker = AnalysisWorker(request)
+    captured: Dict[str, object] = {}
+    worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+    worker.error.connect(lambda message: captured.setdefault("error", message))
+    worker.run()
+
+    assert "result" not in captured
+    assert "error" in captured
+    assert "synthetic brightness computation failure" in captured["error"]
+
+
+def test_analysis_worker_aborts_on_background_computation_failure(monkeypatch):
+    """A background-ROI computation fault must abort the run with an error rather
+    than silently switching to raw (non-background-subtracted) measurements."""
+    frames = [
+        np.full((6, 6, 3), 20, dtype=np.uint8),
+        np.full((6, 6, 3), 40, dtype=np.uint8),
+    ]
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture(frames))
+
+    def boom(*args, **kwargs):
+        raise BackgroundComputationError("synthetic background computation failure")
+
+    monkeypatch.setattr(workers_module, "compute_background_brightness", boom)
+
+    request = AnalysisRequest(
+        video_path="dummy.mp4",
+        rects=[((0, 0), (3, 6)), ((3, 0), (6, 6))],
+        background_roi_idx=1,
+        start_frame=0,
+        end_frame=1,
+        use_fixed_mask=False,
+        fixed_roi_masks=[],
+        background_percentile=90.0,
+        morphological_kernel_size=3,
+        noise_floor_threshold=0.0,
+    )
+
+    worker = AnalysisWorker(request)
+    captured: Dict[str, object] = {}
+    worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+    worker.error.connect(lambda message: captured.setdefault("error", message))
+    worker.run()
+
+    assert "result" not in captured
+    assert "error" in captured
+    assert "synthetic background computation failure" in captured["error"]
 
 
 def test_analysis_worker_manual_threshold_gates_pixels(monkeypatch):
