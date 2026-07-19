@@ -15,7 +15,6 @@ from .analysis.background import (
     compute_background_brightness as analysis_compute_background_brightness,
 )
 from .analysis.brightness import (
-    compute_brightness as analysis_compute_brightness,
     compute_brightness_stats as analysis_compute_brightness_stats,
     compute_l_star_frame as analysis_compute_l_star_frame,
 )
@@ -264,7 +263,6 @@ class AnalysisRangeSlider(QtWidgets.QWidget):
             current_value = self._pos_to_value(pos_x)
             delta = current_value - anchor_value
             origin_start, origin_end = self._drag_origin_range
-            width = origin_end - origin_start
             new_start = origin_start + delta
             new_end = origin_end + delta
             if new_start < self._minimum:
@@ -4027,15 +4025,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         frame_w = self.frame.shape[1]
         return geometry_scale_value_for_pixmap(value_in_frame_coords, pixmap_rect, frame_w)
 
-    def _get_resize_cursor(self, corner_index: int) -> QtGui.QCursor:
-        """Returns the appropriate resize cursor based on the corner index."""
-        if corner_index == 0 or corner_index == 3: # Top-left or Bottom-right
-            return QtGui.QCursor(QtCore.Qt.SizeFDiagCursor)
-        elif corner_index == 1 or corner_index == 2: # Top-right or Bottom-left
-            return QtGui.QCursor(QtCore.Qt.SizeBDiagCursor)
-        else:
-            return QtGui.QCursor(QtCore.Qt.ArrowCursor) # Default
-
     def _get_resize_handle(
         self,
         frame_x: int,
@@ -5592,15 +5581,4 @@ Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
             background_roi_idx=self.background_roi_idx,
             background_percentile=self.background_percentile,
             frame_l_star=frame_l_star,
-        )
-
-    def _compute_brightness(self, roi_bgr: np.ndarray) -> float:
-        """
-        Legacy method for backward compatibility.
-        Returns only the mean brightness for existing code that expects a single value.
-        """
-        return analysis_compute_brightness(
-            roi_bgr,
-            morphological_kernel_size=self.morphological_kernel_size,
-            noise_floor_threshold=self.noise_floor_threshold,
         )
