@@ -28,6 +28,10 @@ class AnalysisRequest:
     background_percentile: float
     morphological_kernel_size: int
     noise_floor_threshold: float
+    # Manual threshold mode: used when no background ROI is configured.
+    # A value > 0 gates pixel inclusion and offsets background-subtracted
+    # stats exactly like a background-derived threshold; 0 disables it.
+    manual_threshold: float = 0.0
 
 
 @dataclass

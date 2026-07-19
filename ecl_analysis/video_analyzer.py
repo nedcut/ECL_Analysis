@@ -4536,6 +4536,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             background_percentile=self.background_percentile,
             morphological_kernel_size=self.morphological_kernel_size,
             noise_floor_threshold=self.noise_floor_threshold,
+            manual_threshold=float(self.manual_threshold),
         )
 
         self._analysis_save_dir = save_dir

@@ -2,9 +2,11 @@ from typing import Dict, List
 
 import cv2
 import numpy as np
+import pytest
 
 import ecl_analysis.workers as workers_module
 from ecl_analysis.analysis.background import BackgroundComputationError
+from ecl_analysis.analysis.brightness import compute_l_star_frame
 from ecl_analysis.analysis.models import AnalysisRequest
 from ecl_analysis.workers import (
     AnalysisWorker,
@@ -80,6 +82,30 @@ def test_analysis_worker_emits_structured_result(monkeypatch):
     assert result.truncated is False
     assert len(result.brightness_mean_data) == 1
     assert len(result.brightness_mean_data[0]) == 3
+
+
+def _run_analysis_worker(frames, monkeypatch, **overrides):
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture(frames))
+    request = AnalysisRequest(
+        video_path="dummy.mp4",
+        rects=overrides.pop("rects", [((0, 0), (6, 6))]),
+        background_roi_idx=overrides.pop("background_roi_idx", None),
+        start_frame=0,
+        end_frame=len(frames) - 1,
+        use_fixed_mask=False,
+        fixed_roi_masks=[],
+        background_percentile=90.0,
+        morphological_kernel_size=3,
+        noise_floor_threshold=0.0,
+        **overrides,
+    )
+    worker = AnalysisWorker(request)
+    captured: Dict[str, object] = {}
+    worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+    worker.error.connect(lambda message: captured.setdefault("error", message))
+    worker.run()
+    assert "error" not in captured
+    return captured["result"]
 
 
 def test_analysis_worker_flags_truncation_on_early_eof(monkeypatch):
@@ -191,6 +217,50 @@ def test_analysis_worker_aborts_on_background_computation_failure(monkeypatch):
     assert "result" not in captured
     assert "error" in captured
     assert "synthetic background computation failure" in captured["error"]
+
+
+def test_analysis_worker_manual_threshold_gates_pixels(monkeypatch):
+    frame = np.zeros((6, 6, 3), dtype=np.uint8)
+    frame[:, :3, :] = 10  # dark half, L* ~ 3
+    frame[:, 3:, :] = 200  # bright half, L* ~ 81
+    frames = [frame]
+
+    l_star = compute_l_star_frame(frame)
+    bright_pixels = l_star[l_star > 50.0]
+
+    # Default (manual_threshold omitted): raw mean over the whole ROI, legacy behavior.
+    res_default = _run_analysis_worker(frames, monkeypatch)
+    assert res_default.brightness_mean_data[0][0] == pytest.approx(float(np.mean(l_star)), abs=1e-4)
+    assert res_default.background_values_per_frame == [0.0]
+
+    # Manual threshold gates pixels and offsets background-subtracted stats.
+    res_50 = _run_analysis_worker(frames, monkeypatch, manual_threshold=50.0)
+    assert res_50.brightness_mean_data[0][0] == pytest.approx(float(np.mean(bright_pixels)) - 50.0, abs=1e-4)
+    assert res_50.background_values_per_frame == [50.0]
+
+    # Changing the manual threshold changes the computed stats.
+    res_20 = _run_analysis_worker(frames, monkeypatch, manual_threshold=20.0)
+    assert res_20.brightness_mean_data[0][0] == pytest.approx(float(np.mean(bright_pixels)) - 20.0, abs=1e-4)
+    assert res_20.brightness_mean_data[0][0] - res_50.brightness_mean_data[0][0] == pytest.approx(30.0, abs=1e-4)
+
+
+def test_analysis_worker_manual_threshold_ignored_with_background_roi(monkeypatch):
+    frame = np.zeros((6, 12, 3), dtype=np.uint8)
+    frame[:, :6, :] = 200  # target ROI, bright
+    frame[:, 6:, :] = 10  # background ROI, dark
+    frames = [frame]
+    rects = [((0, 0), (6, 6)), ((6, 0), (12, 6))]
+
+    res_no_manual = _run_analysis_worker(
+        frames, monkeypatch, rects=rects, background_roi_idx=1, manual_threshold=0.0
+    )
+    res_manual = _run_analysis_worker(
+        frames, monkeypatch, rects=rects, background_roi_idx=1, manual_threshold=99.0
+    )
+
+    assert res_manual.brightness_mean_data == res_no_manual.brightness_mean_data
+    assert res_manual.brightness_median_data == res_no_manual.brightness_median_data
+    assert res_manual.background_values_per_frame == res_no_manual.background_values_per_frame
 
 
 def test_brightest_frame_worker_picks_max_frame(monkeypatch):
