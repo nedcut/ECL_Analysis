@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 
 from ecl_analysis.analysis.models import AnalysisResult
@@ -55,6 +56,44 @@ def test_save_analysis_outputs_writes_csv_and_summary(tmp_path: Path):
     df = pd.read_csv(csv_path)
     assert list(df.columns) == ["frame", "brightness_mean", "brightness_median", "blue_mean", "blue_median"]
     assert len(df) == 3
+
+
+def test_avg_brightness_summary_uses_std_of_mean_series_not_median(tmp_path: Path):
+    mean_data = [1.0, 2.0, 3.0, 10.0]
+    median_data = [0.5, 1.5, 2.5, 3.5]
+    result = AnalysisResult(
+        brightness_mean_data=[mean_data],
+        brightness_median_data=[median_data],
+        blue_mean_data=[[10.0, 11.0, 12.0, 13.0]],
+        blue_median_data=[[9.0, 10.0, 11.0, 12.0]],
+        background_values_per_frame=[0.0, 0.0, 0.0, 0.0],
+        frames_processed=4,
+        total_frames=4,
+        non_background_rois=[0],
+        elapsed_seconds=0.1,
+        start_frame=0,
+        end_frame=3,
+    )
+
+    export = save_analysis_outputs(
+        analysis_result=result,
+        save_dir=str(tmp_path),
+        video_path="/tmp/input.mp4",
+        analysis_name="Demo",
+        plot_builder=_noop_plot_builder,
+    )
+
+    assert len(export.avg_brightness_summary) == 1
+    summary = export.avg_brightness_summary[0]
+
+    expected_mean = np.mean(mean_data)
+    expected_std = np.std(mean_data)
+    expected_median = np.mean(median_data)
+
+    # The ± value must be the std of the mean series, not the mean of the median series.
+    assert f"{expected_mean:.2f}±{expected_std:.2f}" in summary
+    assert f"{expected_median:.2f}" in summary
+    assert f"{expected_mean:.2f}±{expected_median:.2f}" not in summary
 
 
 def test_save_analysis_outputs_writes_json_when_selected(tmp_path: Path):
