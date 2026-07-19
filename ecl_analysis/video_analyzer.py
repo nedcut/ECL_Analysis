@@ -3195,24 +3195,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._record_history_change("Set Background ROI", before)
 
     def _calculate_background_threshold(self) -> Optional[float]:
-        """Calculate the current background threshold based on background ROI or manual setting."""
+        """Calculate the current background threshold based on background ROI or manual setting.
+
+        Delegates to the same percentile-based helper used by the analysis worker
+        (`_compute_background_brightness`) so the displayed threshold always matches
+        what is actually applied during analysis.
+        """
         if self.background_roi_idx is not None and self.frame is not None:
-            # Calculate threshold from current frame's background ROI
-            if 0 <= self.background_roi_idx < len(self.rects):
-                pt1, pt2 = self.rects[self.background_roi_idx]
-                fh, fw = self.frame.shape[:2]
-                
-                # Ensure ROI coordinates are valid within the frame
-                x1 = max(0, min(pt1[0], fw - 1))
-                y1 = max(0, min(pt1[1], fh - 1))
-                x2 = max(0, min(pt2[0], fw - 1))
-                y2 = max(0, min(pt2[1], fh - 1))
-                
-                if x2 > x1 and y2 > y1:
-                    roi = self.frame[y1:y2, x1:x2]
-                    l_raw_mean, _, _, _, _, _, _, _ = self._compute_brightness_stats(roi)
-                    return l_raw_mean
-        
+            return self._compute_background_brightness(self.frame)
+
         # If no background ROI or calculation failed, return manual threshold
         return None
 
@@ -3652,6 +3643,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         before = None if self._history_restoring else self._capture_editor_snapshot()
         self.background_percentile = float(value)
         self.bg_percentile_label.setText(f"{self.background_percentile:.0f}%")
+        # Fixed masks were captured using the old percentile; invalidate them so
+        # the user knows they no longer reflect the current threshold.
+        self._invalidate_fixed_masks("background percentile changed")
         # Update display since background calculation changed
         if self.frame is not None:
             self._update_current_brightness_display()
