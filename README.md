@@ -15,12 +15,14 @@ cd ECL_Analysis
 python3 -m venv .venv
 source .venv/bin/activate
 
-# 3. Install dependencies
-pip install -r requirements.txt
+# 3. Install dependencies (core + optional audio/interactive-plot extras)
+pip install -e ".[audio,interactive-plots]"
 
 # 4. Run the app
 python main.py
 ```
+
+Only need the core features? `pip install -e .` skips the optional `pygame`/`librosa`/`soundfile`/`plotly` extras.
 
 ### Updating When New Code Is Pushed
 
@@ -30,7 +32,7 @@ Whenever updates are pushed, run these commands to get the latest version:
 cd ECL_Analysis
 source .venv/bin/activate
 git pull
-pip install -r requirements.txt   # only needed if dependencies changed
+pip install -e ".[audio,interactive-plots]"   # only needed if dependencies changed
 python main.py
 ```
 
@@ -138,8 +140,8 @@ When citing results in publications, note:
 ## Development
 
 ```bash
-# Install dev tools
-pip install -r requirements-dev.txt
+# Install dev tools (core + all optional extras + dev deps)
+pip install -e ".[audio,interactive-plots,dev]"
 
 # Run tests
 pytest -q -m "not performance"
