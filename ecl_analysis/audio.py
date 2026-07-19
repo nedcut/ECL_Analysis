@@ -2,7 +2,7 @@
 
 import importlib
 import logging
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -230,16 +230,22 @@ class AudioAnalyzer:
         self,
         video_path: str,
         expected_run_duration: float = 0.0,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> List[Tuple[float, int]]:
-        if not self._ensure_backend():
+        """Locate completion beeps, polling ``cancel_check`` between expensive stages."""
+
+        def _cancelled() -> bool:
+            return cancel_check is not None and cancel_check()
+
+        if not self._ensure_backend() or _cancelled():
             return []
 
         audio_data, sample_rate = self.extract_audio_from_video(video_path)
-        if audio_data is None:
+        if audio_data is None or _cancelled():
             return []
 
         beep_times = self.detect_beeps(audio_data, sample_rate)
-        if not beep_times:
+        if not beep_times or _cancelled():
             return []
 
         try:

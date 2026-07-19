@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
@@ -14,6 +15,23 @@ from .analysis.background import compute_background_brightness
 from .analysis.brightness import compute_brightness_stats, compute_l_star_frame
 from .analysis.models import AnalysisRequest, AnalysisResult, RoiRect
 from .audio import AudioAnalyzer
+
+
+class CancellationToken:
+    """Thread-safe cancellation flag shared between the GUI and worker threads.
+
+    Backed by :class:`threading.Event`, so it is safe to call :meth:`cancel`
+    from the GUI thread while a worker thread polls :meth:`is_cancelled`.
+    """
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
 
 
 def _normalized_slice_bounds(
@@ -77,7 +95,7 @@ class AnalysisWorker(QtCore.QObject):
     def __init__(self, request: AnalysisRequest):
         super().__init__()
         self._request = request
-        self._cancelled = False
+        self._cancel_token = CancellationToken()
 
     @QtCore.pyqtSlot()
     def run(self) -> None:
@@ -103,7 +121,7 @@ class AnalysisWorker(QtCore.QObject):
             truncated = False
 
             for _frame_idx in range(req.start_frame, req.end_frame + 1):
-                if self._cancelled:
+                if self._cancel_token.is_cancelled():
                     self.cancelled.emit()
                     return
 
@@ -197,7 +215,7 @@ class AnalysisWorker(QtCore.QObject):
             else:
                 frames_processed = total_frames
 
-            if self._cancelled:
+            if self._cancel_token.is_cancelled():
                 self.cancelled.emit()
                 return
 
@@ -227,7 +245,8 @@ class AnalysisWorker(QtCore.QObject):
 
     @QtCore.pyqtSlot()
     def cancel(self) -> None:
-        self._cancelled = True
+        """Request cooperative cancellation; safe to call from any thread."""
+        self._cancel_token.cancel()
 
 
 class AudioDetectionWorker(QtCore.QObject):
@@ -241,24 +260,33 @@ class AudioDetectionWorker(QtCore.QObject):
         super().__init__()
         self._video_path = video_path
         self._expected_duration = expected_duration
-        self._cancelled = False
+        self._cancel_token = CancellationToken()
 
     @QtCore.pyqtSlot()
     def run(self) -> None:
+        if self._cancel_token.is_cancelled():
+            self.cancelled.emit()
+            return
+
         analyzer = AudioAnalyzer()
         if not analyzer.is_available():
             self.error.emit("Audio analysis not available. Please install librosa and soundfile.")
             return
 
-        beeps = analyzer.find_completion_beeps(self._video_path, self._expected_duration)
-        if self._cancelled:
+        beeps = analyzer.find_completion_beeps(
+            self._video_path,
+            self._expected_duration,
+            cancel_check=self._cancel_token.is_cancelled,
+        )
+        if self._cancel_token.is_cancelled():
             self.cancelled.emit()
             return
         self.finished.emit(beeps)
 
     @QtCore.pyqtSlot()
     def cancel(self) -> None:
-        self._cancelled = True
+        """Request cooperative cancellation; safe to call from any thread."""
+        self._cancel_token.cancel()
 
 
 class BrightestFrameWorker(QtCore.QObject):
@@ -273,7 +301,7 @@ class BrightestFrameWorker(QtCore.QObject):
     def __init__(self, request: MaskScanRequest):
         super().__init__()
         self._request = request
-        self._cancelled = False
+        self._cancel_token = CancellationToken()
 
     @QtCore.pyqtSlot()
     def run(self) -> None:
@@ -299,7 +327,7 @@ class BrightestFrameWorker(QtCore.QObject):
         try:
             total = len(frame_indices)
             for idx, frame_idx in enumerate(frame_indices):
-                if self._cancelled:
+                if self._cancel_token.is_cancelled():
                     self.cancelled.emit()
                     return
 
@@ -352,7 +380,8 @@ class BrightestFrameWorker(QtCore.QObject):
 
     @QtCore.pyqtSlot()
     def cancel(self) -> None:
-        self._cancelled = True
+        """Request cooperative cancellation; safe to call from any thread."""
+        self._cancel_token.cancel()
 
 
 class PerRoiMaskCaptureWorker(QtCore.QObject):
@@ -367,7 +396,7 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
     def __init__(self, request: MaskScanRequest):
         super().__init__()
         self._request = request
-        self._cancelled = False
+        self._cancel_token = CancellationToken()
 
     @QtCore.pyqtSlot()
     def run(self) -> None:
@@ -395,7 +424,7 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
 
         try:
             for idx, frame_idx in enumerate(frame_indices):
-                if self._cancelled:
+                if self._cancel_token.is_cancelled():
                     self.cancelled.emit()
                     return
 
@@ -429,7 +458,7 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
             sources: List[Optional[int]] = [None] * len(req.rects)
 
             for idx, roi_idx in enumerate(roi_indices):
-                if self._cancelled:
+                if self._cancel_token.is_cancelled():
                     self.cancelled.emit()
                     return
 
@@ -495,4 +524,5 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
 
     @QtCore.pyqtSlot()
     def cancel(self) -> None:
-        self._cancelled = True
+        """Request cooperative cancellation; safe to call from any thread."""
+        self._cancel_token.cancel()
