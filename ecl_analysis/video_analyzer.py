@@ -70,6 +70,48 @@ from .roi_geometry import (
 )
 
 
+WORKER_STOP_TIMEOUT_MS = 1500
+WORKER_STOP_GRACE_TIMEOUT_MS = 5000
+
+
+def shutdown_worker_thread(
+    thread: Optional[QtCore.QThread],
+    name: str,
+    timeout_ms: int = WORKER_STOP_TIMEOUT_MS,
+    grace_timeout_ms: int = WORKER_STOP_GRACE_TIMEOUT_MS,
+) -> bool:
+    """Stop a worker thread and report whether it actually finished.
+
+    Returns True when the thread is stopped (or was None). Returns False when
+    the thread is still running after the escalated wait; callers must keep
+    their references to the thread and its worker alive in that case, because
+    destroying a running QThread aborts the process.
+    """
+    if thread is None:
+        return True
+
+    thread.quit()
+    if thread.wait(timeout_ms):
+        return True
+
+    logging.warning(
+        "%s worker thread did not stop within %dms; waiting up to %dms more",
+        name,
+        timeout_ms,
+        grace_timeout_ms,
+    )
+    if thread.wait(grace_timeout_ms):
+        return True
+
+    logging.error(
+        "%s worker thread is still running after %dms; keeping its references "
+        "alive to avoid destroying a running QThread",
+        name,
+        timeout_ms + grace_timeout_ms,
+    )
+    return False
+
+
 def _hex_to_rgba(color: str, alpha: float) -> str:
     """Convert a hex color string like '#RRGGBB' to an rgba() string."""
     stripped = color.lstrip('#')
@@ -264,7 +306,6 @@ class AnalysisRangeSlider(QtWidgets.QWidget):
             current_value = self._pos_to_value(pos_x)
             delta = current_value - anchor_value
             origin_start, origin_end = self._drag_origin_range
-            width = origin_end - origin_start
             new_start = origin_start + delta
             new_end = origin_end + delta
             if new_start < self._minimum:
@@ -961,7 +1002,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._update_history_actions()
 
     def _cancel_active_worker(self):
-        """Request cancellation of any currently running worker."""
+        """Request cancellation of any currently running worker.
+
+        Each worker's cancel() sets a threading.Event-backed token, so calling
+        it from the GUI thread while the worker runs in its own thread is safe.
+        """
         cancelled_any = False
         if self._analysis_worker is not None:
             self._analysis_worker.cancel()
@@ -2453,15 +2498,31 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def closeEvent(self, event: QtGui.QCloseEvent):
         """Release resources and save settings when the window closes."""
         self._cancel_active_worker()
-        if self._analysis_thread is not None:
-            self._analysis_thread.quit()
-            self._analysis_thread.wait(1500)
-        if self._audio_thread is not None:
-            self._audio_thread.quit()
-            self._audio_thread.wait(1500)
-        if self._mask_thread is not None:
-            self._mask_thread.quit()
-            self._mask_thread.wait(1500)
+
+        all_stopped = True
+        if shutdown_worker_thread(self._analysis_thread, "analysis"):
+            self._analysis_thread = None
+            self._analysis_worker = None
+        else:
+            all_stopped = False
+        if shutdown_worker_thread(self._audio_thread, "audio"):
+            self._audio_thread = None
+            self._audio_worker = None
+        else:
+            all_stopped = False
+        if shutdown_worker_thread(self._mask_thread, "mask"):
+            self._mask_thread = None
+            self._mask_worker = None
+        else:
+            all_stopped = False
+
+        if not all_stopped:
+            # Keep the window (and the thread/worker references) alive until
+            # the stalled worker stops; destroying a running QThread crashes.
+            self.statusBar().showMessage("Waiting for background tasks to stop before closing...")
+            event.ignore()
+            QtCore.QTimer.singleShot(500, self.close)
+            return
 
         if self.cap:
             self.cap.release()
@@ -3620,12 +3681,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._mask_progress.close()
             self._mask_progress = None
 
-        if self._mask_thread is not None:
-            self._mask_thread.quit()
-            self._mask_thread.wait(1500)
+        if shutdown_worker_thread(self._mask_thread, "mask"):
             self._mask_thread = None
+            self._mask_worker = None
 
-        self._mask_worker = None
         self._mask_task_type = None
         self._set_busy_state(False)
 
@@ -4447,12 +4506,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._audio_progress.close()
             self._audio_progress = None
 
-        if self._audio_thread is not None:
-            self._audio_thread.quit()
-            self._audio_thread.wait(1500)
+        if shutdown_worker_thread(self._audio_thread, "audio"):
             self._audio_thread = None
+            self._audio_worker = None
 
-        self._audio_worker = None
         self._pending_audio_expected_duration = 0.0
         self._set_busy_state(False)
 
@@ -4635,12 +4692,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._analysis_progress.close()
             self._analysis_progress = None
 
-        if self._analysis_thread is not None:
-            self._analysis_thread.quit()
-            self._analysis_thread.wait(1500)
+        if shutdown_worker_thread(self._analysis_thread, "analysis"):
             self._analysis_thread = None
-
-        self._analysis_worker = None
+            self._analysis_worker = None
 
         if reset_busy:
             self._set_busy_state(False)
