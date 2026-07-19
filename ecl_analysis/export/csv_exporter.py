@@ -96,12 +96,15 @@ def save_analysis_outputs(
         )
 
         avg_mean = np.mean(mean_data)
+        std_mean = np.std(mean_data)
         avg_median = np.mean(median_data)
         avg_blue_mean = np.mean(blue_mean)
+        std_blue_mean = np.std(blue_mean)
         avg_blue_median = np.mean(blue_median)
         avg_brightness_summary.append(
-            f"ROI {actual_roi_idx + 1} L*: {avg_mean:.2f}±{avg_median:.2f}, "
-            f"Blue: {avg_blue_mean:.1f}±{avg_blue_median:.1f}"
+            f"ROI {actual_roi_idx + 1} L*: {avg_mean:.2f}±{std_mean:.2f} (mean±std), "
+            f"median {avg_median:.2f}; "
+            f"Blue: {avg_blue_mean:.1f}±{std_blue_mean:.1f} (mean±std)"
         )
 
         base_filename = (
