@@ -9,6 +9,11 @@ Point = Tuple[int, int]
 RoiRect = Tuple[Point, Point]
 
 
+def has_analyzable_rois(rects: Sequence[RoiRect], background_roi_idx: Optional[int]) -> bool:
+    """Return True if at least one ROI is not designated as the background ROI."""
+    return any(i != background_roi_idx for i in range(len(rects)))
+
+
 @dataclass(frozen=True)
 class AnalysisRequest:
     """Immutable snapshot of all inputs required for frame analysis."""
@@ -23,6 +28,10 @@ class AnalysisRequest:
     background_percentile: float
     morphological_kernel_size: int
     noise_floor_threshold: float
+    # Manual threshold mode: used when no background ROI is configured.
+    # A value > 0 gates pixel inclusion and offsets background-subtracted
+    # stats exactly like a background-derived threshold; 0 disables it.
+    manual_threshold: float = 0.0
 
 
 @dataclass
@@ -40,3 +49,4 @@ class AnalysisResult:
     elapsed_seconds: float
     start_frame: int
     end_frame: int
+    truncated: bool = False

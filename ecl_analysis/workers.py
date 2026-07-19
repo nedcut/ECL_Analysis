@@ -118,6 +118,7 @@ class AnalysisWorker(QtCore.QObject):
         try:
             cap.set(cv2.CAP_PROP_POS_FRAMES, req.start_frame)
             frames_processed = 0
+            truncated = False
 
             for _frame_idx in range(req.start_frame, req.end_frame + 1):
                 if self._cancel_token.is_cancelled():
@@ -133,6 +134,7 @@ class AnalysisWorker(QtCore.QObject):
                     brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
                     blue_mean_data = [lst[:frames_processed] for lst in blue_mean_data]
                     blue_median_data = [lst[:frames_processed] for lst in blue_median_data]
+                    truncated = True
                     break
 
                 l_star_frame = compute_l_star_frame(frame)
@@ -143,6 +145,10 @@ class AnalysisWorker(QtCore.QObject):
                     background_percentile=req.background_percentile,
                     frame_l_star=l_star_frame,
                 )
+                if req.background_roi_idx is None and req.manual_threshold > 0:
+                    # Manual threshold mode: no background ROI configured, so the
+                    # user-set manual threshold acts as the active threshold.
+                    background_value = req.manual_threshold
                 background_values_per_frame.append(background_value if background_value is not None else 0.0)
 
                 frame_height, frame_width = frame.shape[:2]
@@ -227,6 +233,7 @@ class AnalysisWorker(QtCore.QObject):
                     elapsed_seconds=elapsed_seconds,
                     start_frame=req.start_frame,
                     end_frame=req.end_frame,
+                    truncated=truncated,
                 )
             )
         except cv2.error as exc:

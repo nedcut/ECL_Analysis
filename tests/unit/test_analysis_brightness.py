@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pytest
 
@@ -54,3 +55,17 @@ def test_compute_brightness_returns_mean_l_star():
     roi = np.full((4, 4, 3), 255, dtype=np.uint8)
     result = compute_brightness(roi)
     assert result == pytest.approx(100.0, rel=1e-3)
+
+
+def test_compute_brightness_stats_propagates_computation_errors(monkeypatch):
+    """A processing fault must abort loudly, not be masked as fabricated zero data."""
+    import ecl_analysis.analysis.brightness as brightness_module
+
+    def boom(*args, **kwargs):
+        raise cv2.error("synthetic failure")
+
+    monkeypatch.setattr(brightness_module.cv2, "cvtColor", boom)
+
+    roi = np.full((4, 4, 3), 128, dtype=np.uint8)
+    with pytest.raises(cv2.error):
+        compute_brightness_stats(roi)
