@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-import ecl_analysis.workers as workers_module
+import ecl_analysis.analysis.runner as runner_module
 from ecl_analysis.analysis.background import BackgroundComputationError
 from ecl_analysis.analysis.brightness import compute_l_star_frame
 from ecl_analysis.analysis.models import AnalysisRequest
@@ -155,7 +155,7 @@ def test_analysis_worker_aborts_on_brightness_computation_failure(monkeypatch):
     def boom(*args, **kwargs):
         raise cv2.error("synthetic brightness computation failure")
 
-    monkeypatch.setattr(workers_module, "compute_brightness_stats", boom)
+    monkeypatch.setattr(runner_module, "compute_brightness_stats", boom)
 
     request = AnalysisRequest(
         video_path="dummy.mp4",
@@ -193,7 +193,7 @@ def test_analysis_worker_aborts_on_background_computation_failure(monkeypatch):
     def boom(*args, **kwargs):
         raise BackgroundComputationError("synthetic background computation failure")
 
-    monkeypatch.setattr(workers_module, "compute_background_brightness", boom)
+    monkeypatch.setattr(runner_module, "compute_background_brightness", boom)
 
     request = AnalysisRequest(
         video_path="dummy.mp4",
