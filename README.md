@@ -22,6 +22,23 @@ pip install -e ".[audio,interactive-plots]"
 python main.py
 ```
 
+### Web UI (new)
+
+A browser-based UI is available alongside the desktop app. It runs a local
+server that decodes frames and executes the same analysis pipeline.
+
+```bash
+# One-time: install web extras and build the frontend (requires bun)
+pip install -e ".[web]"
+cd web && bun install && bun run build && cd ..
+
+# Run — then open http://127.0.0.1:8765
+python -m ecl_analysis.server
+```
+
+For frontend development, run `bun run dev` in `web/` (Vite proxies `/api` to
+the server on port 8765) and open the printed URL instead.
+
 Only need the core features? `pip install -e .` skips the optional `pygame`/`librosa`/`soundfile`/`plotly` extras.
 
 ### Updating When New Code Is Pushed
