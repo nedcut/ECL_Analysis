@@ -51,14 +51,34 @@ export interface AnalysisResultPayload {
   rois: RoiSeries[]
 }
 
+export interface BrightestFrameResultPayload {
+  brightest_frame_idx: number
+  max_brightness: number
+}
+
+export interface PerRoiMaskResultPayload {
+  sources: Array<number | null>
+  max_brightness: Record<string, number>
+  mask_coverage: Array<number | null>
+}
+
+export type JobKind = 'analysis' | 'mask_scan_global' | 'mask_scan_per_roi'
+
 export interface JobStatus {
   job_id: string
+  kind: JobKind
   video_id: string
   status: 'queued' | 'running' | 'done' | 'error' | 'cancelled'
   progress: { done: number; total: number }
   message: string
   error: string | null
-  result?: AnalysisResultPayload
+  result?: AnalysisResultPayload | BrightestFrameResultPayload | PerRoiMaskResultPayload
+}
+
+export interface DetectedBeep {
+  beep_time: number
+  start_frame: number
+  end_frame: number
 }
 
 export interface FsListing {

@@ -1,14 +1,18 @@
 import { useCallback, useRef } from 'react'
 import type { FrameRange } from '../App'
 
+export const PLAYBACK_SPEEDS = [0.25, 0.5, 1, 2, 4] as const
+
 interface TransportProps {
   frame: number
   frameCount: number
   fps: number
   playing: boolean
+  speed: number
   range: FrameRange
   onSeek: (frame: number) => void
   onTogglePlay: () => void
+  onSpeedChange: (speed: number) => void
   onRangeChange: (range: FrameRange) => void
 }
 
@@ -21,9 +25,11 @@ export function Transport({
   frameCount,
   fps,
   playing,
+  speed,
   range,
   onSeek,
   onTogglePlay,
+  onSpeedChange,
   onRangeChange,
 }: TransportProps) {
   const scrubberRef = useRef<HTMLDivElement>(null)
@@ -65,6 +71,18 @@ export function Transport({
       <button className="btn" onClick={onTogglePlay} aria-label={playing ? 'Pause' : 'Play'}>
         {playing ? '❚❚' : '▶'}
       </button>
+      <select
+        aria-label="Playback speed"
+        className="mono"
+        value={speed}
+        onChange={(event) => onSpeedChange(Number(event.target.value))}
+      >
+        {PLAYBACK_SPEEDS.map((value) => (
+          <option key={value} value={value}>
+            {value}×
+          </option>
+        ))}
+      </select>
       <span className="counter">
         {pad(frame, digits)}
         <span className="total"> / {lastFrame} · {seconds.toFixed(2)}s</span>

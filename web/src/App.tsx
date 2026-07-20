@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from './api'
 import { AnalyzePanel } from './components/AnalyzePanel'
 import { FilePicker } from './components/FilePicker'
+import { MasksPanel } from './components/MasksPanel'
 import { ResultsDrawer } from './components/ResultsDrawer'
 import { RoiPanel } from './components/RoiPanel'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -30,6 +31,9 @@ export function App() {
   const [job, setJob] = useState<JobStatus | null>(null)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [openError, setOpenError] = useState<string | null>(null)
+  const [speed, setSpeed] = useState(1)
+  const [maskJobId, setMaskJobId] = useState<string | null>(null)
+  const [useMasks, setUseMasks] = useState(false)
   const nextRoiId = useRef(1)
 
   const lastFrame = video ? Math.max(0, video.frame_count - 1) : 0
@@ -52,20 +56,40 @@ export function App() {
     }
   }, [])
 
-  // Playback: advance one frame per 1/fps tick, stop at the last frame.
+  // Playback. At >=1× we tick at native fps and skip frames (server decode
+  // can't exceed native rate); below 1× we slow the tick instead.
   useEffect(() => {
     if (!playing || !video) return
+    const fps = video.fps > 0 ? video.fps : 30
+    const stride = speed >= 1 ? Math.round(speed) : 1
+    const intervalMs = speed >= 1 ? 1000 / fps : 1000 / (fps * speed)
     const interval = window.setInterval(() => {
       setFrame((current) => {
         if (current >= lastFrame) {
           setPlaying(false)
           return current
         }
-        return current + 1
+        return Math.min(current + stride, lastFrame)
       })
-    }, 1000 / (video.fps > 0 ? video.fps : 30))
+    }, intervalMs)
     return () => window.clearInterval(interval)
-  }, [playing, video, lastFrame])
+  }, [playing, video, lastFrame, speed])
+
+  // Captured masks are pinned to region geometry; any move/resize/add/delete
+  // (or background change) invalidates them so analysis can't silently use
+  // masks that no longer match.
+  const geometrySignature = JSON.stringify([
+    rois.map((roi) => [roi.id, roi.x1, roi.y1, roi.x2, roi.y2]),
+    backgroundRoiId,
+  ])
+  const lastGeometry = useRef(geometrySignature)
+  useEffect(() => {
+    if (lastGeometry.current !== geometrySignature) {
+      lastGeometry.current = geometrySignature
+      setMaskJobId(null)
+      setUseMasks(false)
+    }
+  }, [geometrySignature])
 
   // Poll a queued/running job until it settles.
   useEffect(() => {
@@ -198,9 +222,11 @@ export function App() {
               frameCount={video.frame_count}
               fps={video.fps}
               playing={playing}
+              speed={speed}
               range={range}
               onSeek={seek}
               onTogglePlay={() => setPlaying((value) => !value)}
+              onSpeedChange={setSpeed}
               onRangeChange={setRange}
             />
           )}
@@ -229,6 +255,18 @@ export function App() {
             previewThreshold={previewThreshold}
             onPreviewThresholdChange={setPreviewThreshold}
           />
+          <MasksPanel
+            video={video}
+            rois={rois}
+            backgroundRoiId={backgroundRoiId}
+            range={range}
+            settings={settings}
+            maskJobId={maskJobId}
+            useMasks={useMasks}
+            onMaskJobChange={setMaskJobId}
+            onUseMasksChange={setUseMasks}
+            onSeek={seek}
+          />
           <AnalyzePanel
             video={video}
             rois={rois}
@@ -236,7 +274,12 @@ export function App() {
             range={range}
             settings={settings}
             job={job}
+            maskJobId={useMasks ? maskJobId : null}
             onJobChange={setJob}
+            onRangeDetected={(detected) => {
+              setRange(detected)
+              seek(detected.start)
+            }}
           />
         </aside>
       </div>

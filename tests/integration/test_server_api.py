@@ -82,7 +82,7 @@ def test_threshold_overlay_changes_bright_frame(client, synthetic_video):
 def _wait_for_job(client, job_id, timeout=15.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        response = client.get(f"/api/analysis/{job_id}")
+        response = client.get(f"/api/jobs/{job_id}")
         assert response.status_code == 200
         payload = response.json()
         if payload["status"] in {"done", "error", "cancelled"}:
@@ -148,7 +148,7 @@ def test_export_writes_csv_and_serves_it(client, synthetic_video, tmp_path):
 
     export_dir = tmp_path / "exports"
     response = client.post(
-        f"/api/analysis/{job_id}/export",
+        f"/api/jobs/{job_id}/export",
         json={
             "analysis_name": "synthetic_run",
             "save_dir": str(export_dir),
@@ -162,12 +162,12 @@ def test_export_writes_csv_and_serves_it(client, synthetic_video, tmp_path):
     csv_paths = [p for p in out_paths if p.endswith(".csv")]
     assert csv_paths, out_paths
 
-    served = client.get(f"/api/analysis/{job_id}/files", params={"path": csv_paths[0]})
+    served = client.get(f"/api/jobs/{job_id}/files", params={"path": csv_paths[0]})
     assert served.status_code == 200
     assert "frame" in served.text.splitlines()[0]
 
     denied = client.get(
-        f"/api/analysis/{job_id}/files", params={"path": synthetic_video}
+        f"/api/jobs/{job_id}/files", params={"path": synthetic_video}
     )
     assert denied.status_code == 403
 
@@ -180,3 +180,92 @@ def test_fs_listing(client, tmp_path):
     payload = response.json()
     assert "clip.mp4" in payload["videos"]
     assert "subdir" in payload["dirs"]
+
+
+def test_global_mask_scan_finds_brightest_frame(client, synthetic_video):
+    meta = _open_video(client, synthetic_video)
+    response = client.post(
+        f"/api/videos/{meta['video_id']}/mask-scan",
+        json={
+            "mode": "global",
+            "rois": [{"x1": 0, "y1": 0, "x2": 32, "y2": 48}],
+            "start_frame": 0,
+            "end_frame": 29,
+            "step": 1,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = _wait_for_job(client, response.json()["job_id"])
+    assert payload["status"] == "done", payload
+    assert payload["kind"] == "mask_scan_global"
+    # The clip brightens monotonically, so the last frame wins.
+    assert payload["result"]["brightest_frame_idx"] == 29
+
+
+def test_per_roi_mask_capture_and_masked_analysis(client, synthetic_video):
+    meta = _open_video(client, synthetic_video)
+    rois = [
+        {"x1": 0, "y1": 0, "x2": 32, "y2": 48, "name": "electrode"},
+        {"x1": 40, "y1": 0, "x2": 64, "y2": 48, "name": "background"},
+    ]
+    response = client.post(
+        f"/api/videos/{meta['video_id']}/mask-scan",
+        json={
+            "mode": "per_roi",
+            "rois": rois,
+            "background_roi_idx": 1,
+            "start_frame": 0,
+            "end_frame": 29,
+            "step": 2,
+        },
+    )
+    assert response.status_code == 200, response.text
+    mask_job_id = response.json()["job_id"]
+    payload = _wait_for_job(client, mask_job_id)
+    assert payload["status"] == "done", payload
+    result = payload["result"]
+    assert result["sources"][0] is not None
+    assert result["sources"][1] is None  # background ROI gets no mask
+    assert result["mask_coverage"][0] is not None
+
+    # Analysis restricted to the captured masks succeeds.
+    response = client.post(
+        f"/api/videos/{meta['video_id']}/analyze",
+        json={
+            "rois": rois,
+            "background_roi_idx": 1,
+            "start_frame": 0,
+            "end_frame": 29,
+            "mask_job_id": mask_job_id,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = _wait_for_job(client, response.json()["job_id"])
+    assert payload["status"] == "done", payload
+    assert len(payload["result"]["rois"][0]["brightness_mean"]) == 30
+
+    # Resizing a region after capture must fail loudly, not silently ignore masks.
+    resized = [dict(rois[0], x2=30), rois[1]]
+    response = client.post(
+        f"/api/videos/{meta['video_id']}/analyze",
+        json={
+            "rois": resized,
+            "background_roi_idx": 1,
+            "start_frame": 0,
+            "end_frame": 29,
+            "mask_job_id": mask_job_id,
+        },
+    )
+    assert response.status_code == 409
+
+
+def test_detect_range_on_silent_video_returns_no_beeps(client, synthetic_video):
+    meta = _open_video(client, synthetic_video)
+    response = client.post(
+        f"/api/videos/{meta['video_id']}/detect-range",
+        json={"expected_duration": 0.5},
+    )
+    # Either audio extras are absent (501) or the silent clip yields no beeps.
+    assert response.status_code in (200, 501)
+    if response.status_code == 200:
+        assert response.json()["beeps"] == []

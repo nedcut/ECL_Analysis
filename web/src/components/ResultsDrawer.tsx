@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import * as api from '../api'
 import { roiColor } from '../roi'
-import type { ExportResponse, JobStatus, MetricKey, Roi } from '../types'
+import type { AnalysisResultPayload, ExportResponse, JobStatus, MetricKey, Roi } from '../types'
 import { METRIC_LABELS } from '../types'
 
 interface ResultsDrawerProps {
@@ -22,7 +22,7 @@ const MARGIN = { top: 12, right: 16, bottom: 28, left: 48 }
 
 export function ResultsDrawer({ job, rois, backgroundRoiId }: ResultsDrawerProps) {
   const [metric, setMetric] = useState<MetricKey>('brightness_mean')
-  const result = job.result!
+  const result = job.result as AnalysisResultPayload
 
   const series: SeriesView[] = useMemo(() => {
     const nonBackground = rois.filter((roi) => roi.id !== backgroundRoiId)
