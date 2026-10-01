@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -12,8 +14,16 @@ import numpy as np
 from PyQt5 import QtCore
 
 from .analysis.background import compute_background_brightness
-from .analysis.brightness import compute_brightness_stats, compute_l_star_frame
-from .analysis.models import AnalysisRequest, AnalysisResult, RoiRect
+from .analysis.brightness import compute_brightness_stats_detailed, compute_l_star_frame
+from .analysis.models import (
+    MASK_STATUS_APPLIED,
+    MASK_STATUS_MISSING,
+    MASK_STATUS_NOT_REQUESTED,
+    MASK_STATUS_SHAPE_MISMATCH,
+    AnalysisRequest,
+    AnalysisResult,
+    RoiRect,
+)
 from .audio import AudioAnalyzer
 
 
@@ -107,7 +117,9 @@ class AnalysisWorker(QtCore.QObject):
         brightness_median_data = [[] for _ in non_background_rois]
         blue_mean_data = [[] for _ in non_background_rois]
         blue_median_data = [[] for _ in non_background_rois]
+        pixel_count_data: List[List[int]] = [[] for _ in non_background_rois]
         background_values_per_frame: List[float] = []
+        mask_status: Dict[int, str] = {}
 
         start_time = time.time()
         cap = cv2.VideoCapture(req.video_path)
@@ -116,7 +128,19 @@ class AnalysisWorker(QtCore.QObject):
             return
 
         try:
+            raw_fps = cap.get(cv2.CAP_PROP_FPS)
+            video_fps = float(raw_fps) if raw_fps and math.isfinite(raw_fps) and raw_fps > 0 else None
+
             cap.set(cv2.CAP_PROP_POS_FRAMES, req.start_frame)
+            seek_warning = None
+            reported_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
+            if not math.isfinite(reported_pos) or int(round(reported_pos)) != req.start_frame:
+                seek_warning = (
+                    f"Seek to frame {req.start_frame + 1} (0-based index {req.start_frame}) "
+                    f"reported decoder position {reported_pos}; "
+                    "exported frame numbers may be offset from the decoded frames."
+                )
+                logging.warning("AnalysisWorker: %s", seek_warning)
             frames_processed = 0
             truncated = False
 
@@ -134,6 +158,7 @@ class AnalysisWorker(QtCore.QObject):
                     brightness_median_data = [lst[:frames_processed] for lst in brightness_median_data]
                     blue_mean_data = [lst[:frames_processed] for lst in blue_mean_data]
                     blue_median_data = [lst[:frames_processed] for lst in blue_median_data]
+                    pixel_count_data = [lst[:frames_processed] for lst in pixel_count_data]
                     truncated = True
                     break
 
@@ -164,6 +189,19 @@ class AnalysisWorker(QtCore.QObject):
                             candidate_mask = req.fixed_roi_masks[roi_idx]
                             if isinstance(candidate_mask, np.ndarray) and candidate_mask.shape[:2] == roi.shape[:2]:
                                 roi_mask = candidate_mask
+                            elif isinstance(candidate_mask, np.ndarray) and roi_idx not in mask_status:
+                                logging.warning(
+                                    "AnalysisWorker: fixed mask for ROI %d has shape %s but ROI is %s; "
+                                    "mask dropped, threshold method used instead.",
+                                    roi_idx + 1,
+                                    candidate_mask.shape[:2],
+                                    roi.shape[:2],
+                                )
+                                mask_status[roi_idx] = MASK_STATUS_SHAPE_MISMATCH
+                        if req.use_fixed_mask:
+                            mask_status.setdefault(
+                                roi_idx, MASK_STATUS_APPLIED if roi_mask is not None else MASK_STATUS_MISSING
+                            )
 
                         (
                             l_raw_mean,
@@ -172,9 +210,11 @@ class AnalysisWorker(QtCore.QObject):
                             l_bg_sub_median,
                             b_raw_mean,
                             b_raw_median,
-                            b_bg_sub_mean,
-                            b_bg_sub_median,
-                        ) = compute_brightness_stats(
+                            b_analyzed_mean,
+                            b_analyzed_median,
+                            raw_pixel_count,
+                            analyzed_pixel_count,
+                        ) = compute_brightness_stats_detailed(
                             roi_bgr=roi,
                             background_brightness=background_value,
                             roi_mask=roi_mask,
@@ -183,21 +223,26 @@ class AnalysisWorker(QtCore.QObject):
                             noise_floor_threshold=req.noise_floor_threshold,
                         )
 
+                        # Blue is never background-subtracted: with a background/threshold
+                        # value it is raw blue over the same analyzed pixels as L*.
                         if background_value is not None:
                             brightness_mean_data[data_idx].append(l_bg_sub_mean)
                             brightness_median_data[data_idx].append(l_bg_sub_median)
-                            blue_mean_data[data_idx].append(b_bg_sub_mean)
-                            blue_median_data[data_idx].append(b_bg_sub_median)
+                            blue_mean_data[data_idx].append(b_analyzed_mean)
+                            blue_median_data[data_idx].append(b_analyzed_median)
+                            pixel_count_data[data_idx].append(analyzed_pixel_count)
                         else:
                             brightness_mean_data[data_idx].append(l_raw_mean)
                             brightness_median_data[data_idx].append(l_raw_median)
                             blue_mean_data[data_idx].append(b_raw_mean)
                             blue_median_data[data_idx].append(b_raw_median)
+                            pixel_count_data[data_idx].append(raw_pixel_count)
                     else:
                         brightness_mean_data[data_idx].append(0.0)
                         brightness_median_data[data_idx].append(0.0)
                         blue_mean_data[data_idx].append(0.0)
                         blue_median_data[data_idx].append(0.0)
+                        pixel_count_data[data_idx].append(0)
 
                 frames_processed += 1
 
@@ -220,6 +265,10 @@ class AnalysisWorker(QtCore.QObject):
                 return
 
             elapsed_seconds = time.time() - start_time
+            for roi_idx in non_background_rois:
+                mask_status.setdefault(
+                    roi_idx, MASK_STATUS_MISSING if req.use_fixed_mask else MASK_STATUS_NOT_REQUESTED
+                )
             self.finished.emit(
                 AnalysisResult(
                     brightness_mean_data=brightness_mean_data,
@@ -234,6 +283,11 @@ class AnalysisWorker(QtCore.QObject):
                     start_frame=req.start_frame,
                     end_frame=req.end_frame,
                     truncated=truncated,
+                    pixel_count_data=pixel_count_data,
+                    fps=video_fps,
+                    request=req,
+                    mask_status=mask_status,
+                    seek_warning=seek_warning,
                 )
             )
         except cv2.error as exc:
