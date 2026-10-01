@@ -166,3 +166,130 @@ def test_capture_from_current_and_per_roi_auto_capture_use_the_same_rule(
     finally:
         window.cap = None
         window.close()
+
+
+def _assert_readout_matches_worker(window: VideoAnalyzer, frame: np.ndarray, monkeypatch, tmp_path) -> None:
+    window.frame = frame
+    window._update_current_brightness_display()
+    readout_text = window.brightness_display_label.text()
+    analysis, _ = window._preview_frame_analysis()
+
+    request = _request_from_ui(window, monkeypatch, tmp_path)
+    result = _run_worker(request, frame, monkeypatch)
+
+    assert [roi.roi_idx for roi in analysis.rois] == result.non_background_rois
+    expected_threshold = analysis.threshold if analysis.threshold is not None else 0.0
+    assert result.background_values_per_frame == [expected_threshold]
+    for data_idx, roi in enumerate(analysis.rois):
+        # Bit-identical: the readout and the worker run the same function.
+        assert roi.mean == result.brightness_mean_data[data_idx][0]
+        assert roi.median == result.brightness_median_data[data_idx][0]
+        assert roi.blue_mean == result.blue_mean_data[data_idx][0]
+        assert roi.blue_median == result.blue_median_data[data_idx][0]
+        assert roi.pixel_count == result.pixel_count_data[data_idx][0]
+        if roi.thresholded:
+            assert f"{result.brightness_mean_data[data_idx][0]:.1f}, " in readout_text
+        assert f"Blue: {result.blue_mean_data[data_idx][0]:.0f}" in readout_text
+
+
+def test_readout_matches_analysis_in_manual_threshold_mode(
+    qt_application: QtWidgets.QApplication, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    window = VideoAnalyzer()
+    try:
+        window.rects = [((0, 0), (40, 40)), ((20, 0), (40, 40)), ((5, 5), (15, 15))]
+        window.background_roi_idx = None
+        window.manual_threshold = 60.0
+        window.morphological_kernel_size = 3
+        window.noise_floor_threshold = 70.0
+
+        _assert_readout_matches_worker(window, _graded_frame(), monkeypatch, tmp_path)
+
+        analysis, _ = window._preview_frame_analysis()
+        assert analysis.threshold == 60.0
+        # The manual threshold changes what is measured; the readout must show it
+        # (it used to show raw L* only whenever no background ROI was set).
+        window._update_current_brightness_display()
+        assert "Thr-Sub" in window.brightness_display_label.text()
+        assert analysis.rois[0].mean != analysis.rois[0].stats.l_raw_mean
+    finally:
+        window.close()
+
+
+def test_readout_matches_analysis_in_background_roi_mode(
+    qt_application: QtWidgets.QApplication, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    window = VideoAnalyzer()
+    try:
+        window.rects = [((0, 0), (40, 40)), ((20, 0), (40, 40)), ((0, 30), (10, 40))]
+        window.background_roi_idx = 2
+        window.manual_threshold = 99.0  # ignored while a background ROI is set
+        window.background_percentile = 80.0
+        window.morphological_kernel_size = 3
+
+        _assert_readout_matches_worker(window, _graded_frame(), monkeypatch, tmp_path)
+
+        analysis, _ = window._preview_frame_analysis()
+        assert analysis.threshold == pytest.approx(window._compute_background_brightness(window.frame))
+    finally:
+        window.close()
+
+
+def test_readout_matches_analysis_in_fixed_mask_mode(
+    qt_application: QtWidgets.QApplication, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    window = VideoAnalyzer()
+    try:
+        window.rects = [((0, 0), (40, 40)), ((20, 0), (40, 40))]
+        window.background_roi_idx = None
+        window.manual_threshold = 75.0
+        window.morphological_kernel_size = 3
+        window.frame = _graded_frame()
+        window.frame_slider.setRange(0, 10)
+        window._capture_fixed_masks(source_frame_idx=0)
+        assert window.use_fixed_mask
+
+        # Measure a different (dimmer) frame through the captured masks.
+        dimmer = (_graded_frame().astype(np.int16) - 40).clip(0, 255).astype(np.uint8)
+        _assert_readout_matches_worker(window, dimmer, monkeypatch, tmp_path)
+
+        analysis, _ = window._preview_frame_analysis()
+        assert [roi.mask_status for roi in analysis.rois] == [MASK_STATUS_APPLIED, MASK_STATUS_APPLIED]
+    finally:
+        window.close()
+
+
+def test_background_percentile_computed_once_per_frame_change(
+    qt_application: QtWidgets.QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ecl_analysis.analysis.frame as frame_module
+
+    window = VideoAnalyzer()
+    try:
+        window.rects = [((0, 0), (40, 40)), ((0, 30), (10, 40))]
+        window.background_roi_idx = 1
+        window.show_pixel_mask = True
+
+        calls = []
+        real = frame_module.compute_background_brightness
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(frame_module, "compute_background_brightness", counting)
+
+        for expected_calls, frame in enumerate([_graded_frame(), _graded_frame()], start=1):
+            # What a frame change refreshes: overlay, readout, threshold display.
+            window.frame = frame
+            window.show_frame()
+            window._update_current_brightness_display()
+            window._update_threshold_display()
+            assert len(calls) == expected_calls
+
+        # A settings change recomputes.
+        window.background_percentile = 50.0
+        window._update_threshold_display()
+        assert len(calls) == 3
+    finally:
+        window.close()

@@ -20,8 +20,17 @@ from .analysis.brightness import (
     compute_l_star_frame as analysis_compute_l_star_frame,
 )
 from .analysis.duration import validate_run_duration as analysis_validate_run_duration
-from .analysis.frame import build_roi_mask
-from .analysis.models import AnalysisRequest, AnalysisResult, has_analyzable_rois
+from .analysis.frame import FrameAnalysis, FrameAnalysisSettings, analyze_frame, build_roi_mask
+from .analysis.models import (
+    MASK_STATUS_APPLIED,
+    MASK_STATUS_SHAPE_MISMATCH,
+    THRESHOLD_MODE_BACKGROUND_ROI,
+    THRESHOLD_MODE_NONE,
+    AnalysisRequest,
+    AnalysisResult,
+    has_analyzable_rois,
+    resolve_threshold_mode,
+)
 from .audio import AudioAnalyzer, AudioManager
 from .cache import FrameCache
 from .constants import (
@@ -519,6 +528,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Threshold / background
         self.manual_threshold = DEFAULT_MANUAL_THRESHOLD
         self.background_roi_idx = None       # index into self.rects
+        # analyze_frame() result for the displayed frame (see _preview_frame_analysis)
+        self._preview_analysis_cache = None
         
         # Pixel visualization
         self.show_pixel_mask = False
@@ -2432,61 +2443,38 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.brightness_display_label.setText("N/A")
             return
 
-        roi_data = []
-        background_brightness = None
-        fh, fw = self.frame.shape[:2]
-        
-        # Calculate background brightness if background ROI is defined
-        if self.background_roi_idx is not None:
-            background_brightness = self._compute_background_brightness(self.frame)
-        
-        for idx, (pt1, pt2) in enumerate(self.rects):
-            # Handle background ROI separately
-            if idx == self.background_roi_idx:
-                continue
-                
-            # Ensure ROI coordinates are valid within the frame
-            x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, fw, fh)
-
-            if x2 > x1 and y2 > y1: # Check for valid ROI area
-                roi = self.frame[y1:y2, x1:x2]
-                roi_mask = None
-                if self.use_fixed_mask and idx < len(self.fixed_roi_masks):
-                    roi_mask = self.fixed_roi_masks[idx]
-                    if isinstance(roi_mask, np.ndarray) and roi_mask.shape[:2] != roi.shape[:2]:
-                        roi_mask = None
-                brightness_stats = self._compute_brightness_stats(roi, background_brightness, roi_mask)
-                l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median = brightness_stats[:6]
-                roi_data.append((idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median))
-            else:
-                roi_data.append((idx, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)) # Append zeros if ROI is invalid/empty
-
-        if roi_data:
-            # Build comprehensive display
-            display_lines = ["Current Brightness:"]
-            
-            for idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median in roi_data:
-                if self.background_roi_idx is not None:
-                    # Show L* with background subtraction and blue channel
-                    display_lines.append(f"ROI {idx+1}: L* {l_raw_mean:.1f} (BG-Sub: {l_bg_sub_mean:.1f}) | Blue: {b_raw_mean:.0f}")
-                else:
-                    # Show raw L* and blue channel when no background ROI
-                    display_lines.append(f"ROI {idx+1}: L* {l_raw_mean:.1f} | Blue: {b_raw_mean:.0f}")
-            
-            # Add background ROI info if defined
-            if self.background_roi_idx is not None and background_brightness is not None:
-                # Calculate blue channel for background ROI
-                bg_pt1, bg_pt2 = self.rects[self.background_roi_idx]
-                bg_x1, bg_y1, bg_x2, bg_y2 = roi_slice_bounds(bg_pt1, bg_pt2, fw, fh)
-                
-                if bg_x2 > bg_x1 and bg_y2 > bg_y1:
-                    bg_roi = self.frame[bg_y1:bg_y2, bg_x1:bg_x2]
-                    _, _, _, _, bg_b_mean, _, _, _ = self._compute_brightness_stats(bg_roi)
-                    display_lines.append(f"Background: L* {background_brightness:.1f} | Blue: {bg_b_mean:.0f}")
-            
-            self.brightness_display_label.setText("\n".join(display_lines))
-        else:
+        # Same per-frame computation the analysis worker runs, so the readout
+        # shows the values a run would export for this frame.
+        analysis, _ = self._preview_frame_analysis()
+        if analysis is None or not analysis.rois:
             self.brightness_display_label.setText("N/A")
+            return
+
+        display_lines = ["Current Brightness:"]
+        sub_label = "BG-Sub" if analysis.threshold_mode == THRESHOLD_MODE_BACKGROUND_ROI else "Thr-Sub"
+        for roi_result in analysis.rois:
+            line = f"ROI {roi_result.roi_idx + 1}: L* {roi_result.stats.l_raw_mean:.1f}"
+            if roi_result.thresholded:
+                # Exported L*: threshold-subtracted over the analyzed pixels
+                line += f" ({sub_label}: {roi_result.mean:.1f}, {roi_result.pixel_count:,} px)"
+            line += f" | Blue: {roi_result.blue_mean:.0f}"
+            if roi_result.mask_status == MASK_STATUS_SHAPE_MISMATCH:
+                line += " [fixed mask ignored: size mismatch]"
+            display_lines.append(line)
+
+        # Add background ROI info if defined
+        if self.background_roi_idx is not None and analysis.threshold is not None:
+            fh, fw = self.frame.shape[:2]
+            bg_pt1, bg_pt2 = self.rects[self.background_roi_idx]
+            bg_x1, bg_y1, bg_x2, bg_y2 = roi_slice_bounds(bg_pt1, bg_pt2, fw, fh)
+            if bg_x2 > bg_x1 and bg_y2 > bg_y1:
+                bg_roi = self.frame[bg_y1:bg_y2, bg_x1:bg_x2]
+                _, _, _, _, bg_b_mean, _, _, _ = self._compute_brightness_stats(bg_roi)
+                display_lines.append(f"Background: L* {analysis.threshold:.1f} | Blue: {bg_b_mean:.0f}")
+        elif analysis.threshold is not None:
+            display_lines.append(f"Manual threshold: L* {analysis.threshold:.1f}")
+
+        self.brightness_display_label.setText("\n".join(display_lines))
 
 
     # --- ROI Management ---
@@ -2808,13 +2796,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _calculate_background_threshold(self) -> Optional[float]:
         """Calculate the current background threshold based on background ROI or manual setting.
 
-        Delegates to the same percentile-based helper used by the analysis worker
-        (`_compute_background_brightness`) so the displayed threshold always matches
-        what is actually applied during analysis.
+        Taken from the same per-frame analysis the worker runs
+        (`analysis.frame.analyze_frame`, cached per displayed frame) so the
+        displayed threshold always matches what is actually applied during analysis.
         """
-        if self.background_roi_idx is not None and self.frame is not None:
+        if self.background_roi_idx is not None and self.frame is not None and self.rects:
             try:
-                return self._compute_background_brightness(self.frame)
+                analysis, _ = self._preview_frame_analysis()
+                return analysis.threshold if analysis is not None else None
             except BackgroundComputationError:
                 # Display-only path: log and show no value; the analysis worker
                 # still fails loudly if the same computation breaks during a run.
@@ -2836,6 +2825,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} (calculating...)")
             else:
                 self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} (no frame)")
+        elif resolve_threshold_mode(self.background_roi_idx, self.manual_threshold) == THRESHOLD_MODE_NONE:
+            # Manual threshold of 0 disables thresholding: the analysis uses the whole ROI
+            self.threshold_display_label.setText("Active Threshold: None (manual threshold 0, whole ROI)")
         else:
             # Manual threshold mode
             self.threshold_display_label.setText(f"Active Threshold: Manual ({self.manual_threshold:.2f} L*)")
@@ -2858,38 +2850,29 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """
         overlay = frame.copy()
 
-        # Precompute L* and derive the same threshold the analysis worker would
-        # apply (background ROI when configured, manual threshold otherwise).
-        l_star_frame = self._compute_l_star_frame(frame)
+        # Reuse the displayed frame's analysis (cached): the same threshold, ROI
+        # bounds and fixed-mask decisions the analysis worker would apply.
         try:
-            effective_threshold = self._effective_analysis_threshold(frame, frame_l_star=l_star_frame)
+            analysis, l_star_frame = self._preview_frame_analysis()
         except BackgroundComputationError:
             logging.exception("Pixel mask overlay skipped: background computation failed")
             self.statusBar().showMessage("Pixel mask overlay unavailable: background computation failed")
             return frame
+        if analysis is None or l_star_frame is None or l_star_frame.shape[:2] != frame.shape[:2]:
+            return frame
+        effective_threshold = analysis.threshold
 
-        for roi_idx, (pt1, pt2) in enumerate(self.rects):
-            # Skip background ROI
-            if roi_idx == self.background_roi_idx:
-                continue
-                
-            # Extract ROI bounds
-            fh, fw = frame.shape[:2]
-            x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, fw, fh)
-            
-            if x2 > x1 and y2 > y1:
+        for roi_result in analysis.rois:
+            roi_idx = roi_result.roi_idx
+            x1, y1, x2, y2 = roi_result.bounds
+
+            if not roi_result.is_empty:
                 roi = frame[y1:y2, x1:x2]
                 roi_l_star = l_star_frame[y1:y2, x1:x2]
                 try:
-                    use_fixed = self.use_fixed_mask and roi_idx < len(self.fixed_roi_masks) and isinstance(self.fixed_roi_masks[roi_idx], np.ndarray)
                     mask = None
-                    if use_fixed:
-                        fixed_mask = self.fixed_roi_masks[roi_idx]
-                        if fixed_mask is not None and fixed_mask.shape[:2] == roi.shape[:2]:
-                            mask = fixed_mask.astype(bool)
-                        else:
-                            # Shape mismatch - ignore fixed mask
-                            mask = None
+                    if roi_result.mask_status == MASK_STATUS_APPLIED:
+                        mask = self.fixed_roi_masks[roi_idx].astype(bool)
 
                     if mask is None:
                         # Derive mask from current frame using cached L* channel
@@ -2952,11 +2935,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             QtWidgets.QMessageBox.information(self, "Capture Mask", "Load a video and define at least one ROI.")
             return
 
-        frame = self.frame
-        # Determine the analysis-equivalent threshold once from the current frame
-        l_star_frame = self._compute_l_star_frame(frame)
+        # Use the analysis-equivalent threshold of the current frame
         try:
-            effective_threshold = self._effective_analysis_threshold(frame, frame_l_star=l_star_frame)
+            analysis, l_star_frame = self._preview_frame_analysis()
+            effective_threshold = analysis.threshold
         except BackgroundComputationError:
             logging.exception("Mask capture aborted: background computation failed")
             QtWidgets.QMessageBox.warning(
@@ -4408,23 +4390,58 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             frame_l_star=frame_l_star,
         )
 
-    def _effective_analysis_threshold(
-        self,
-        frame: np.ndarray,
-        frame_l_star: Optional[np.ndarray] = None,
-    ) -> Optional[float]:
-        """Return the threshold the analysis worker would apply to this frame.
+    def _frame_analysis_settings(self) -> FrameAnalysisSettings:
+        """Current settings, as the analysis worker receives them in its AnalysisRequest."""
+        return FrameAnalysisSettings(
+            background_percentile=self.background_percentile,
+            morphological_kernel_size=self.morphological_kernel_size,
+            noise_floor_threshold=self.noise_floor_threshold,
+            manual_threshold=float(self.manual_threshold),
+            use_fixed_mask=self.use_fixed_mask,
+        )
 
-        Mirrors AnalysisWorker semantics: the background-ROI percentile value
-        when a background ROI is configured, otherwise the manual threshold
-        when it is above zero. Returns None when analysis would not gate pixels.
+    def _preview_frame_analysis(self) -> Tuple[Optional[FrameAnalysis], Optional[np.ndarray]]:
+        """Return ``analyze_frame()`` for the displayed frame plus its L* channel.
+
+        This is the exact per-frame computation the analysis worker runs. The
+        result is cached for the displayed frame object and the inputs that
+        affect it (ROIs, background ROI, settings, fixed masks), so the live
+        readout, threshold display, pixel-mask overlay and mask capture share one
+        background-percentile/ROI-stats computation per frame change.
 
         Raises BackgroundComputationError when a configured background ROI
-        fails to compute; callers must surface the failure rather than fall
-        back to a fabricated threshold.
+        fails; failures are not cached.
         """
-        if self.background_roi_idx is not None:
-            return self._compute_background_brightness(frame, frame_l_star=frame_l_star)
-        if self.manual_threshold > 0:
-            return float(self.manual_threshold)
-        return None
+        frame = self.frame
+        if frame is None:
+            return None, None
+
+        masks = tuple(self.fixed_roi_masks) if self.use_fixed_mask else ()
+        key = (
+            tuple((tuple(pt1), tuple(pt2)) for pt1, pt2 in self.rects),
+            self.background_roi_idx,
+            self._frame_analysis_settings(),
+        )
+        cache = getattr(self, "_preview_analysis_cache", None)
+        l_star_frame = None
+        if cache is not None and cache[0] is frame:
+            _, l_star_frame, cached_key, cached_masks, cached_analysis = cache
+            if (
+                cached_key == key
+                and len(cached_masks) == len(masks)
+                and all(cached is current for cached, current in zip(cached_masks, masks))
+            ):
+                return cached_analysis, l_star_frame
+        if l_star_frame is None:
+            l_star_frame = self._compute_l_star_frame(frame)
+
+        analysis = analyze_frame(
+            frame,
+            self.rects,
+            self.background_roi_idx,
+            key[2],
+            masks=masks,
+            frame_l_star=l_star_frame,
+        )
+        self._preview_analysis_cache = (frame, l_star_frame, key, masks, analysis)
+        return analysis, l_star_frame
