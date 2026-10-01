@@ -397,3 +397,41 @@ def test_deleting_background_roi_refreshes_readout(
         assert "Thr-Sub" in readout  # manual threshold (60) is the rule again
     finally:
         window.close()
+
+
+class _CountedFrameCapture(_FrameCapture):
+    """_FrameCapture that also reports a frame count, as load_video requires."""
+
+    def get(self, prop):
+        if prop == cv2.CAP_PROP_FRAME_COUNT:
+            return float(len(self._frames))
+        return super().get(prop)
+
+
+def _load_frames(window: VideoAnalyzer, tmp_path, monkeypatch: pytest.MonkeyPatch, frames, name: str) -> None:
+    video = tmp_path / name
+    video.write_bytes(b"stub")
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: _CountedFrameCapture(frames))
+    monkeypatch.setattr(window, "_add_recent_file", lambda path: None)
+    window.video_path = str(video)
+    window.load_video()
+
+
+def test_reset_state_drops_cached_preview_analysis(
+    qt_application: QtWidgets.QApplication,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window = VideoAnalyzer()
+    try:
+        _load_frames(window, tmp_path, monkeypatch, [_graded_frame() for _ in range(3)], "clip.avi")
+        window.rects = [((1, 1), (15, 15))]
+        window._preview_frame_analysis()
+        assert window._preview_analysis_cache is not None
+
+        window._reset_state()
+
+        # The closed video's frame and L* channel must not stay referenced.
+        assert window._preview_analysis_cache is None
+    finally:
+        window.close()

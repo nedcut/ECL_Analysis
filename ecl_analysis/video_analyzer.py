@@ -2219,6 +2219,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.current_frame_index = 0
         self.total_frames = 0
         self.cap = None
+        # Drop the cached preview analysis so it no longer holds the closed
+        # video's frame and L* channel.
+        self._preview_analysis_cache = None
         self.rects = []
         self.selected_rect_idx = None
         self.start_frame = 0
