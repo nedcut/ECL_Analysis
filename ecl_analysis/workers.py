@@ -13,9 +13,13 @@ import cv2
 import numpy as np
 from PyQt5 import QtCore
 
-from .analysis.background import compute_background_brightness
 from .analysis.brightness import compute_l_star_frame
-from .analysis.frame import FrameAnalysisSettings, analyze_frame
+from .analysis.frame import (
+    FrameAnalysisSettings,
+    analyze_frame,
+    build_roi_mask,
+    resolve_frame_threshold,
+)
 from .analysis.models import (
     MASK_STATUS_MISSING,
     MASK_STATUS_NOT_REQUESTED,
@@ -57,6 +61,9 @@ class MaskScanRequest:
     step: int
     background_percentile: float
     morphological_kernel_size: int
+    # Manual threshold mode (no background ROI): masks gate on L* > this value,
+    # matching "Capture From Current" and the analysis; 0 disables it.
+    manual_threshold: float = 0.0
 
 
 @dataclass
@@ -456,32 +463,21 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
                     continue
 
                 l_star_frame = compute_l_star_frame(frame)
-                background = compute_background_brightness(
-                    frame=frame,
-                    rects=req.rects,
-                    background_roi_idx=req.background_roi_idx,
-                    background_percentile=req.background_percentile,
+                threshold = resolve_frame_threshold(
+                    frame,
+                    req.rects,
+                    req.background_roi_idx,
+                    req.background_percentile,
+                    req.manual_threshold,
                     frame_l_star=l_star_frame,
                 )
-
-                frame_height, frame_width = frame.shape[:2]
-                pt1, pt2 = req.rects[roi_idx]
-                x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, frame_width, frame_height)
-
-                if x2 > x1 and y2 > y1:
-                    roi_l_star = l_star_frame[y1:y2, x1:x2]
-                    if background is not None:
-                        mask = roi_l_star > background
-                        if np.any(mask):
-                            kernel = cv2.getStructuringElement(
-                                cv2.MORPH_ELLIPSE,
-                                (req.morphological_kernel_size, req.morphological_kernel_size),
-                            )
-                            mask_uint8 = mask.astype(np.uint8) * 255
-                            cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-                            mask = cleaned > 0
-                    else:
-                        mask = np.ones(roi_l_star.shape, dtype=bool)
+                mask = build_roi_mask(
+                    l_star_frame,
+                    req.rects[roi_idx],
+                    threshold,
+                    req.morphological_kernel_size,
+                )
+                if mask is not None:
                     masks[roi_idx] = mask
                     sources[roi_idx] = frame_idx
 

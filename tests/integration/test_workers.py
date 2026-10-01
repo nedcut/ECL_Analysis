@@ -453,3 +453,37 @@ def test_per_roi_mask_capture_worker_returns_sources(monkeypatch):
     assert result.sources[1] == 1
     assert result.masks[0] is not None
     assert result.masks[1] is not None
+
+
+def test_per_roi_mask_capture_worker_applies_manual_threshold(monkeypatch):
+    """With no background ROI, per-ROI auto-capture must gate on the manual
+    threshold (like "Capture From Current" and the analysis) instead of
+    producing all-ones masks."""
+    frame = np.zeros((4, 6, 3), dtype=np.uint8)
+    frame[:, 3:, :] = 220  # bright right half
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture([frame, frame]))
+
+    def capture(manual_threshold):
+        request = MaskScanRequest(
+            video_path="dummy.mp4",
+            rects=[((0, 0), (6, 4))],
+            background_roi_idx=None,
+            start_frame=0,
+            end_frame=1,
+            step=1,
+            background_percentile=90.0,
+            morphological_kernel_size=1,
+            manual_threshold=manual_threshold,
+        )
+        worker = PerRoiMaskCaptureWorker(request)
+        captured: Dict[str, object] = {}
+        worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+        worker.run()
+        return captured["result"].masks[0]
+
+    gated = capture(50.0)
+    assert not gated[:, :3].any()
+    assert gated[:, 3:].all()
+
+    # 0 disables the manual threshold: the analysis then uses the whole ROI.
+    assert capture(0.0).all()

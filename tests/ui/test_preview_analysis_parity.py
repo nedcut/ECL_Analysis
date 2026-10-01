@@ -119,3 +119,50 @@ def test_edge_touching_roi_mask_captured_from_current_is_applied_by_analysis(
         assert result.pixel_count_data[0][0] == 40 * 20
     finally:
         window.close()
+
+
+def test_capture_from_current_and_per_roi_auto_capture_use_the_same_rule(
+    qt_application: QtWidgets.QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both capture paths must build identical masks from the same frame and
+    settings in manual-threshold mode (no background ROI)."""
+    window = VideoAnalyzer()
+    try:
+        frame = _graded_frame()
+        window.frame = frame
+        window.rects = [((0, 0), (40, 40)), ((20, 0), (40, 40))]
+        window.background_roi_idx = None
+        window.manual_threshold = 70.0
+        window.morphological_kernel_size = 3
+        window.frame_slider.setRange(0, 10)
+
+        window._capture_fixed_masks(source_frame_idx=0)
+        from_current = list(window.fixed_roi_masks)
+
+        # Build the per-ROI scan request exactly as the UI does.
+        window.cap = object()
+        window.video_path = "dummy.mp4"
+        window.total_frames = 2
+        window.start_frame = 0
+        window.end_frame = 1
+        started = {}
+        monkeypatch.setattr(window, "_start_mask_worker", lambda worker, **kwargs: started.setdefault("worker", worker))
+        window._auto_capture_per_roi_brightest_masks()
+        worker = started["worker"]
+        assert worker._request.manual_threshold == 70.0
+
+        monkeypatch.setattr(cv2, "VideoCapture", lambda _path: _FrameCapture([frame, frame]))
+        captured: Dict[str, object] = {}
+        worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+        worker.run()
+        auto = captured["result"].masks
+
+        for current_mask, auto_mask in zip(from_current, auto):
+            assert current_mask is not None and auto_mask is not None
+            assert np.array_equal(current_mask, auto_mask)
+        # The threshold actually gated pixels (dark half excluded).
+        assert not from_current[0][:, :20].any()
+    finally:
+        window.cap = None
+        window.close()

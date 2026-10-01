@@ -20,6 +20,7 @@ from .analysis.brightness import (
     compute_l_star_frame as analysis_compute_l_star_frame,
 )
 from .analysis.duration import validate_run_duration as analysis_validate_run_duration
+from .analysis.frame import build_roi_mask
 from .analysis.models import AnalysisRequest, AnalysisResult, has_analyzable_rois
 from .audio import AudioAnalyzer, AudioManager
 from .cache import FrameCache
@@ -2952,7 +2953,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
 
         frame = self.frame
-        fh, fw = frame.shape[:2]
         # Determine the analysis-equivalent threshold once from the current frame
         l_star_frame = self._compute_l_star_frame(frame)
         try:
@@ -2974,36 +2974,20 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         masks: List[Optional[np.ndarray]] = []
         sources: List[Optional[int]] = []
         created_any = False
-        for roi_idx, (pt1, pt2) in enumerate(self.rects):
+        for roi_idx, rect in enumerate(self.rects):
             if roi_idx == self.background_roi_idx:
                 masks.append(None)
                 sources.append(None)
                 continue
-            x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, fw, fh)
-            if x2 > x1 and y2 > y1:
-                roi_l_star = l_star_frame[y1:y2, x1:x2]
-                try:
-                    if effective_threshold is not None:
-                        mask = roi_l_star > effective_threshold
-                        # Morphological cleanup similar to analysis
-                        if np.any(mask):
-                            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.morphological_kernel_size, self.morphological_kernel_size))
-                            mask_uint8 = mask.astype(np.uint8) * 255
-                            cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-                            mask = cleaned > 0
-                    else:
-                        # No thresholding configured - analysis uses the full ROI
-                        mask = np.ones(roi_l_star.shape, dtype=bool)
-                    masks.append(mask)
-                    sources.append(source_frame_idx)
-                    created_any = True
-                except Exception as e:
-                    logging.warning(f"Failed to capture mask for ROI {roi_idx+1}: {e}")
-                    masks.append(None)
-                    sources.append(None)
-            else:
-                masks.append(None)
-                sources.append(None)
+            try:
+                # Same rule as per-ROI auto-capture (analysis.frame.build_roi_mask)
+                mask = build_roi_mask(l_star_frame, rect, effective_threshold, self.morphological_kernel_size)
+            except Exception as e:
+                logging.warning(f"Failed to capture mask for ROI {roi_idx+1}: {e}")
+                mask = None
+            masks.append(mask)
+            sources.append(source_frame_idx if mask is not None else None)
+            created_any = created_any or mask is not None
 
         self.fixed_roi_masks = masks
         self.mask_source_frames = sources
@@ -3063,6 +3047,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             step=step,
             background_percentile=self.background_percentile,
             morphological_kernel_size=self.morphological_kernel_size,
+            manual_threshold=float(self.manual_threshold),
         )
         self._start_mask_worker(
             worker=BrightestFrameWorker(request),
@@ -3117,6 +3102,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             step=step,
             background_percentile=self.background_percentile,
             morphological_kernel_size=self.morphological_kernel_size,
+            manual_threshold=float(self.manual_threshold),
         )
         self._start_mask_worker(
             worker=PerRoiMaskCaptureWorker(request),
