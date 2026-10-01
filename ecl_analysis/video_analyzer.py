@@ -61,6 +61,7 @@ from .roi_geometry import (
     map_frame_to_label_point as geometry_map_frame_to_label_point,
     map_label_to_frame_point as geometry_map_label_to_frame_point,
     map_label_to_frame_rect as geometry_map_label_to_frame_rect,
+    roi_slice_bounds,
     scale_value_for_pixmap as geometry_scale_value_for_pixmap,
 )
 
@@ -2444,10 +2445,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 continue
                 
             # Ensure ROI coordinates are valid within the frame
-            x1 = max(0, min(pt1[0], fw - 1))
-            y1 = max(0, min(pt1[1], fh - 1))
-            x2 = max(0, min(pt2[0], fw - 1))
-            y2 = max(0, min(pt2[1], fh - 1))
+            x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, fw, fh)
 
             if x2 > x1 and y2 > y1: # Check for valid ROI area
                 roi = self.frame[y1:y2, x1:x2]
@@ -2478,10 +2476,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if self.background_roi_idx is not None and background_brightness is not None:
                 # Calculate blue channel for background ROI
                 bg_pt1, bg_pt2 = self.rects[self.background_roi_idx]
-                bg_x1 = max(0, min(bg_pt1[0], fw - 1))
-                bg_y1 = max(0, min(bg_pt1[1], fh - 1))
-                bg_x2 = max(0, min(bg_pt2[0], fw - 1))
-                bg_y2 = max(0, min(bg_pt2[1], fh - 1))
+                bg_x1, bg_y1, bg_x2, bg_y2 = roi_slice_bounds(bg_pt1, bg_pt2, fw, fh)
                 
                 if bg_x2 > bg_x1 and bg_y2 > bg_y1:
                     bg_roi = self.frame[bg_y1:bg_y2, bg_x1:bg_x2]
@@ -2879,10 +2874,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 
             # Extract ROI bounds
             fh, fw = frame.shape[:2]
-            x1 = max(0, min(pt1[0], fw - 1))
-            y1 = max(0, min(pt1[1], fh - 1))
-            x2 = max(0, min(pt2[0], fw - 1))
-            y2 = max(0, min(pt2[1], fh - 1))
+            x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, fw, fh)
             
             if x2 > x1 and y2 > y1:
                 roi = frame[y1:y2, x1:x2]
@@ -2987,10 +2979,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                 masks.append(None)
                 sources.append(None)
                 continue
-            x1 = max(0, min(pt1[0], fw - 1))
-            y1 = max(0, min(pt1[1], fh - 1))
-            x2 = max(0, min(pt2[0], fw - 1))
-            y2 = max(0, min(pt2[1], fh - 1))
+            x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, fw, fh)
             if x2 > x1 and y2 > y1:
                 roi_l_star = l_star_frame[y1:y2, x1:x2]
                 try:

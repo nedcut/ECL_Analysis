@@ -25,6 +25,7 @@ from .analysis.models import (
     RoiRect,
 )
 from .audio import AudioAnalyzer
+from .roi_geometry import roi_slice_bounds
 
 
 class CancellationToken:
@@ -42,24 +43,6 @@ class CancellationToken:
 
     def is_cancelled(self) -> bool:
         return self._event.is_set()
-
-
-def _normalized_slice_bounds(
-    pt1: tuple[int, int],
-    pt2: tuple[int, int],
-    frame_width: int,
-    frame_height: int,
-) -> tuple[int, int, int, int]:
-    """Return clamped, normalized ROI bounds for NumPy slicing (exclusive end)."""
-    left, right = sorted((int(pt1[0]), int(pt2[0])))
-    top, bottom = sorted((int(pt1[1]), int(pt2[1])))
-
-    x1 = max(0, min(left, frame_width))
-    x2 = max(0, min(right, frame_width))
-    y1 = max(0, min(top, frame_height))
-    y2 = max(0, min(bottom, frame_height))
-
-    return x1, y1, x2, y2
 
 
 @dataclass(frozen=True)
@@ -179,7 +162,7 @@ class AnalysisWorker(QtCore.QObject):
                 frame_height, frame_width = frame.shape[:2]
                 for data_idx, roi_idx in enumerate(non_background_rois):
                     pt1, pt2 = req.rects[roi_idx]
-                    x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
+                    x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, frame_width, frame_height)
 
                     if x2 > x1 and y2 > y1:
                         roi = frame[y1:y2, x1:x2]
@@ -397,7 +380,7 @@ class BrightestFrameWorker(QtCore.QObject):
 
                 for roi_idx in non_background_rois:
                     pt1, pt2 = req.rects[roi_idx]
-                    x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
+                    x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, frame_width, frame_height)
                     if x2 > x1 and y2 > y1:
                         roi_l_star = l_star_frame[y1:y2, x1:x2]
                         if roi_l_star.size:
@@ -493,7 +476,7 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
 
                 for roi_idx in roi_indices:
                     pt1, pt2 = req.rects[roi_idx]
-                    x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
+                    x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, frame_width, frame_height)
                     if x2 > x1 and y2 > y1:
                         roi_l_star = l_star_frame[y1:y2, x1:x2]
                         if roi_l_star.size:
@@ -534,7 +517,7 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
 
                 frame_height, frame_width = frame.shape[:2]
                 pt1, pt2 = req.rects[roi_idx]
-                x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
+                x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, frame_width, frame_height)
 
                 if x2 > x1 and y2 > y1:
                     roi_l_star = l_star_frame[y1:y2, x1:x2]
