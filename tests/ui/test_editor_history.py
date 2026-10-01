@@ -73,3 +73,51 @@ def test_roi_addition_supports_undo_and_redo(
     assert window.selected_rect_idx == 0
 
     window.close()
+
+
+def test_clear_all_rectangles_records_a_single_history_entry(
+    qt_application: QtWidgets.QApplication,
+    monkeypatch,
+) -> None:
+    window = VideoAnalyzer()
+    _prepare_loaded_window(window)
+    window.rects = [((10, 10), (50, 50)), ((60, 10), (100, 50))]
+    window.fixed_roi_masks = [np.ones((40, 40), dtype=bool), None]
+    window.mask_source_frames = [3, None]
+    window._set_use_fixed_mask_silently(True)
+    window.update_rect_list()
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: QtWidgets.QMessageBox.Yes,
+    )
+
+    window.clear_all_rectangles()
+
+    assert window.rects == []
+    assert window.use_fixed_mask is False
+    assert not window.use_fixed_mask_checkbox.isChecked()
+    assert [entry.label for entry in window._undo_history] == ["Clear All ROIs"]
+
+    window.undo_last_action()
+    assert len(window.rects) == 2
+    assert window.use_fixed_mask is True
+    assert window.use_fixed_mask_checkbox.isChecked()
+    assert window._undo_history == []
+
+    window.close()
+
+
+def test_user_toggle_of_fixed_mask_still_records_history(
+    qt_application: QtWidgets.QApplication,
+) -> None:
+    window = VideoAnalyzer()
+    _prepare_loaded_window(window)
+    window.rects = [((10, 10), (50, 50))]
+
+    window.use_fixed_mask_checkbox.setChecked(True)
+
+    assert window.use_fixed_mask is True
+    assert [entry.label for entry in window._undo_history] == ["Toggle Fixed Mask"]
+
+    window.close()

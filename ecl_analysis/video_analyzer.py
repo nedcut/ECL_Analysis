@@ -1962,6 +1962,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         else:
             self.mask_pixel_count_label.setText("Mask Pixels: n/a")
 
+    def _set_use_fixed_mask_silently(self, checked: bool):
+        """Programmatically set fixed-mask usage without firing the toggle handler.
+
+        The checkbox handler records a "Toggle Fixed Mask" history entry, which
+        must only happen for user clicks, not as a side effect of other actions.
+        """
+        self.use_fixed_mask = checked
+        was_blocked = self.use_fixed_mask_checkbox.blockSignals(True)
+        self.use_fixed_mask_checkbox.setChecked(checked)
+        self.use_fixed_mask_checkbox.blockSignals(was_blocked)
+
     def _invalidate_fixed_masks(self, reason: str = ""):
         """Clear captured fixed masks when ROIs change or become invalid.
         Optionally provide a reason for UI feedback.
@@ -2186,7 +2197,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Reset fixed masks on new video load
             self.fixed_roi_masks = [None for _ in self.rects]
             self.mask_source_frames = [None for _ in self.rects]
-            self.use_fixed_mask_checkbox.setChecked(False)
+            self._set_use_fixed_mask_silently(False)
             self.mask_status_label.setText("Mask: none")
             self._update_mask_pixel_count_display()
 
@@ -2208,6 +2219,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.cap = None
         self.rects = []
         self.selected_rect_idx = None
+        # ROI-dependent state must go with the ROIs (mirrors clear_all_rectangles);
+        # a stale background index would otherwise apply to newly drawn ROIs.
+        self.background_roi_idx = None
+        self.fixed_roi_masks = []
+        self.mask_source_frames = []
+        self._set_use_fixed_mask_silently(False)
+        self.mask_status_label.setText("Mask: none")
+        self._update_mask_pixel_count_display()
         self.start_frame = 0
         self.end_frame = None
         self.out_paths = []
@@ -2776,7 +2795,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.background_roi_idx = None
             self.fixed_roi_masks = []
             self.mask_source_frames = []
-            self.use_fixed_mask_checkbox.setChecked(False)
+            self._set_use_fixed_mask_silently(False)
             self.mask_status_label.setText("Mask: none")
             self._update_mask_pixel_count_display()
             self.update_rect_list()
