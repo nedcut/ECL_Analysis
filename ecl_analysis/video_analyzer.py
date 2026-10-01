@@ -482,6 +482,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._mask_worker: Optional[QtCore.QObject] = None
         self._mask_progress: Optional[QtWidgets.QProgressDialog] = None
         self._mask_task_type: Optional[str] = None
+
+        # Threads that did not stop when their task was torn down. Their
+        # references must outlive the task: destroying a running QThread aborts.
+        self._stalled_workers: List[Tuple[QtCore.QThread, Optional[QtCore.QObject]]] = []
         
         # Recent files
         self.recent_files = []
@@ -1040,6 +1044,69 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if cancelled_any:
             self.statusBar().showMessage("Cancelling background task...")
             self.results_label.setText("Cancellation requested...")
+
+    def _create_progress_dialog(
+        self, label: str, title: str, minimum: int, maximum: int
+    ) -> QtWidgets.QProgressDialog:
+        """Create a window-modal progress dialog whose Cancel button cancels the active worker."""
+        progress = QtWidgets.QProgressDialog(label, "Cancel", minimum, maximum, self)
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setWindowTitle(title)
+        progress.canceled.connect(self._cancel_active_worker)
+        return progress
+
+    def _close_progress_dialog(self, progress: QtWidgets.QProgressDialog):
+        """Close a worker progress dialog without requesting cancellation.
+
+        In Qt5, QProgressDialog.closeEvent emits ``canceled``; disconnect it
+        first so a programmatic close after success doesn't cancel anything.
+        """
+        try:
+            progress.canceled.disconnect(self._cancel_active_worker)
+        except TypeError:
+            pass  # Already disconnected
+        progress.close()
+        progress.deleteLater()
+
+    def _release_worker_thread(
+        self,
+        thread: Optional[QtCore.QThread],
+        worker: Optional[QtCore.QObject],
+        name: str,
+    ):
+        """Stop a finished task's thread, parking it if it refuses to stop.
+
+        A thread that is still running after shutdown_worker_thread keeps its
+        references in self._stalled_workers (so it is never destroyed while
+        running) and has its worker signals disconnected, so a late result
+        cannot be mistaken for the next task's.
+        """
+        self._prune_stalled_workers()
+        if shutdown_worker_thread(thread, name):
+            return
+
+        if worker is not None:
+            if hasattr(worker, "cancel"):
+                worker.cancel()  # type: ignore[call-arg]
+            for signal_name in ("finished", "error", "cancelled", "progress_changed", "progress_message"):
+                signal = getattr(worker, signal_name, None)
+                if signal is None:
+                    continue
+                try:
+                    signal.disconnect()
+                except TypeError:
+                    pass  # No connections
+        self._stalled_workers.append((thread, worker))
+        self.statusBar().showMessage(
+            f"Warning: the previous {name} task is still stopping in the background."
+        )
+
+    def _prune_stalled_workers(self) -> bool:
+        """Drop references to parked threads that have stopped; return True if any still run."""
+        self._stalled_workers = [
+            (thread, worker) for thread, worker in self._stalled_workers if thread.isRunning()
+        ]
+        return bool(self._stalled_workers)
 
     def _show_shortcuts_dialog(self):
         """Show keyboard shortcuts dialog."""
@@ -2073,6 +2140,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._mask_thread = None
             self._mask_worker = None
         else:
+            all_stopped = False
+        if self._prune_stalled_workers():
             all_stopped = False
 
         if not all_stopped:
@@ -3160,11 +3229,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._set_busy_state(True)
         self.stop_playback()
 
-        progress = QtWidgets.QProgressDialog(label, "Cancel", 0, 100, self)
-        progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle(title)
+        progress = self._create_progress_dialog(label, title, 0, 100)
         progress.setValue(0)
-        progress.canceled.connect(self._cancel_active_worker)
         progress.show()
 
         self._mask_task_type = task_type
@@ -3268,12 +3334,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _cleanup_mask_worker(self):
         """Tear down mask worker resources safely."""
         if self._mask_progress is not None:
-            self._mask_progress.close()
+            self._close_progress_dialog(self._mask_progress)
             self._mask_progress = None
 
-        if shutdown_worker_thread(self._mask_thread, "mask"):
-            self._mask_thread = None
-            self._mask_worker = None
+        self._release_worker_thread(self._mask_thread, self._mask_worker, "mask")
+        self._mask_thread = None
+        self._mask_worker = None
 
         self._mask_task_type = None
         self._set_busy_state(False)
@@ -4000,11 +4066,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._pending_audio_expected_duration = expected_duration
         self.results_label.setText("Audio Detection: analyzing audio for completion beeps...")
 
-        progress = QtWidgets.QProgressDialog("Analyzing audio for completion beeps...", "Cancel", 0, 0, self)
-        progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle("Audio Detection")
-        progress.setRange(0, 0)
-        progress.canceled.connect(self._cancel_active_worker)
+        progress = self._create_progress_dialog("Analyzing audio for completion beeps...", "Audio Detection", 0, 0)
         progress.show()
         self._audio_progress = progress
 
@@ -4108,12 +4170,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _cleanup_audio_worker(self):
         """Tear down audio worker resources safely."""
         if self._audio_progress is not None:
-            self._audio_progress.close()
+            self._close_progress_dialog(self._audio_progress)
             self._audio_progress = None
 
-        if shutdown_worker_thread(self._audio_thread, "audio"):
-            self._audio_thread = None
-            self._audio_worker = None
+        self._release_worker_thread(self._audio_thread, self._audio_worker, "audio")
+        self._audio_thread = None
+        self._audio_worker = None
 
         self._pending_audio_expected_duration = 0.0
         self._set_busy_state(False)
@@ -4203,19 +4265,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.statusBar().showMessage("🔍 Starting brightness analysis...")
         num_frames_to_analyze = request.end_frame - request.start_frame + 1
         non_background_rois = [i for i in range(len(request.rects)) if i != request.background_roi_idx]
-        progress = QtWidgets.QProgressDialog(
+        progress = self._create_progress_dialog(
             f"🔍 Analyzing {num_frames_to_analyze} video frames...\n"
             f"ROIs: {len(non_background_rois)} | Frames: {request.start_frame + 1}-{request.end_frame + 1}",
-            "Cancel",
+            "📊 Brightness Analysis",
             0,
             num_frames_to_analyze,
-            self,
         )
-        progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle("📊 Brightness Analysis")
         progress.setMinimumWidth(420)
         progress.setValue(0)
-        progress.canceled.connect(self._cancel_active_worker)
         progress.show()
         self._analysis_progress = progress
 
@@ -4314,12 +4372,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _cleanup_analysis_worker(self, reset_busy: bool = True):
         """Tear down analysis worker resources safely."""
         if self._analysis_progress is not None:
-            self._analysis_progress.close()
+            self._close_progress_dialog(self._analysis_progress)
             self._analysis_progress = None
 
-        if shutdown_worker_thread(self._analysis_thread, "analysis"):
-            self._analysis_thread = None
-            self._analysis_worker = None
+        self._release_worker_thread(self._analysis_thread, self._analysis_worker, "analysis")
+        self._analysis_thread = None
+        self._analysis_worker = None
 
         if reset_busy:
             self._set_busy_state(False)
