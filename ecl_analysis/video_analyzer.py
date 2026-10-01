@@ -4114,19 +4114,22 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             selected_index = beep_options.index(selected_option)
             selected_beep_time, selected_end_frame = completion_beeps[selected_index]
 
-        cap = cv2.VideoCapture(self.video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
+        if not self.cap or not self.cap.isOpened() or self.total_frames <= 0:
+            self.results_label.setText("Audio Detection: the video is no longer loaded.")
+            return
+        # Same source the worker used to convert beep times into frame numbers.
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        total_frames = self.total_frames
 
         if fps <= 0:
             QtWidgets.QMessageBox.critical(self, "Error", "Could not determine video frame rate.")
             return
 
-        start_time = selected_beep_time - expected_duration
-        calculated_start_frame = max(0, int(start_time * fps))
+        # The window ends on the beep frame and spans exactly expected_duration
+        # worth of frames (inclusive range, so start = end - count + 1).
+        expected_frame_count = max(1, int(round(expected_duration * fps)))
         calculated_end_frame = min(selected_end_frame, total_frames - 1)
-        calculated_start_frame = min(calculated_start_frame, calculated_end_frame)
+        calculated_start_frame = max(0, calculated_end_frame - expected_frame_count + 1)
 
         before = self._capture_editor_snapshot()
         changed = self._apply_analysis_range(
@@ -4148,8 +4151,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             f"(Duration: {actual_duration:.1f}s, Expected: {expected_duration:.1f}s)"
         )
 
-        duration_difference = abs(actual_duration - expected_duration)
-        if duration_difference <= expected_duration * 0.1:
+        # Full confidence means "within the shared run-duration tolerance"
+        # (see ecl_analysis/analysis/duration.py).
+        if self._validate_run_duration(self.start_frame, self.end_frame, expected_duration) >= 1.0:
             self.audio_manager.play_run_detected()
 
     def _on_audio_detection_finished(self, completion_beeps: List[Tuple[float, int]]):
