@@ -23,7 +23,7 @@ def _prepare_loaded_window(window: VideoAnalyzer, total_frames: int = 100) -> No
     window.end_frame = total_frames - 1
     window.current_frame_index = 0
     window.frame_slider.setRange(0, total_frames - 1)
-    window.frame_spinbox.setRange(0, total_frames - 1)
+    window.frame_spinbox.setRange(1, total_frames)
     window._seek_to_frame = lambda frame_index: setattr(window, "current_frame_index", frame_index)
     window._sync_analysis_range_widgets()
 

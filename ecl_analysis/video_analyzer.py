@@ -987,13 +987,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             if self.cap and self.cap.isOpened() and self.total_frames > 0:
                 target_frame = max(0, min(snapshot.current_frame_index, self.total_frames - 1))
-                self.frame_slider.blockSignals(True)
-                self.frame_spinbox.blockSignals(True)
-                self.frame_slider.setValue(target_frame)
-                self.frame_spinbox.setValue(target_frame)
-                self.frame_slider.blockSignals(False)
-                self.frame_spinbox.blockSignals(False)
                 self._seek_to_frame(target_frame)
+                self._sync_frame_navigation_widgets()
             else:
                 self.current_frame_index = snapshot.current_frame_index
                 self.update_frame_label(reset=self.total_frames == 0)
@@ -1443,7 +1438,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         frame_input_layout.addWidget(QtWidgets.QLabel("Go to:"))
         self.frame_spinbox = QtWidgets.QSpinBox()
         self.frame_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
-        self.frame_spinbox.setToolTip("Enter frame number directly")
+        self.frame_spinbox.setToolTip("Enter frame number directly (1-based)")
         self.frame_spinbox.setAlignment(QtCore.Qt.AlignCenter)
         self.frame_spinbox.setFixedWidth(80)
         frame_input_layout.addWidget(self.frame_spinbox)
@@ -2244,8 +2239,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Update UI elements for the loaded video
             self.frame_slider.setRange(0, self.total_frames - 1)
             self.frame_slider.setValue(0)
-            self.frame_spinbox.setRange(0, self.total_frames - 1)
-            self.frame_spinbox.setValue(0)
+            self.frame_spinbox.setRange(1, self.total_frames)
+            self.frame_spinbox.setValue(1)
             self.update_frame_label()
             self._sync_analysis_range_widgets()
             self.show_frame()
@@ -2326,16 +2321,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Handles frame changes initiated by the slider."""
         if self.cap and self.cap.isOpened() and value != self.current_frame_index:
             self._seek_to_frame(value)
-            # Sync spinbox without triggering its signal
-            self.frame_spinbox.blockSignals(True)
-            self.frame_spinbox.setValue(value)
-            self.frame_spinbox.blockSignals(False)
+            # Sync widgets to the frame actually shown (the seek may have failed)
+            self._sync_frame_navigation_widgets()
 
     def spinbox_frame_changed(self, value: int):
-        """Handles frame changes initiated by the spinbox."""
-        if self.cap and self.cap.isOpened() and value != self.current_frame_index:
+        """Handles frame changes initiated by the spinbox (1-based frame numbers)."""
+        frame_index = value - 1
+        if self.cap and self.cap.isOpened() and frame_index != self.current_frame_index:
             # Sync slider, which will trigger slider_frame_changed -> _seek_to_frame
-            self.frame_slider.setValue(value)
+            self.frame_slider.setValue(frame_index)
+
+    def _sync_frame_navigation_widgets(self):
+        """Point the frame slider and 1-based "Go to" box at current_frame_index without seeking."""
+        was_blocked = self.frame_slider.blockSignals(True)
+        self.frame_slider.setValue(self.current_frame_index)
+        self.frame_slider.blockSignals(was_blocked)
+        was_blocked = self.frame_spinbox.blockSignals(True)
+        self.frame_spinbox.setValue(self.current_frame_index + 1)
+        self.frame_spinbox.blockSignals(was_blocked)
 
     def step_frames(self, delta: int):
         """Moves forward or backward by a specified number of frames."""
@@ -2439,6 +2442,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_threshold_display()
         else:
             logging.warning(f"Failed to read frame at index {frame_index}")
+            # The navigation widgets may already point at the requested frame;
+            # move them back to the frame that is actually displayed.
+            self.stop_playback()
+            self.statusBar().showMessage(f"Could not read frame {frame_index + 1}", 5000)
+            self._sync_frame_navigation_widgets()
 
     def update_frame_label(self, reset=False):
         """Updates the frame counter label (e.g., "Frame: 10 / 100")."""
@@ -3107,7 +3115,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.fixed_roi_masks = masks
         self.mask_source_frames = sources
         if created_any:
-            self.mask_status_label.setText(f"Mask: captured from frame {source_frame_idx}")
+            self.mask_status_label.setText(f"Mask: captured from frame {source_frame_idx + 1}")
             if not self.use_fixed_mask:
                 # Auto-enable usage for convenience
                 self.use_fixed_mask = True
@@ -3274,7 +3282,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         QtWidgets.QMessageBox.information(
             self,
             "Auto-Capture Complete",
-            f"Captured masks from frame {result.brightest_frame_idx} (brightness: {result.max_brightness:.1f} L*)",
+            f"Captured masks from frame {result.brightest_frame_idx + 1} (brightness: {result.max_brightness:.1f} L*)",
         )
 
     def _on_per_roi_mask_finished(self, result_obj: object):
@@ -3291,7 +3299,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         created_count = sum(1 for m in result.masks if m is not None)
         frame_info = [
-            str(result.sources[i]) if result.sources[i] is not None else "n/a"
+            str(result.sources[i] + 1) if result.sources[i] is not None else "n/a"
             for i in range(len(self.rects))
             if i != self.background_roi_idx
         ]
@@ -3940,13 +3948,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         if seek_to_frame is not None:
             target = max(0, min(int(seek_to_frame), self.total_frames - 1))
-            self.frame_slider.blockSignals(True)
-            self.frame_spinbox.blockSignals(True)
-            self.frame_slider.setValue(target)
-            self.frame_spinbox.setValue(target)
-            self.frame_slider.blockSignals(False)
-            self.frame_spinbox.blockSignals(False)
             self._seek_to_frame(target)
+            self._sync_frame_navigation_widgets()
 
         if result_message:
             self.results_label.setText(result_message)
