@@ -2233,6 +2233,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.frame = frame
             self.frame_cache.put(0, frame)  # Cache first frame
 
+            # Reset fixed masks on new video load, before the first draw. The
+            # fixed-mask flag is set without firing its toggle handler, so a
+            # later reset would leave the readout/overlay on the previous
+            # video's masks.
+            self.fixed_roi_masks = [None for _ in self.rects]
+            self.mask_source_frames = [None for _ in self.rects]
+            self._set_use_fixed_mask_silently(False)
+            self.mask_status_label.setText("Mask: none")
+            self._update_mask_pixel_count_display()
+
             # Ensure the pixmap scales to the label’s current size the first time we draw it
             self._current_image_size = self.image_label.size()
             
@@ -2247,6 +2257,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_video_info()
             self._update_cache_status()
             self._update_threshold_display()
+            self._update_current_brightness_display()
             
             # Add to recent files
             self._add_recent_file(self.video_path)
@@ -2257,13 +2268,6 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                                        "🎯 Draw ROIs or use Auto-Detect to begin!")
             self._update_widget_states(video_loaded=True, rois_exist=bool(self.rects))
             self.statusBar().showMessage(f"✅ Successfully loaded: {os.path.basename(self.video_path)}")
-
-            # Reset fixed masks on new video load
-            self.fixed_roi_masks = [None for _ in self.rects]
-            self.mask_source_frames = [None for _ in self.rects]
-            self._set_use_fixed_mask_silently(False)
-            self.mask_status_label.setText("Mask: none")
-            self._update_mask_pixel_count_display()
 
             # Attempt auto-detection if ROIs already exist
             if self.rects:
@@ -2876,6 +2880,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.mask_status_label.setText("Mask: none")
             self._update_mask_pixel_count_display()
             self.update_rect_list()
+            self._update_current_brightness_display()
             self.show_frame()
             self.results_label.setText("Cleared all ROIs.")
             self._record_history_change("Clear All ROIs", before)
@@ -3674,10 +3679,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.moving = False
             self.move_offset = None
             self.start_point = None
-            # Optional: Recalculate brightness display for the final position
-            self._update_current_brightness_display()
             # Moving ROI invalidates any captured masks (shape/position may change)
             self._invalidate_fixed_masks("ROI moved")
+            # Recalculate brightness display for the final position (after the
+            # masks are cleared, so it matches what an analysis run would use)
+            self._update_current_brightness_display()
             self.show_frame() # Redraw in final state
             self._commit_history_action()
 
@@ -3689,10 +3695,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.resize_aspect_ratio = None
             self.start_point = None
             self.end_point = None
-            # Optional: Recalculate brightness display for the final size
-            self._update_current_brightness_display()
             # Resizing ROI invalidates any captured masks (shape changed)
             self._invalidate_fixed_masks("ROI resized")
+            # Recalculate brightness display for the final size (after the
+            # masks are cleared, so it matches what an analysis run would use)
+            self._update_current_brightness_display()
             self.show_frame() # Redraw in final state
             self._commit_history_action()
 

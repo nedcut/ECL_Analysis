@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from ecl_analysis.video_analyzer import VideoAnalyzer
 
@@ -119,5 +119,47 @@ def test_user_toggle_of_fixed_mask_still_records_history(
 
     assert window.use_fixed_mask is True
     assert [entry.label for entry in window._undo_history] == ["Toggle Fixed Mask"]
+
+    window.close()
+
+
+def _mouse_event(event_type, pos, button, buttons):
+    return QtGui.QMouseEvent(event_type, pos, button, buttons, QtCore.Qt.NoModifier)
+
+
+def test_roi_drag_release_readout_reflects_cleared_masks(
+    qt_application: QtWidgets.QApplication,
+) -> None:
+    window = VideoAnalyzer()
+    _prepare_loaded_window(window)
+    window.frame = np.tile(np.arange(0, 256, 2, dtype=np.uint8)[None, :128, None], (120, 1, 3)).copy()
+    window.rects = [((10, 10), (60, 50))]
+    window.selected_rect_idx = 0
+    window.update_rect_list(preferred_row=0)
+    window.manual_threshold = 30.0
+    window._capture_fixed_masks(0)
+    window.use_fixed_mask_checkbox.setChecked(True)
+    window._current_image_size = window.image_label.size()
+    window.show_frame()
+
+    start = window._map_frame_to_label_point((30, 25))
+    assert start is not None
+    window.image_mouse_press(
+        _mouse_event(QtCore.QEvent.MouseButtonPress, start, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
+    )
+    target = window._map_frame_to_label_point((42, 31))
+    window.image_mouse_move(
+        _mouse_event(QtCore.QEvent.MouseMove, target, QtCore.Qt.NoButton, QtCore.Qt.LeftButton)
+    )
+    window.image_mouse_release(
+        _mouse_event(QtCore.QEvent.MouseButtonRelease, target, QtCore.Qt.LeftButton, QtCore.Qt.NoButton)
+    )
+
+    assert window.rects[0] != ((10, 10), (60, 50))
+    assert all(mask is None for mask in window.fixed_roi_masks)
+    # The readout must describe the analysis after the masks were invalidated.
+    shown = window.brightness_display_label.text()
+    window._update_current_brightness_display()
+    assert shown == window.brightness_display_label.text()
 
     window.close()

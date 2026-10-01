@@ -162,3 +162,84 @@ def test_user_initiated_audio_detection_still_warns_without_duration(
     assert window._audio_thread is None
 
     window.close()
+
+
+def _gradient_frames(offset: int, frame_count: int = 3):
+    ramp = np.tile(np.arange(0, 240, 15, dtype=np.uint8), (16, 1))
+    return [np.dstack([np.clip(ramp.astype(int) + offset, 0, 255).astype(np.uint8)] * 3) for _ in range(frame_count)]
+
+
+def _load_frames(window: VideoAnalyzer, tmp_path, monkeypatch, frames, name: str) -> None:
+    video = tmp_path / name
+    video.write_bytes(b"stub")
+    monkeypatch.setattr(cv2, "VideoCapture", lambda path: _DummyCapture(frames))
+    monkeypatch.setattr(window, "_add_recent_file", lambda path: None)
+    monkeypatch.setattr(window, "_auto_detect_range_after_load", lambda: None)
+    window.video_path = str(video)
+    window.load_video()
+
+
+def _assert_readout_is_current(window: VideoAnalyzer) -> None:
+    shown = window.brightness_display_label.text()
+    window._update_current_brightness_display()
+    assert shown == window.brightness_display_label.text()
+
+
+def test_load_video_with_rois_drops_old_masks_before_drawing(
+    qt_application: QtWidgets.QApplication,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    window = VideoAnalyzer()
+    _load_frames(window, tmp_path, monkeypatch, _gradient_frames(0), "first.avi")
+    window.rects = [((1, 1), (15, 15))]
+    window.update_rect_list()
+    window.manual_threshold = 50.0
+    window._capture_fixed_masks(0)
+    window.use_fixed_mask_checkbox.setChecked(True)
+    window.show_pixel_mask = True
+    window._update_current_brightness_display()
+
+    overlay_mask_states = []
+    original_overlay = window._apply_pixel_mask_overlay
+
+    def _spy(frame):
+        overlay_mask_states.append((window.use_fixed_mask, [m is not None for m in window.fixed_roi_masks]))
+        return original_overlay(frame)
+
+    monkeypatch.setattr(window, "_apply_pixel_mask_overlay", _spy)
+
+    _load_frames(window, tmp_path, monkeypatch, _gradient_frames(40), "second.avi")
+
+    # Every draw of the new video already sees the masks reset ...
+    assert overlay_mask_states and all(state == (False, [False]) for state in overlay_mask_states)
+    # ... and the readout shows the new video's values, not the old video's.
+    _assert_readout_is_current(window)
+    assert "ROI 1" in window.brightness_display_label.text()
+
+    window.close()
+
+
+def test_clear_all_rectangles_refreshes_readout(
+    qt_application: QtWidgets.QApplication,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    for use_fixed_mask in (False, True):
+        window = VideoAnalyzer()
+        _load_frames(window, tmp_path, monkeypatch, _gradient_frames(0), "clip.avi")
+        window.rects = [((1, 1), (15, 15))]
+        window.update_rect_list()
+        if use_fixed_mask:
+            window._capture_fixed_masks(0)
+            window.use_fixed_mask_checkbox.setChecked(True)
+        window._update_current_brightness_display()
+        assert "ROI 1" in window.brightness_display_label.text()
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox, "question", lambda *args, **kwargs: QtWidgets.QMessageBox.Yes
+        )
+
+        window.clear_all_rectangles()
+
+        assert window.brightness_display_label.text() == "N/A"
+        window.close()
