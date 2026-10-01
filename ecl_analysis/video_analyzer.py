@@ -3764,7 +3764,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         (x1, y1), (x2, y2) = rect
         left, right = min(x1, x2), max(x1, x2)
         top, bottom = min(y1, y2), max(y1, y2)
-        m = max(2, int(round(margin)))
+        # Cap the margin at a quarter of the ROI's smaller side so the centre of a
+        # small (or heavily downscaled) ROI always remains a move target.
+        max_margin = min(right - left, bottom - top) / 4
+        m = max(2, int(round(min(margin, max_margin))))
 
         # Corners first so they win over edge hits.
         corners = {

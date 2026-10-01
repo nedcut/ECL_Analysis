@@ -40,3 +40,21 @@ def test_resize_margin_shrinks_for_upscaled_small_videos(
     assert window._scale_value_for_frame(MOUSE_RESIZE_HANDLE_SENSITIVITY) == MOUSE_RESIZE_HANDLE_SENSITIVITY / 4
 
     window.close()
+
+
+def test_resize_margin_is_capped_so_small_roi_centre_stays_movable(
+    qt_application: QtWidgets.QApplication,
+) -> None:
+    """On a downscaled video, a small ROI must not become all resize handle."""
+    window = VideoAnalyzer()
+    window.frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    pixmap_rect = QtCore.QRect(0, 0, 960, 540)
+    window._get_pixmap_rect_in_label = lambda: pixmap_rect
+
+    margin = window._scale_value_for_frame(MOUSE_RESIZE_HANDLE_SENSITIVITY)  # 40 frame px
+    rect = ((1000, 1000), (1060, 1040))  # 60x40 frame px, smaller than 2x the margin
+
+    assert window._get_resize_handle(1030, 1020, rect, margin) is None
+    assert window._get_resize_handle(1060, 1020, rect, margin) == "edge_right"
+
+    window.close()
