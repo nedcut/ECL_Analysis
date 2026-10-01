@@ -4082,8 +4082,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._audio_worker.cancelled.connect(self._on_audio_detection_cancelled)
         self._audio_thread.start()
 
-    def _apply_audio_detection_results(self, completion_beeps: List[Tuple[float, int]], expected_duration: float):
-        """Apply completion beep selection and update the selected frame range."""
+    def _apply_audio_detection_results(
+        self,
+        completion_beeps: List[Tuple[float, int]],
+        expected_duration: float,
+        unfiltered: bool = False,
+    ):
+        """Apply completion beep selection and update the selected frame range.
+
+        ``unfiltered`` means no beep occurred at least ``expected_duration``
+        into the video, so the beeps offered are not duration-filtered.
+        """
         if not completion_beeps:
             QtWidgets.QMessageBox.information(
                 self,
@@ -4092,6 +4101,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             )
             self.results_label.setText("Audio Detection: No completion beeps found.")
             return
+
+        unfiltered_note = (
+            f"No detected beep occurs at least {expected_duration:.1f}s into the video, "
+            "so none can end a full-length run; showing all beeps unfiltered."
+            if unfiltered
+            else ""
+        )
 
         if len(completion_beeps) == 1:
             selected_beep_time, selected_end_frame = completion_beeps[0]
@@ -4103,7 +4119,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             selected_option, ok = QtWidgets.QInputDialog.getItem(
                 self,
                 "Audio Detection",
-                f"Found {len(completion_beeps)} completion beeps. Select which one to use:",
+                (f"{unfiltered_note}\n\n" if unfiltered_note else "")
+                + f"Found {len(completion_beeps)} completion beeps. Select which one to use:",
                 beep_options,
                 0,
                 False,
@@ -4149,6 +4166,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.results_label.setText(
             f"✅ Audio-detected range: Frame {self.start_frame + 1} to {self.end_frame + 1} "
             f"(Duration: {actual_duration:.1f}s, Expected: {expected_duration:.1f}s)"
+            + (f"\n⚠️ {unfiltered_note}" if unfiltered_note else "")
         )
 
         # Full confidence means "within the shared run-duration tolerance"
@@ -4156,11 +4174,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self._validate_run_duration(self.start_frame, self.end_frame, expected_duration) >= 1.0:
             self.audio_manager.play_run_detected()
 
-    def _on_audio_detection_finished(self, completion_beeps: List[Tuple[float, int]]):
+    def _on_audio_detection_finished(self, completion_beeps: List[Tuple[float, int]], unfiltered: bool = False):
         """Handle successful completion of audio detection worker."""
         expected_duration = self._pending_audio_expected_duration
         self._cleanup_audio_worker()
-        self._apply_audio_detection_results(completion_beeps, expected_duration)
+        self._apply_audio_detection_results(completion_beeps, expected_duration, unfiltered)
 
     def _on_audio_detection_error(self, message: str):
         """Handle worker audio-detection errors."""

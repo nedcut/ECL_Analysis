@@ -250,9 +250,13 @@ class AnalysisWorker(QtCore.QObject):
 
 
 class AudioDetectionWorker(QtCore.QObject):
-    """Extract completion beeps on a background thread."""
+    """Extract completion beeps on a background thread.
 
-    finished = QtCore.pyqtSignal(list)
+    ``finished`` carries the (time, frame) beeps and a flag that is True when
+    none matched the expected-duration filter and the list is unfiltered.
+    """
+
+    finished = QtCore.pyqtSignal(list, bool)
     error = QtCore.pyqtSignal(str)
     cancelled = QtCore.pyqtSignal()
 
@@ -281,7 +285,7 @@ class AudioDetectionWorker(QtCore.QObject):
         if self._cancel_token.is_cancelled():
             self.cancelled.emit()
             return
-        self.finished.emit(beeps)
+        self.finished.emit(beeps, bool(getattr(analyzer, "last_results_unfiltered", False)))
 
     @QtCore.pyqtSlot()
     def cancel(self) -> None:

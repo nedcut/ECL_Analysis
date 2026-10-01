@@ -79,3 +79,16 @@ def test_audio_window_within_shared_tolerance_plays_run_detected(window: VideoAn
     assert window.start_frame == 0
     assert window.end_frame == 212
     assert window.run_detected_calls == [True]
+
+
+def test_unfiltered_beeps_are_flagged_to_the_user(window: VideoAnalyzer) -> None:
+    window._apply_audio_detection_results([(6.0, 150)], expected_duration=10.0, unfiltered=True)
+
+    assert window.end_frame == 150
+    assert "unfiltered" in window.results_label.text()
+
+
+def test_filtered_beeps_have_no_unfiltered_warning(window: VideoAnalyzer) -> None:
+    window._apply_audio_detection_results([(20.0, 500)], expected_duration=10.0)
+
+    assert "unfiltered" not in window.results_label.text()
