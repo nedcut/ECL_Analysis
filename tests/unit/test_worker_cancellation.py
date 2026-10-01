@@ -169,6 +169,23 @@ class TestAudioDetectionWorker:
 
         assert finished_signals == [([(1.0, 30)], True)]
 
+    def test_unexpected_exception_is_reported_as_error(self, qt_application, monkeypatch):
+        worker = AudioDetectionWorker("video.mp4", 2.0)
+        errors = []
+        finished_signals = []
+        worker.error.connect(errors.append)
+        worker.finished.connect(lambda beeps, unfiltered: finished_signals.append((beeps, unfiltered)))
+
+        def explode(self, video_path, expected_duration, cancel_check=None):
+            raise RuntimeError("numba exploded")
+
+        monkeypatch.setattr(_StubAnalyzer, "find_completion_beeps", explode)
+        worker.run()  # must not raise out of the slot
+
+        assert len(errors) == 1
+        assert "numba exploded" in errors[0]
+        assert finished_signals == []
+
 
 class TestFindCompletionBeepsCheckpoints:
     def _analyzer(self, monkeypatch) -> AudioAnalyzer:

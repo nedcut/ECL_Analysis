@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -272,20 +273,28 @@ class AudioDetectionWorker(QtCore.QObject):
             self.cancelled.emit()
             return
 
-        analyzer = AudioAnalyzer()
-        if not analyzer.is_available():
-            self.error.emit("Audio analysis not available. Please install librosa and soundfile.")
-            return
+        # An exception escaping a Qt slot aborts the app under PyQt5, and
+        # librosa/numba can fail in unexpected ways; report it as an error.
+        try:
+            analyzer = AudioAnalyzer()
+            if not analyzer.is_available():
+                self.error.emit("Audio analysis not available. Please install librosa and soundfile.")
+                return
 
-        beeps = analyzer.find_completion_beeps(
-            self._video_path,
-            self._expected_duration,
-            cancel_check=self._cancel_token.is_cancelled,
-        )
-        if self._cancel_token.is_cancelled():
-            self.cancelled.emit()
+            beeps = analyzer.find_completion_beeps(
+                self._video_path,
+                self._expected_duration,
+                cancel_check=self._cancel_token.is_cancelled,
+            )
+            if self._cancel_token.is_cancelled():
+                self.cancelled.emit()
+                return
+            unfiltered = bool(getattr(analyzer, "last_results_unfiltered", False))
+        except Exception as exc:
+            logging.exception("Audio detection worker failed")
+            self.error.emit(f"Unexpected error during audio detection: {exc}")
             return
-        self.finished.emit(beeps, bool(getattr(analyzer, "last_results_unfiltered", False)))
+        self.finished.emit(beeps, unfiltered)
 
     @QtCore.pyqtSlot()
     def cancel(self) -> None:
