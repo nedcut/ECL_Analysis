@@ -219,6 +219,35 @@ def test_analysis_worker_aborts_on_background_computation_failure(monkeypatch):
     assert "synthetic background computation failure" in captured["error"]
 
 
+def test_analysis_worker_aborts_on_degenerate_background_roi(monkeypatch):
+    """A configured background ROI that has zero area inside the frame must abort
+    the run instead of silently exporting raw (non-subtracted) values."""
+    frames = [np.full((6, 6, 3), 40, dtype=np.uint8)]
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture(frames))
+
+    request = AnalysisRequest(
+        video_path="dummy.mp4",
+        rects=[((0, 0), (6, 6)), ((20, 20), (30, 30))],
+        background_roi_idx=1,
+        start_frame=0,
+        end_frame=0,
+        use_fixed_mask=False,
+        fixed_roi_masks=[],
+        background_percentile=90.0,
+        morphological_kernel_size=3,
+        noise_floor_threshold=0.0,
+    )
+
+    worker = AnalysisWorker(request)
+    captured: Dict[str, object] = {}
+    worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+    worker.error.connect(lambda message: captured.setdefault("error", message))
+    worker.run()
+
+    assert "result" not in captured
+    assert "Background ROI 2" in captured["error"]
+
+
 def test_analysis_worker_manual_threshold_gates_pixels(monkeypatch):
     frame = np.zeros((6, 6, 3), dtype=np.uint8)
     frame[:, :3, :] = 10  # dark half, L* ~ 3

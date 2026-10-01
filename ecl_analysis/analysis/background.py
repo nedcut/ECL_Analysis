@@ -32,16 +32,25 @@ def compute_background_brightness(
 ) -> Optional[float]:
     """Compute percentile L* brightness for a configured background ROI.
 
-    Returns None only when no background ROI is configured (or the configured
-    index/ROI is degenerate). Raises BackgroundComputationError if a background
-    ROI is configured but the underlying computation fails, so callers cannot
-    mistake a computation fault for "background not configured".
+    Returns None only when no background ROI is configured
+    (``background_roi_idx is None``). Raises BackgroundComputationError when a
+    background ROI is configured but unusable (index out of range, no frame,
+    or zero area after clamping to the frame) or when the computation itself
+    fails, so callers cannot mistake a broken background ROI for "background
+    not configured" and silently export raw measurements.
     """
-    if background_roi_idx is None or frame is None:
+    if background_roi_idx is None:
         return None
 
+    if frame is None:
+        raise BackgroundComputationError(
+            f"Background ROI {background_roi_idx + 1} is configured but no frame was provided."
+        )
+
     if not (0 <= background_roi_idx < len(rects)):
-        return None
+        raise BackgroundComputationError(
+            f"Background ROI index {background_roi_idx} is out of range ({len(rects)} ROIs defined)."
+        )
 
     try:
         pt1, pt2 = rects[background_roi_idx]
@@ -56,20 +65,24 @@ def compute_background_brightness(
         y2 = max(0, min(bottom, frame_height))
 
         if x2 <= x1 or y2 <= y1:
-            return None
+            raise BackgroundComputationError(
+                f"Background ROI {background_roi_idx + 1} has zero area inside the "
+                f"{frame_width}x{frame_height} frame (rect {pt1}-{pt2})."
+            )
 
         if frame_l_star is not None:
             roi_l_star = frame_l_star[y1:y2, x1:x2]
         else:
-            roi = frame[y1:y2, x1:x2]
-            if roi.size == 0:
-                return None
-            roi_l_star = compute_l_star_frame(roi)
+            roi_l_star = compute_l_star_frame(frame[y1:y2, x1:x2])
 
         if roi_l_star.size == 0:
-            return None
+            raise BackgroundComputationError(
+                f"Background ROI {background_roi_idx + 1} contains no pixels."
+            )
 
         return float(np.percentile(roi_l_star, background_percentile))
+    except BackgroundComputationError:
+        raise
     except cv2.error as exc:
         logging.exception("OpenCV error computing background brightness")
         raise BackgroundComputationError(str(exc)) from exc
