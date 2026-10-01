@@ -2742,6 +2742,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                  self.selected_rect_idx = None
             # No need to explicitly set selection index otherwise, update_rect_list handles it
             self.update_rect_list(preferred_row=self.selected_rect_idx)
+            self._update_current_brightness_display()
             self.show_frame()
             self.results_label.setText("Deleted selected ROI.")
             self._record_history_change("Delete ROI", before)
@@ -2776,7 +2777,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
 
         before = self._capture_editor_snapshot()
+        background_changed = self.background_roi_idx != self.selected_rect_idx
         self.background_roi_idx = self.selected_rect_idx
+        # The threshold rule changed, so masks captured under the old one are stale.
+        if background_changed:
+            self._invalidate_fixed_masks("background ROI changed")
         
         # Calculate background threshold for display
         if self.frame is not None:
@@ -2791,6 +2796,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.results_label.setText(f"Background ROI set to ROI {self.selected_rect_idx + 1}")
         
         self.update_rect_list()
+        if self.frame is not None:
+            self._update_current_brightness_display()
+            self.show_frame()
         self._record_history_change("Set Background ROI", before)
 
     def _calculate_background_threshold(self) -> Optional[float]:
@@ -2901,8 +2909,16 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_threshold_display()
             return
         before = self._capture_editor_snapshot()
+        threshold_rule_changed = self.background_roi_idx is None and value != self.manual_threshold
         self.manual_threshold = value
+        # With no background ROI the manual threshold is the mask/analysis rule,
+        # so masks captured under the old value no longer match it.
+        if threshold_rule_changed:
+            self._invalidate_fixed_masks("manual threshold changed")
         self._update_threshold_display()
+        if self.frame is not None:
+            self._update_current_brightness_display()
+            self.show_frame()
         self._record_history_change("Adjust Manual Threshold", before)
 
     def _on_use_fixed_mask_toggled(self, checked: bool):

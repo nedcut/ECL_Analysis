@@ -293,3 +293,107 @@ def test_background_percentile_computed_once_per_frame_change(
         assert len(calls) == 3
     finally:
         window.close()
+
+
+def _window_with_captured_masks() -> VideoAnalyzer:
+    window = VideoAnalyzer()
+    window.frame = _graded_frame()
+    window.rects = [((0, 0), (40, 40)), ((20, 0), (40, 40)), ((0, 30), (10, 40))]
+    window.background_roi_idx = None
+    window.threshold_spin.blockSignals(True)
+    window.threshold_spin.setValue(60.0)
+    window.threshold_spin.blockSignals(False)
+    window.manual_threshold = 60.0
+    window.frame_slider.setRange(0, 10)
+    window._capture_fixed_masks(source_frame_idx=0)
+    assert any(isinstance(mask, np.ndarray) for mask in window.fixed_roi_masks)
+    return window
+
+
+def test_manual_threshold_change_invalidates_masks_and_refreshes_preview(
+    qt_application: QtWidgets.QApplication,
+) -> None:
+    window = _window_with_captured_masks()
+    try:
+        window.use_fixed_mask = False  # threshold path, so the readout tracks the threshold
+        window._update_current_brightness_display()
+        before_text = window.brightness_display_label.text()
+
+        window.threshold_spin.setValue(80.0)
+
+        assert all(mask is None for mask in window.fixed_roi_masks)
+        assert window.mask_status_label.text() == "Mask: cleared (manual threshold changed)"
+        assert "Manual (80.00 L*)" in window.threshold_display_label.text()
+        after_text = window.brightness_display_label.text()
+        assert after_text != before_text
+        assert "Manual threshold: L* 80.0" in after_text
+
+        # Undo restores the threshold together with the masks captured under it.
+        window.undo_last_action()
+        assert window.manual_threshold == 60.0
+        assert any(isinstance(mask, np.ndarray) for mask in window.fixed_roi_masks)
+    finally:
+        window.close()
+
+
+def test_manual_threshold_change_keeps_masks_when_background_roi_rules(
+    qt_application: QtWidgets.QApplication,
+) -> None:
+    window = _window_with_captured_masks()
+    try:
+        window.selected_rect_idx = 2
+        window._set_background_roi()
+        window._capture_fixed_masks(source_frame_idx=0)
+        masks = list(window.fixed_roi_masks)
+
+        window.threshold_spin.setValue(10.0)  # not the active rule
+
+        assert all(a is b for a, b in zip(window.fixed_roi_masks, masks))
+    finally:
+        window.close()
+
+
+def test_setting_background_roi_invalidates_masks_and_refreshes_preview(
+    qt_application: QtWidgets.QApplication,
+) -> None:
+    window = _window_with_captured_masks()
+    try:
+        window._update_current_brightness_display()
+        assert "Thr-Sub" in window.brightness_display_label.text()
+
+        window.selected_rect_idx = 2
+        window._set_background_roi()
+
+        assert all(mask is None for mask in window.fixed_roi_masks)
+        assert window.mask_status_label.text() == "Mask: cleared (background ROI changed)"
+        readout = window.brightness_display_label.text()
+        assert "BG-Sub" in readout
+        assert "ROI 3:" not in readout  # the background ROI is no longer measured
+        assert "Active Threshold: Background ROI 3" in window.threshold_display_label.text()
+
+        # Re-selecting the same background ROI is not a rule change.
+        window._capture_fixed_masks(source_frame_idx=0)
+        window._set_background_roi()
+        assert any(isinstance(mask, np.ndarray) for mask in window.fixed_roi_masks)
+    finally:
+        window.close()
+
+
+def test_deleting_background_roi_refreshes_readout(
+    qt_application: QtWidgets.QApplication,
+) -> None:
+    window = _window_with_captured_masks()
+    try:
+        window.selected_rect_idx = 2
+        window._set_background_roi()
+        assert "BG-Sub" in window.brightness_display_label.text()
+
+        window.selected_rect_idx = 2
+        window.delete_selected_rectangle()
+
+        assert window.background_roi_idx is None
+        readout = window.brightness_display_label.text()
+        assert "BG-Sub" not in readout
+        assert "Thr-Sub" in readout  # manual threshold (60) is the rule again
+    finally:
+        window.close()
