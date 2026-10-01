@@ -39,4 +39,8 @@ ROI_DUPLICATE_OFFSET = 12
 DEFAULT_SETTINGS_FILE = "brightness_analyzer_settings.json"
 MAX_RECENT_FILES = 10
 FRAME_CACHE_SIZE = 100
+MAX_UNDO_HISTORY = 100
+# Consecutive edits from the same control (slider/spinbox ticks) closer together
+# than this many seconds are merged into a single undo entry.
+HISTORY_COALESCE_WINDOW_SEC = 1.0
 JUMP_FRAMES = 10

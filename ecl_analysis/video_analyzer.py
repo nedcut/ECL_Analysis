@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -33,8 +34,10 @@ from .constants import (
     DEFAULT_MANUAL_THRESHOLD,
     DEFAULT_SETTINGS_FILE,
     FRAME_CACHE_SIZE,
+    HISTORY_COALESCE_WINDOW_SEC,
     JUMP_FRAMES,
     MAX_RECENT_FILES,
+    MAX_UNDO_HISTORY,
     MORPHOLOGICAL_KERNEL_SIZE,
     MOUSE_RESIZE_HANDLE_SENSITIVITY,
     ROI_COLORS,
@@ -457,6 +460,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.total_frames = 0
         self.cap = None
         self.out_paths = []
+        # Index of the frame the next cap.read() will return, or None when the
+        # decoder position is unknown (after a failed read, reload, or reset).
+        # Only trusted while self.cap is still the capture it was recorded for.
+        self._decoder_next_frame: Optional[int] = None
+        self._decoder_position_cap = None
+        # Static (per-load) part of the video info panel, keyed by video identity.
+        self._video_info_static: Optional[Tuple[Tuple[object, ...], str, str]] = None
         
         # Frame caching
         self.frame_cache_size = FRAME_CACHE_SIZE
@@ -510,6 +520,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._undo_history: List[HistoryEntry] = []
         self._redo_history: List[HistoryEntry] = []
         self._pending_history_entry: Optional[Tuple[str, EditorSnapshot]] = None
+        # (entry, timestamp) of the last coalescable undo entry, so consecutive
+        # slider/spinbox ticks of the same control merge into one entry.
+        self._history_coalesce_marker: Optional[Tuple[HistoryEntry, float]] = None
         
         # Settings
         self.settings = {}
@@ -809,7 +822,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.show_frame()
 
     def _clone_mask_list(self, masks: List[Optional[np.ndarray]]) -> List[Optional[np.ndarray]]:
-        """Deep-copy masks for history snapshots."""
+        """Deep-copy masks (used when restoring history snapshots)."""
         return [mask.copy() if isinstance(mask, np.ndarray) else None for mask in masks]
 
     def _capture_editor_snapshot(self) -> EditorSnapshot:
@@ -826,7 +839,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             background_percentile=float(self.background_percentile),
             noise_floor_threshold=float(self.noise_floor_threshold),
             use_fixed_mask=bool(self.use_fixed_mask),
-            fixed_roi_masks=self._clone_mask_list(self.fixed_roi_masks),
+            # Mask arrays are never mutated in place (they are always replaced
+            # wholesale), so snapshots share them instead of deep-copying on
+            # every edit. Restoring a snapshot still clones them.
+            fixed_roi_masks=list(self.fixed_roi_masks),
             mask_source_frames=[None if value is None else int(value) for value in self.mask_source_frames],
         )
 
@@ -850,7 +866,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return False
 
         for first_mask, second_mask in zip(first.fixed_roi_masks, second.fixed_roi_masks):
-            if first_mask is None and second_mask is None:
+            if first_mask is second_mask:
                 continue
             if (first_mask is None) != (second_mask is None):
                 return False
@@ -864,8 +880,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
         self._pending_history_entry = (label, self._capture_editor_snapshot())
 
-    def _record_history_change(self, label: str, before: EditorSnapshot):
-        """Push a completed history entry when state changed."""
+    def _history_timestamp(self) -> float:
+        """Monotonic clock used for undo coalescing (patchable in tests)."""
+        return time.monotonic()
+
+    def _record_history_change(self, label: str, before: EditorSnapshot, coalesce: bool = False):
+        """Push a completed history entry when state changed.
+
+        With ``coalesce=True`` (continuous controls such as sliders and
+        spinboxes), a change that follows the previous entry of the same label
+        within HISTORY_COALESCE_WINDOW_SEC is merged into that entry instead of
+        pushing a new one, so one slider drag produces one undo step.
+        """
         if self._history_restoring:
             return
 
@@ -873,7 +899,30 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self._snapshots_equal(before, after):
             return
 
-        self._undo_history.append(HistoryEntry(label=label, before=before, after=after))
+        now = self._history_timestamp()
+        marker = self._history_coalesce_marker
+        if (
+            coalesce
+            and marker is not None
+            and self._undo_history
+            and self._undo_history[-1] is marker[0]
+            and marker[0].label == label
+            and not self._redo_history
+            and now - marker[1] <= HISTORY_COALESCE_WINDOW_SEC
+        ):
+            previous = self._undo_history.pop()
+            if self._snapshots_equal(previous.before, after):
+                # The merged gesture ended where it started: nothing to undo.
+                self._history_coalesce_marker = None
+                self._update_history_actions()
+                return
+            before = previous.before
+
+        entry = HistoryEntry(label=label, before=before, after=after)
+        self._undo_history.append(entry)
+        if len(self._undo_history) > MAX_UNDO_HISTORY:
+            del self._undo_history[:len(self._undo_history) - MAX_UNDO_HISTORY]
+        self._history_coalesce_marker = (entry, now) if coalesce else None
         self._redo_history.clear()
         self._update_history_actions()
 
@@ -898,6 +947,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._undo_history.clear()
         self._redo_history.clear()
         self._pending_history_entry = None
+        self._history_coalesce_marker = None
         self._update_history_actions()
 
     def _update_history_actions(self):
@@ -1006,6 +1056,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
         entry = self._undo_history.pop()
         self._redo_history.append(entry)
+        self._history_coalesce_marker = None
         self._restore_editor_snapshot(entry.before)
         self.statusBar().showMessage(f"Undid: {entry.label}", 3000)
         self._update_history_actions()
@@ -1016,6 +1067,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
         entry = self._redo_history.pop()
         self._undo_history.append(entry)
+        self._history_coalesce_marker = None
         self._restore_editor_snapshot(entry.after)
         self.statusBar().showMessage(f"Redid: {entry.label}", 3000)
         self._update_history_actions()
@@ -1981,25 +2033,33 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.video_info_label.setText("No video loaded")
             self.file_info_label.setText("No video loaded")
             return
-        
-        fps = self.cap.get(cv2.CAP_PROP_FPS)
-        width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        duration_sec = self.total_frames / fps if fps > 0 else 0
-        
-        file_name = os.path.basename(self.video_path)
-        file_size = os.path.getsize(self.video_path) / (1024 * 1024)  # MB
-        
-        info_text = f"""
-<b>File:</b> {file_name}<br>
-<b>Size:</b> {file_size:.1f} MB<br>
-<b>Resolution:</b> {width} × {height}<br>
-<b>Frames:</b> {self.total_frames}<br>
-<b>FPS:</b> {fps:.2f}<br>
-<b>Duration:</b> {duration_sec:.1f}s<br>
-<b>Analysis Range:</b> {self._normalized_analysis_range()[0] + 1}-{self._normalized_analysis_range()[1] + 1}
-        """.strip()
-        
+
+        # File size and decoder properties are fixed for a loaded video; compute
+        # them once per load instead of on every frame change.
+        static_key = (self.video_path, id(self.cap), self.total_frames)
+        if self._video_info_static is None or self._video_info_static[0] != static_key:
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            duration_sec = self.total_frames / fps if fps > 0 else 0
+
+            file_name = os.path.basename(self.video_path)
+            file_size = os.path.getsize(self.video_path) / (1024 * 1024)  # MB
+
+            static_text = (
+                f"<b>File:</b> {file_name}<br>\n"
+                f"<b>Size:</b> {file_size:.1f} MB<br>\n"
+                f"<b>Resolution:</b> {width} × {height}<br>\n"
+                f"<b>Frames:</b> {self.total_frames}<br>\n"
+                f"<b>FPS:</b> {fps:.2f}<br>\n"
+                f"<b>Duration:</b> {duration_sec:.1f}s<br>\n"
+            )
+            self._video_info_static = (static_key, static_text, file_name)
+
+        _key, static_text, file_name = self._video_info_static
+        range_start, range_end = self._normalized_analysis_range()
+        info_text = f"{static_text}<b>Analysis Range:</b> {range_start + 1}-{range_end + 1}"
+
         self.video_info_label.setText(info_text)
         self.file_info_label.setText(f"Loaded: {file_name}")
 
@@ -2119,6 +2179,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.cap:
             self.cap.release()
             self.cap = None
+        self._decoder_next_frame = None
+        self._decoder_position_cap = None
+        self._video_info_static = None
 
         if not self.video_path or not os.path.exists(self.video_path):
             QtWidgets.QMessageBox.critical(self, 'Error', 'Video path is invalid or file does not exist.')
@@ -2155,8 +2218,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Load the first frame
         ret, frame = self.cap.read()
         if ret:
+            self._decoder_next_frame = 1
+            self._decoder_position_cap = self.cap
             self.frame = frame
-            self.frame_cache.put(0, frame)  # Cache first frame
+            # Fresh decoder output: share it with the cache (self.frame is never mutated in place)
+            self.frame_cache.put(0, frame, copy=False)  # Cache first frame
 
             # Ensure the pixmap scales to the label’s current size the first time we draw it
             self._current_image_size = self.image_label.size()
@@ -2206,6 +2272,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.current_frame_index = 0
         self.total_frames = 0
         self.cap = None
+        self._decoder_next_frame = None
+        self._decoder_position_cap = None
+        self._video_info_static = None
         self.rects = []
         self.selected_rect_idx = None
         self.start_frame = 0
@@ -2323,8 +2392,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             logging.warning(f"Attempted to seek to invalid frame index {frame_index}")
             return
 
-        # Check cache first
-        cached_frame = self.frame_cache.get(frame_index)
+        # Check cache first. self.frame is treated as read-only everywhere
+        # (show_frame draws on a copy), so the cached array can be shared.
+        cached_frame = self.frame_cache.get(frame_index, copy=False)
         if cached_frame is not None:
             self.frame = cached_frame
             self.current_frame_index = frame_index
@@ -2334,15 +2404,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_threshold_display()
             return
 
-        # Not in cache, read from video
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        # Not in cache, read from video. Only seek when the requested frame is
+        # not the one the decoder will return next: a seek forces a keyframe
+        # search + decode, which dominates sequential playback/stepping.
+        decoder_is_at_frame = (
+            self._decoder_position_cap is self.cap
+            and self._decoder_next_frame == frame_index
+        )
+        if not decoder_is_at_frame:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ret, frame = self.cap.read()
         if ret:
+            self._decoder_next_frame = frame_index + 1
+            self._decoder_position_cap = self.cap
             self.frame = frame
             self.current_frame_index = frame_index
             
-            # Cache the frame
-            self.frame_cache.put(frame_index, frame)
+            # Cache the frame (fresh decoder output, so no defensive copy needed)
+            self.frame_cache.put(frame_index, frame, copy=False)
             self._update_cache_status()
             
             self.show_frame()
@@ -2350,6 +2429,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             self._update_threshold_display()
         else:
+            self._decoder_next_frame = None
+            self._decoder_position_cap = None
             logging.warning(f"Failed to read frame at index {frame_index}")
 
     def update_frame_label(self, reset=False):
@@ -2366,11 +2447,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.frame is None:
             return
 
-        frame_copy = self.frame.copy()
-        
-        # Apply pixel mask visualization if enabled
+        # Apply pixel mask visualization if enabled. The overlay already returns
+        # a new array, so only copy when it did not (ROIs are drawn in place).
+        frame_copy = None
         if self.show_pixel_mask and len(self.rects) > 0:
-            frame_copy = self._apply_pixel_mask_overlay(frame_copy)
+            frame_copy = self._apply_pixel_mask_overlay(self.frame)
+        if frame_copy is None or frame_copy is self.frame:
+            frame_copy = self.frame.copy()
             
         self._draw_rois(frame_copy)
 
@@ -2495,19 +2578,33 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
     # --- ROI Management ---
 
+    def _format_rect_list_label(self, idx: int) -> str:
+        """Build the ROI list text for the rectangle at ``idx``."""
+        (x1, y1), (x2, y2) = self.rects[idx]
+        # Ensure coordinates are ordered correctly for display
+        disp_x1, disp_y1 = min(x1, x2), min(y1, y2)
+        disp_x2, disp_y2 = max(x1, x2), max(y1, y2)
+        prefix = "* " if idx == self.background_roi_idx else ""
+        return f"{prefix}ROI {idx+1}: ({disp_x1},{disp_y1})-({disp_x2},{disp_y2})"
+
+    def _refresh_rect_list_row(self, idx: int):
+        """Update only one ROI row's text (cheap path used while dragging).
+
+        Falls back to a full rebuild if the list is out of sync with self.rects.
+        """
+        item = self.rect_list.item(idx) if self.rect_list.count() == len(self.rects) else None
+        if item is None:
+            self.update_rect_list(preferred_row=idx)
+            return
+        item.setText(self._format_rect_list_label(idx))
+
     def update_rect_list(self, preferred_row: Optional[int] = None):
         """Updates the QListWidget displaying the ROIs."""
         self.rect_list.blockSignals(True) # Prevent selection signals during update
         current_row = preferred_row if preferred_row is not None else self.rect_list.currentRow()
         self.rect_list.clear()
-        for idx, (pt1, pt2) in enumerate(self.rects):
-            x1, y1 = pt1
-            x2, y2 = pt2
-            # Ensure coordinates are ordered correctly for display
-            disp_x1, disp_y1 = min(x1, x2), min(y1, y2)
-            disp_x2, disp_y2 = max(x1, x2), max(y1, y2)
-            prefix = "* " if idx == self.background_roi_idx else ""
-            self.rect_list.addItem(f"{prefix}ROI {idx+1}: ({disp_x1},{disp_y1})-({disp_x2},{disp_y2})")
+        for idx in range(len(self.rects)):
+            self.rect_list.addItem(self._format_rect_list_label(idx))
 
         # Restore selection if possible
         if 0 <= current_row < len(self.rects):
@@ -2927,7 +3024,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         before = self._capture_editor_snapshot()
         self.manual_threshold = value
         self._update_threshold_display()
-        self._record_history_change("Adjust Manual Threshold", before)
+        self._record_history_change("Adjust Manual Threshold", before, coalesce=True)
 
     def _on_use_fixed_mask_toggled(self, checked: bool):
         """Enable/disable using a fixed mask across frames."""
@@ -3270,7 +3367,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             self.show_frame()
         if before is not None:
-            self._record_history_change("Adjust Mask Kernel", before)
+            self._record_history_change("Adjust Mask Kernel", before, coalesce=True)
 
     def _on_bg_percentile_changed(self, value: int):
         """Handle background percentile slider change."""
@@ -3286,7 +3383,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_threshold_display()
             self.show_frame()
         if before is not None:
-            self._record_history_change("Adjust Background Percentile", before)
+            self._record_history_change("Adjust Background Percentile", before, coalesce=True)
 
     def _on_noise_floor_changed(self, value: int):
         """Handle noise floor threshold slider change."""
@@ -3299,7 +3396,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             self.show_frame()
         if before is not None:
-            self._record_history_change("Adjust Noise Floor", before)
+            self._record_history_change("Adjust Noise Floor", before, coalesce=True)
 
     def _on_cache_size_changed(self, value: int):
         """Handle frame cache size changes."""
@@ -3456,7 +3553,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             new_y2 = new_y1 + orig_h
 
             self.rects[self.selected_rect_idx] = ((new_x1, new_y1), (new_x2, new_y2))
-            self.update_rect_list() # Update coordinates in the list
+            # Only refresh the dragged row's text; the full list/widget-state
+            # refresh happens once on release.
+            self._refresh_rect_list_row(self.selected_rect_idx)
             self.show_frame()
 
         elif self.resizing and self.selected_rect_idx is not None:
@@ -3538,7 +3637,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             if new_x1 < new_x2 and new_y1 < new_y2:
                 self.rects[self.selected_rect_idx] = ((new_x1, new_y1), (new_x2, new_y2))
-                self.update_rect_list(preferred_row=self.selected_rect_idx)
+                # Only refresh the dragged row's text; the full list/widget-state
+                # refresh happens once on release.
+                self._refresh_rect_list_row(self.selected_rect_idx)
                 self.show_frame()
         else:
             # Update cursor if hovering over a resize handle or a selectable rectangle
@@ -3585,6 +3686,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             # Moving ROI invalidates any captured masks (shape/position may change)
             self._invalidate_fixed_masks("ROI moved")
+            # Full list/threshold refresh deferred from the per-move updates
+            self.update_rect_list(preferred_row=self.selected_rect_idx)
             self.show_frame() # Redraw in final state
             self._commit_history_action()
 
@@ -3600,6 +3703,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             # Resizing ROI invalidates any captured masks (shape changed)
             self._invalidate_fixed_masks("ROI resized")
+            # Full list/threshold refresh deferred from the per-move updates
+            self.update_rect_list(preferred_row=self.selected_rect_idx)
             self.show_frame() # Redraw in final state
             self._commit_history_action()
 

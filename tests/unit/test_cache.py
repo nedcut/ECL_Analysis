@@ -43,3 +43,14 @@ def test_frame_cache_clear():
 
     assert cache.get_size() == 0
     assert cache.get(0) is None
+
+
+def test_frame_cache_copy_false_shares_arrays():
+    cache = FrameCache(max_size=2)
+    frame = np.arange(4, dtype=np.uint8).reshape(2, 2)
+
+    cache.put(0, frame, copy=False)
+
+    assert cache.get(0, copy=False) is frame
+    # Default get still returns a defensive copy
+    assert cache.get(0) is not frame
