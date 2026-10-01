@@ -5,6 +5,7 @@ from ecl_analysis.roi_geometry import (
     map_frame_to_label_point,
     map_label_to_frame_point,
     map_label_to_frame_rect,
+    scale_value_for_frame,
     scale_value_for_pixmap,
 )
 
@@ -45,3 +46,16 @@ def test_map_label_to_frame_rect_returns_none_outside_pixmap():
 def test_scale_value_for_pixmap_scales_with_width():
     pixmap_rect = QtCore.QRect(0, 0, 100, 50)
     assert scale_value_for_pixmap(10.0, pixmap_rect, frame_width=200) == 5.0
+
+
+def test_scale_value_for_frame_is_inverse_of_pixmap_scaling():
+    pixmap_rect = QtCore.QRect(0, 0, 100, 50)
+    assert scale_value_for_frame(5.0, pixmap_rect, frame_width=200) == 10.0
+    assert scale_value_for_frame(
+        scale_value_for_pixmap(7.0, pixmap_rect, frame_width=200), pixmap_rect, frame_width=200
+    ) == 7.0
+
+
+def test_scale_value_for_frame_handles_degenerate_sizes():
+    assert scale_value_for_frame(10.0, QtCore.QRect(0, 0, 0, 0), frame_width=200) == 10.0
+    assert scale_value_for_frame(10.0, QtCore.QRect(0, 0, 100, 50), frame_width=0) == 10.0

@@ -61,7 +61,7 @@ from .roi_geometry import (
     map_frame_to_label_point as geometry_map_frame_to_label_point,
     map_label_to_frame_point as geometry_map_label_to_frame_point,
     map_label_to_frame_rect as geometry_map_label_to_frame_rect,
-    scale_value_for_pixmap as geometry_scale_value_for_pixmap,
+    scale_value_for_frame as geometry_scale_value_for_frame,
 )
 
 
@@ -3339,7 +3339,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         elif self.selected_rect_idx is not None:
             # Check if clicking near an edge/corner of selected rectangle for resizing
             pt1, pt2 = self.rects[self.selected_rect_idx]
-            resize_margin = self._scale_value_for_pixmap(MOUSE_RESIZE_HANDLE_SENSITIVITY)
+            resize_margin = self._scale_value_for_frame(MOUSE_RESIZE_HANDLE_SENSITIVITY)
             resize_handle = self._get_resize_handle(frame_x, frame_y, (pt1, pt2), resize_margin)
             if resize_handle is not None:
                 self._begin_history_action("Resize ROI")
@@ -3650,15 +3650,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         frame_h, frame_w = self.frame.shape[:2]
         return geometry_map_frame_to_label_point(frame_pos, pixmap_rect, (frame_h, frame_w))
 
-    def _scale_value_for_pixmap(self, value_in_frame_coords: float) -> float:
-        """Scales a value (like a distance) from frame coordinates to pixmap coordinates."""
-        if self.frame is None: return value_in_frame_coords # No scaling if no frame
+    def _scale_value_for_frame(self, value_in_pixmap_coords: float) -> float:
+        """Scales a value (like a distance) from on-screen pixmap coordinates to frame coordinates."""
+        if self.frame is None: return value_in_pixmap_coords # No scaling if no frame
 
         pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect or pixmap_rect.width() == 0: return value_in_frame_coords
+        if not pixmap_rect or pixmap_rect.width() == 0: return value_in_pixmap_coords
 
         frame_w = self.frame.shape[1]
-        return geometry_scale_value_for_pixmap(value_in_frame_coords, pixmap_rect, frame_w)
+        return geometry_scale_value_for_frame(value_in_pixmap_coords, pixmap_rect, frame_w)
 
     def _get_resize_handle(
         self,
@@ -3730,7 +3730,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         # Check for resize handles on the selected rectangle first
         if self.selected_rect_idx is not None:
-            resize_margin = self._scale_value_for_pixmap(MOUSE_RESIZE_HANDLE_SENSITIVITY)
+            resize_margin = self._scale_value_for_frame(MOUSE_RESIZE_HANDLE_SENSITIVITY)
             selected_rect = self.rects[self.selected_rect_idx]
             resize_handle = self._get_resize_handle(frame_x, frame_y, selected_rect, resize_margin)
             if resize_handle is not None:

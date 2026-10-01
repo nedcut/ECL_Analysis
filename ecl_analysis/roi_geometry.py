@@ -94,3 +94,14 @@ def scale_value_for_pixmap(
     if frame_width <= 0 or pixmap_rect.width() <= 0:
         return value_in_frame_coords
     return value_in_frame_coords * (pixmap_rect.width() / frame_width)
+
+
+def scale_value_for_frame(
+    value_in_pixmap_coords: float,
+    pixmap_rect: QtCore.QRect,
+    frame_width: int,
+) -> float:
+    """Scale a pixmap-space (on-screen) distance into frame-space distance."""
+    if frame_width <= 0 or pixmap_rect.width() <= 0:
+        return value_in_pixmap_coords
+    return value_in_pixmap_coords * (frame_width / pixmap_rect.width())
