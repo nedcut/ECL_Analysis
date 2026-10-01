@@ -2203,7 +2203,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             # Attempt auto-detection if ROIs already exist
             if self.rects:
-                self.auto_detect_range()
+                self._auto_detect_range_after_load()
         else:
             QtWidgets.QMessageBox.warning(self, 'Warning', 'Could not read the first frame of the video.')
             self._reset_state()
@@ -3944,6 +3944,27 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             )
             if changed:
                 self._record_history_change("Set Analysis End", before)
+
+    def _auto_detect_range_after_load(self):
+        """Run audio detection automatically after a video load, without nagging.
+
+        Unlike the user-initiated auto_detect_range, prerequisites that are
+        simply not configured (audio backend missing, no expected duration)
+        are reported in the status bar instead of modal warnings.
+        """
+        if self._analysis_in_progress or not self.video_path:
+            return
+        if not self.audio_analyzer.is_available():
+            self.statusBar().showMessage(
+                "Audio auto-detect skipped: librosa/soundfile not installed", 5000
+            )
+            return
+        if self.run_duration_spin.value() <= 0.0:
+            self.statusBar().showMessage(
+                "Audio auto-detect skipped: set an expected run duration to enable it", 5000
+            )
+            return
+        self.auto_detect_range()
 
     def auto_detect_range(self):
         """

@@ -104,3 +104,61 @@ def test_load_video_leaves_no_stray_history_entries(
     assert not window.undo_action.isEnabled()
 
     window.close()
+
+
+def test_load_with_existing_rois_skips_audio_detection_without_duration(
+    qt_application: QtWidgets.QApplication,
+    tmp_path,
+    monkeypatch,
+    no_modals,
+) -> None:
+    window = VideoAnalyzer()
+    window.rects = [((1, 1), (8, 8))]
+    monkeypatch.setattr(window.audio_analyzer, "is_available", lambda: True)
+    window.run_duration_spin.setValue(0.0)
+
+    _load_dummy_video(window, tmp_path, monkeypatch)
+
+    assert window._audio_thread is None
+    assert not window._analysis_in_progress
+    assert "expected run duration" in window.statusBar().currentMessage()
+
+    window.close()
+
+
+def test_load_with_existing_rois_skips_audio_detection_without_librosa(
+    qt_application: QtWidgets.QApplication,
+    tmp_path,
+    monkeypatch,
+    no_modals,
+) -> None:
+    window = VideoAnalyzer()
+    window.rects = [((1, 1), (8, 8))]
+    monkeypatch.setattr(window.audio_analyzer, "is_available", lambda: False)
+    window.run_duration_spin.setValue(10.0)
+
+    _load_dummy_video(window, tmp_path, monkeypatch)
+
+    assert window._audio_thread is None
+    assert "librosa" in window.statusBar().currentMessage()
+
+    window.close()
+
+
+def test_user_initiated_audio_detection_still_warns_without_duration(
+    qt_application: QtWidgets.QApplication,
+    monkeypatch,
+) -> None:
+    window = VideoAnalyzer()
+    window.video_path = "video.mp4"
+    monkeypatch.setattr(window.audio_analyzer, "is_available", lambda: True)
+    window.run_duration_spin.setValue(0.0)
+    warnings = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: warnings.append(args[1:3]))
+
+    window.auto_detect_range()
+
+    assert len(warnings) == 1
+    assert window._audio_thread is None
+
+    window.close()
