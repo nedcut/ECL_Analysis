@@ -20,6 +20,15 @@ MASK_STATUS_MISSING = "missing"  # fixed masks enabled but none captured for thi
 MASK_STATUS_SHAPE_MISMATCH = "dropped_shape_mismatch"  # mask ignored; threshold path used
 
 
+def resolve_threshold_mode(background_roi_idx: Optional[int], manual_threshold: float) -> str:
+    """Which per-frame threshold/background value the analysis applies."""
+    if background_roi_idx is not None:
+        return THRESHOLD_MODE_BACKGROUND_ROI
+    if manual_threshold > 0:
+        return THRESHOLD_MODE_MANUAL
+    return THRESHOLD_MODE_NONE
+
+
 def has_analyzable_rois(rects: Sequence[RoiRect], background_roi_idx: Optional[int]) -> bool:
     """Return True if at least one ROI is not designated as the background ROI."""
     return any(i != background_roi_idx for i in range(len(rects)))
@@ -47,11 +56,7 @@ class AnalysisRequest:
     @property
     def threshold_mode(self) -> str:
         """Which per-frame threshold/background value the worker applies."""
-        if self.background_roi_idx is not None:
-            return THRESHOLD_MODE_BACKGROUND_ROI
-        if self.manual_threshold > 0:
-            return THRESHOLD_MODE_MANUAL
-        return THRESHOLD_MODE_NONE
+        return resolve_threshold_mode(self.background_roi_idx, self.manual_threshold)
 
 
 @dataclass
