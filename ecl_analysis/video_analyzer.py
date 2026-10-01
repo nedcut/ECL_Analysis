@@ -4327,8 +4327,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         self.out_paths = export_result.out_paths
         summary_lines = export_result.summary_lines
-        if export_result.plot_failed:
-            summary_lines.append("Note: Some plots failed to generate - check console for details")
+        if export_result.export_failed:
+            summary_lines.append(
+                "Note: Some exports failed (see FAILED lines above) - check the log for details"
+            )
         if export_result.cancelled:
             summary_lines.append("Note: Export cancelled by user before all ROIs were written")
 
