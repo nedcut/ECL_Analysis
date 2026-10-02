@@ -30,6 +30,9 @@ def get_pygame() -> Optional[ModuleType]:
         pygame = importlib.import_module("pygame")
     except ImportError:
         logging.info("pygame not available - audio features disabled")
+    except Exception:
+        pygame = None
+        logging.warning("pygame failed to import - audio features disabled", exc_info=True)
 
     return pygame
 
@@ -47,7 +50,11 @@ def get_plotly() -> Tuple[Optional[ModuleType], Optional[Callable[..., object]]]
         subplots_module = importlib.import_module("plotly.subplots")
         make_subplots = getattr(subplots_module, "make_subplots", None)
     except ImportError:
+        go, make_subplots = None, None
         logging.info("plotly not available - interactive plots disabled")
+    except Exception:
+        go, make_subplots = None, None
+        logging.warning("plotly failed to import - interactive plots disabled", exc_info=True)
 
     return go, make_subplots
 
@@ -64,6 +71,12 @@ def get_librosa() -> Tuple[Optional[ModuleType], Optional[ModuleType]]:
         librosa = importlib.import_module("librosa")
         sf = importlib.import_module("soundfile")
     except ImportError:
+        librosa, sf = None, None
         logging.info("librosa not available - audio analysis disabled")
+    except Exception:
+        # librosa pulls in numba/llvmlite, which can fail at import time with
+        # errors other than ImportError (e.g. version or cache problems).
+        librosa, sf = None, None
+        logging.warning("librosa failed to import - audio analysis disabled", exc_info=True)
 
     return librosa, sf

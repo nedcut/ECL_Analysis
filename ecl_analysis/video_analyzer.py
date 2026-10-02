@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -18,9 +19,20 @@ from .analysis.background import (
 from .analysis.brightness import (
     compute_brightness_stats as analysis_compute_brightness_stats,
     compute_l_star_frame as analysis_compute_l_star_frame,
+    compute_threshold_pixel_mask,
 )
 from .analysis.duration import validate_run_duration as analysis_validate_run_duration
-from .analysis.models import AnalysisRequest, AnalysisResult, has_analyzable_rois
+from .analysis.frame import FrameAnalysis, FrameAnalysisSettings, analyze_frame, build_roi_mask
+from .analysis.models import (
+    MASK_STATUS_APPLIED,
+    MASK_STATUS_SHAPE_MISMATCH,
+    THRESHOLD_MODE_BACKGROUND_ROI,
+    THRESHOLD_MODE_NONE,
+    AnalysisRequest,
+    AnalysisResult,
+    has_analyzable_rois,
+    resolve_threshold_mode,
+)
 from .audio import AudioAnalyzer, AudioManager
 from .cache import FrameCache
 from .constants import (
@@ -33,8 +45,10 @@ from .constants import (
     DEFAULT_MANUAL_THRESHOLD,
     DEFAULT_SETTINGS_FILE,
     FRAME_CACHE_SIZE,
+    HISTORY_COALESCE_WINDOW_SEC,
     JUMP_FRAMES,
     MAX_RECENT_FILES,
+    MAX_UNDO_HISTORY,
     MORPHOLOGICAL_KERNEL_SIZE,
     MOUSE_RESIZE_HANDLE_SENSITIVITY,
     ROI_COLORS,
@@ -61,7 +75,9 @@ from .roi_geometry import (
     map_frame_to_label_point as geometry_map_frame_to_label_point,
     map_label_to_frame_point as geometry_map_label_to_frame_point,
     map_label_to_frame_rect as geometry_map_label_to_frame_rect,
-    scale_value_for_pixmap as geometry_scale_value_for_pixmap,
+    scale_value_for_frame as geometry_scale_value_for_frame,
+
+    roi_slice_bounds,
 )
 
 
@@ -457,6 +473,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.total_frames = 0
         self.cap = None
         self.out_paths = []
+        # Index of the frame the next cap.read() will return, or None when the
+        # decoder position is unknown (after a failed read, reload, or reset).
+        # Only trusted while self.cap is still the capture it was recorded for.
+        self._decoder_next_frame: Optional[int] = None
+        self._decoder_position_cap = None
+        # Static (per-load) part of the video info panel, keyed by video identity.
+        self._video_info_static: Optional[Tuple[Tuple[object, ...], str, str]] = None
         
         # Frame caching
         self.frame_cache_size = FRAME_CACHE_SIZE
@@ -482,6 +505,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._mask_worker: Optional[QtCore.QObject] = None
         self._mask_progress: Optional[QtWidgets.QProgressDialog] = None
         self._mask_task_type: Optional[str] = None
+
+        # Threads that did not stop when their task was torn down. Their
+        # references must outlive the task: destroying a running QThread aborts.
+        self._stalled_workers: List[Tuple[QtCore.QThread, Optional[QtCore.QObject]]] = []
         
         # Recent files
         self.recent_files = []
@@ -510,6 +537,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._undo_history: List[HistoryEntry] = []
         self._redo_history: List[HistoryEntry] = []
         self._pending_history_entry: Optional[Tuple[str, EditorSnapshot]] = None
+        # (entry, timestamp) of the last coalescable undo entry, so consecutive
+        # slider/spinbox ticks of the same control merge into one entry.
+        self._history_coalesce_marker: Optional[Tuple[HistoryEntry, float]] = None
         
         # Settings
         self.settings = {}
@@ -517,6 +547,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Threshold / background
         self.manual_threshold = DEFAULT_MANUAL_THRESHOLD
         self.background_roi_idx = None       # index into self.rects
+        # analyze_frame() result for the displayed frame (see _preview_frame_analysis)
+        self._preview_analysis_cache = None
         
         # Pixel visualization
         self.show_pixel_mask = False
@@ -809,7 +841,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.show_frame()
 
     def _clone_mask_list(self, masks: List[Optional[np.ndarray]]) -> List[Optional[np.ndarray]]:
-        """Deep-copy masks for history snapshots."""
+        """Deep-copy masks (used when restoring history snapshots)."""
         return [mask.copy() if isinstance(mask, np.ndarray) else None for mask in masks]
 
     def _capture_editor_snapshot(self) -> EditorSnapshot:
@@ -826,7 +858,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             background_percentile=float(self.background_percentile),
             noise_floor_threshold=float(self.noise_floor_threshold),
             use_fixed_mask=bool(self.use_fixed_mask),
-            fixed_roi_masks=self._clone_mask_list(self.fixed_roi_masks),
+            # Mask arrays are never mutated in place (they are always replaced
+            # wholesale), so snapshots share them instead of deep-copying on
+            # every edit. Restoring a snapshot still clones them.
+            fixed_roi_masks=list(self.fixed_roi_masks),
             mask_source_frames=[None if value is None else int(value) for value in self.mask_source_frames],
         )
 
@@ -850,7 +885,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return False
 
         for first_mask, second_mask in zip(first.fixed_roi_masks, second.fixed_roi_masks):
-            if first_mask is None and second_mask is None:
+            if first_mask is second_mask:
                 continue
             if (first_mask is None) != (second_mask is None):
                 return False
@@ -864,8 +899,18 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
         self._pending_history_entry = (label, self._capture_editor_snapshot())
 
-    def _record_history_change(self, label: str, before: EditorSnapshot):
-        """Push a completed history entry when state changed."""
+    def _history_timestamp(self) -> float:
+        """Monotonic clock used for undo coalescing (patchable in tests)."""
+        return time.monotonic()
+
+    def _record_history_change(self, label: str, before: EditorSnapshot, coalesce: bool = False):
+        """Push a completed history entry when state changed.
+
+        With ``coalesce=True`` (continuous controls such as sliders and
+        spinboxes), a change that follows the previous entry of the same label
+        within HISTORY_COALESCE_WINDOW_SEC is merged into that entry instead of
+        pushing a new one, so one slider drag produces one undo step.
+        """
         if self._history_restoring:
             return
 
@@ -873,7 +918,30 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self._snapshots_equal(before, after):
             return
 
-        self._undo_history.append(HistoryEntry(label=label, before=before, after=after))
+        now = self._history_timestamp()
+        marker = self._history_coalesce_marker
+        if (
+            coalesce
+            and marker is not None
+            and self._undo_history
+            and self._undo_history[-1] is marker[0]
+            and marker[0].label == label
+            and not self._redo_history
+            and now - marker[1] <= HISTORY_COALESCE_WINDOW_SEC
+        ):
+            previous = self._undo_history.pop()
+            if self._snapshots_equal(previous.before, after):
+                # The merged gesture ended where it started: nothing to undo.
+                self._history_coalesce_marker = None
+                self._update_history_actions()
+                return
+            before = previous.before
+
+        entry = HistoryEntry(label=label, before=before, after=after)
+        self._undo_history.append(entry)
+        if len(self._undo_history) > MAX_UNDO_HISTORY:
+            del self._undo_history[:len(self._undo_history) - MAX_UNDO_HISTORY]
+        self._history_coalesce_marker = (entry, now) if coalesce else None
         self._redo_history.clear()
         self._update_history_actions()
 
@@ -898,6 +966,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._undo_history.clear()
         self._redo_history.clear()
         self._pending_history_entry = None
+        self._history_coalesce_marker = None
         self._update_history_actions()
 
     def _update_history_actions(self):
@@ -983,13 +1052,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             if self.cap and self.cap.isOpened() and self.total_frames > 0:
                 target_frame = max(0, min(snapshot.current_frame_index, self.total_frames - 1))
-                self.frame_slider.blockSignals(True)
-                self.frame_spinbox.blockSignals(True)
-                self.frame_slider.setValue(target_frame)
-                self.frame_spinbox.setValue(target_frame)
-                self.frame_slider.blockSignals(False)
-                self.frame_spinbox.blockSignals(False)
                 self._seek_to_frame(target_frame)
+                self._sync_frame_navigation_widgets()
             else:
                 self.current_frame_index = snapshot.current_frame_index
                 self.update_frame_label(reset=self.total_frames == 0)
@@ -1006,6 +1070,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
         entry = self._undo_history.pop()
         self._redo_history.append(entry)
+        self._history_coalesce_marker = None
         self._restore_editor_snapshot(entry.before)
         self.statusBar().showMessage(f"Undid: {entry.label}", 3000)
         self._update_history_actions()
@@ -1016,6 +1081,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
         entry = self._redo_history.pop()
         self._undo_history.append(entry)
+        self._history_coalesce_marker = None
         self._restore_editor_snapshot(entry.after)
         self.statusBar().showMessage(f"Redid: {entry.label}", 3000)
         self._update_history_actions()
@@ -1040,6 +1106,69 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if cancelled_any:
             self.statusBar().showMessage("Cancelling background task...")
             self.results_label.setText("Cancellation requested...")
+
+    def _create_progress_dialog(
+        self, label: str, title: str, minimum: int, maximum: int
+    ) -> QtWidgets.QProgressDialog:
+        """Create a window-modal progress dialog whose Cancel button cancels the active worker."""
+        progress = QtWidgets.QProgressDialog(label, "Cancel", minimum, maximum, self)
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+        progress.setWindowTitle(title)
+        progress.canceled.connect(self._cancel_active_worker)
+        return progress
+
+    def _close_progress_dialog(self, progress: QtWidgets.QProgressDialog):
+        """Close a worker progress dialog without requesting cancellation.
+
+        In Qt5, QProgressDialog.closeEvent emits ``canceled``; disconnect it
+        first so a programmatic close after success doesn't cancel anything.
+        """
+        try:
+            progress.canceled.disconnect(self._cancel_active_worker)
+        except TypeError:
+            pass  # Already disconnected
+        progress.close()
+        progress.deleteLater()
+
+    def _release_worker_thread(
+        self,
+        thread: Optional[QtCore.QThread],
+        worker: Optional[QtCore.QObject],
+        name: str,
+    ):
+        """Stop a finished task's thread, parking it if it refuses to stop.
+
+        A thread that is still running after shutdown_worker_thread keeps its
+        references in self._stalled_workers (so it is never destroyed while
+        running) and has its worker signals disconnected, so a late result
+        cannot be mistaken for the next task's.
+        """
+        self._prune_stalled_workers()
+        if shutdown_worker_thread(thread, name):
+            return
+
+        if worker is not None:
+            if hasattr(worker, "cancel"):
+                worker.cancel()  # type: ignore[call-arg]
+            for signal_name in ("finished", "error", "cancelled", "progress_changed", "progress_message"):
+                signal = getattr(worker, signal_name, None)
+                if signal is None:
+                    continue
+                try:
+                    signal.disconnect()
+                except TypeError:
+                    pass  # No connections
+        self._stalled_workers.append((thread, worker))
+        self.statusBar().showMessage(
+            f"Warning: the previous {name} task is still stopping in the background."
+        )
+
+    def _prune_stalled_workers(self) -> bool:
+        """Drop references to parked threads that have stopped; return True if any still run."""
+        self._stalled_workers = [
+            (thread, worker) for thread, worker in self._stalled_workers if thread.isRunning()
+        ]
+        return bool(self._stalled_workers)
 
     def _show_shortcuts_dialog(self):
         """Show keyboard shortcuts dialog."""
@@ -1376,7 +1505,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         frame_input_layout.addWidget(QtWidgets.QLabel("Go to:"))
         self.frame_spinbox = QtWidgets.QSpinBox()
         self.frame_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
-        self.frame_spinbox.setToolTip("Enter frame number directly")
+        self.frame_spinbox.setToolTip("Enter frame number directly (1-based)")
         self.frame_spinbox.setAlignment(QtCore.Qt.AlignCenter)
         self.frame_spinbox.setFixedWidth(80)
         frame_input_layout.addWidget(self.frame_spinbox)
@@ -1962,6 +2091,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         else:
             self.mask_pixel_count_label.setText("Mask Pixels: n/a")
 
+    def _set_use_fixed_mask_silently(self, checked: bool):
+        """Programmatically set fixed-mask usage without firing the toggle handler.
+
+        The checkbox handler records a "Toggle Fixed Mask" history entry, which
+        must only happen for user clicks, not as a side effect of other actions.
+        """
+        self.use_fixed_mask = checked
+        was_blocked = self.use_fixed_mask_checkbox.blockSignals(True)
+        self.use_fixed_mask_checkbox.setChecked(checked)
+        self.use_fixed_mask_checkbox.blockSignals(was_blocked)
+
     def _invalidate_fixed_masks(self, reason: str = ""):
         """Clear captured fixed masks when ROIs change or become invalid.
         Optionally provide a reason for UI feedback.
@@ -1981,25 +2121,33 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.video_info_label.setText("No video loaded")
             self.file_info_label.setText("No video loaded")
             return
-        
-        fps = self.cap.get(cv2.CAP_PROP_FPS)
-        width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        duration_sec = self.total_frames / fps if fps > 0 else 0
-        
-        file_name = os.path.basename(self.video_path)
-        file_size = os.path.getsize(self.video_path) / (1024 * 1024)  # MB
-        
-        info_text = f"""
-<b>File:</b> {file_name}<br>
-<b>Size:</b> {file_size:.1f} MB<br>
-<b>Resolution:</b> {width} × {height}<br>
-<b>Frames:</b> {self.total_frames}<br>
-<b>FPS:</b> {fps:.2f}<br>
-<b>Duration:</b> {duration_sec:.1f}s<br>
-<b>Analysis Range:</b> {self._normalized_analysis_range()[0] + 1}-{self._normalized_analysis_range()[1] + 1}
-        """.strip()
-        
+
+        # File size and decoder properties are fixed for a loaded video; compute
+        # them once per load instead of on every frame change.
+        static_key = (self.video_path, id(self.cap), self.total_frames)
+        if self._video_info_static is None or self._video_info_static[0] != static_key:
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            duration_sec = self.total_frames / fps if fps > 0 else 0
+
+            file_name = os.path.basename(self.video_path)
+            file_size = os.path.getsize(self.video_path) / (1024 * 1024)  # MB
+
+            static_text = (
+                f"<b>File:</b> {file_name}<br>\n"
+                f"<b>Size:</b> {file_size:.1f} MB<br>\n"
+                f"<b>Resolution:</b> {width} × {height}<br>\n"
+                f"<b>Frames:</b> {self.total_frames}<br>\n"
+                f"<b>FPS:</b> {fps:.2f}<br>\n"
+                f"<b>Duration:</b> {duration_sec:.1f}s<br>\n"
+            )
+            self._video_info_static = (static_key, static_text, file_name)
+
+        _key, static_text, file_name = self._video_info_static
+        range_start, range_end = self._normalized_analysis_range()
+        info_text = f"{static_text}<b>Analysis Range:</b> {range_start + 1}-{range_end + 1}"
+
         self.video_info_label.setText(info_text)
         self.file_info_label.setText(f"Loaded: {file_name}")
 
@@ -2063,6 +2211,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._mask_worker = None
         else:
             all_stopped = False
+        if self._prune_stalled_workers():
+            all_stopped = False
 
         if not all_stopped:
             # Keep the window (and the thread/worker references) alive until
@@ -2119,6 +2269,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.cap:
             self.cap.release()
             self.cap = None
+        self._decoder_next_frame = None
+        self._decoder_position_cap = None
+        self._video_info_static = None
 
         if not self.video_path or not os.path.exists(self.video_path):
             QtWidgets.QMessageBox.critical(self, 'Error', 'Video path is invalid or file does not exist.')
@@ -2155,8 +2308,21 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         # Load the first frame
         ret, frame = self.cap.read()
         if ret:
+            self._decoder_next_frame = 1
+            self._decoder_position_cap = self.cap
             self.frame = frame
-            self.frame_cache.put(0, frame)  # Cache first frame
+            # Fresh decoder output: share it with the cache (self.frame is never mutated in place)
+            self.frame_cache.put(0, frame, copy=False)  # Cache first frame
+
+            # Reset fixed masks on new video load, before the first draw. The
+            # fixed-mask flag is set without firing its toggle handler, so a
+            # later reset would leave the readout/overlay on the previous
+            # video's masks.
+            self.fixed_roi_masks = [None for _ in self.rects]
+            self.mask_source_frames = [None for _ in self.rects]
+            self._set_use_fixed_mask_silently(False)
+            self.mask_status_label.setText("Mask: none")
+            self._update_mask_pixel_count_display()
 
             # Ensure the pixmap scales to the label’s current size the first time we draw it
             self._current_image_size = self.image_label.size()
@@ -2164,14 +2330,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             # Update UI elements for the loaded video
             self.frame_slider.setRange(0, self.total_frames - 1)
             self.frame_slider.setValue(0)
-            self.frame_spinbox.setRange(0, self.total_frames - 1)
-            self.frame_spinbox.setValue(0)
+            self.frame_spinbox.setRange(1, self.total_frames)
+            self.frame_spinbox.setValue(1)
             self.update_frame_label()
             self._sync_analysis_range_widgets()
             self.show_frame()
             self._update_video_info()
             self._update_cache_status()
             self._update_threshold_display()
+            self._update_current_brightness_display()
             
             # Add to recent files
             self._add_recent_file(self.video_path)
@@ -2183,16 +2350,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_widget_states(video_loaded=True, rois_exist=bool(self.rects))
             self.statusBar().showMessage(f"✅ Successfully loaded: {os.path.basename(self.video_path)}")
 
-            # Reset fixed masks on new video load
-            self.fixed_roi_masks = [None for _ in self.rects]
-            self.mask_source_frames = [None for _ in self.rects]
-            self.use_fixed_mask_checkbox.setChecked(False)
-            self.mask_status_label.setText("Mask: none")
-            self._update_mask_pixel_count_display()
-
             # Attempt auto-detection if ROIs already exist
             if self.rects:
-                self.auto_detect_range()
+                self._auto_detect_range_after_load()
         else:
             QtWidgets.QMessageBox.warning(self, 'Warning', 'Could not read the first frame of the video.')
             self._reset_state()
@@ -2206,8 +2366,22 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.current_frame_index = 0
         self.total_frames = 0
         self.cap = None
+        self._decoder_next_frame = None
+        self._decoder_position_cap = None
+        self._video_info_static = None
+        # Drop the cached preview analysis so it no longer holds the closed
+        # video's frame and L* channel.
+        self._preview_analysis_cache = None
         self.rects = []
         self.selected_rect_idx = None
+        # ROI-dependent state must go with the ROIs (mirrors clear_all_rectangles);
+        # a stale background index would otherwise apply to newly drawn ROIs.
+        self.background_roi_idx = None
+        self.fixed_roi_masks = []
+        self.mask_source_frames = []
+        self._set_use_fixed_mask_silently(False)
+        self.mask_status_label.setText("Mask: none")
+        self._update_mask_pixel_count_display()
         self.start_frame = 0
         self.end_frame = None
         self.out_paths = []
@@ -2238,16 +2412,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """Handles frame changes initiated by the slider."""
         if self.cap and self.cap.isOpened() and value != self.current_frame_index:
             self._seek_to_frame(value)
-            # Sync spinbox without triggering its signal
-            self.frame_spinbox.blockSignals(True)
-            self.frame_spinbox.setValue(value)
-            self.frame_spinbox.blockSignals(False)
+            # Sync widgets to the frame actually shown (the seek may have failed)
+            self._sync_frame_navigation_widgets()
 
     def spinbox_frame_changed(self, value: int):
-        """Handles frame changes initiated by the spinbox."""
-        if self.cap and self.cap.isOpened() and value != self.current_frame_index:
+        """Handles frame changes initiated by the spinbox (1-based frame numbers)."""
+        frame_index = value - 1
+        if self.cap and self.cap.isOpened() and frame_index != self.current_frame_index:
             # Sync slider, which will trigger slider_frame_changed -> _seek_to_frame
-            self.frame_slider.setValue(value)
+            self.frame_slider.setValue(frame_index)
+
+    def _sync_frame_navigation_widgets(self):
+        """Point the frame slider and 1-based "Go to" box at current_frame_index without seeking."""
+        was_blocked = self.frame_slider.blockSignals(True)
+        self.frame_slider.setValue(self.current_frame_index)
+        self.frame_slider.blockSignals(was_blocked)
+        was_blocked = self.frame_spinbox.blockSignals(True)
+        self.frame_spinbox.setValue(self.current_frame_index + 1)
+        self.frame_spinbox.blockSignals(was_blocked)
 
     def step_frames(self, delta: int):
         """Moves forward or backward by a specified number of frames."""
@@ -2323,8 +2505,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             logging.warning(f"Attempted to seek to invalid frame index {frame_index}")
             return
 
-        # Check cache first
-        cached_frame = self.frame_cache.get(frame_index)
+        # Check cache first. self.frame is treated as read-only everywhere
+        # (show_frame draws on a copy), so the cached array can be shared.
+        cached_frame = self.frame_cache.get(frame_index, copy=False)
         if cached_frame is not None:
             self.frame = cached_frame
             self.current_frame_index = frame_index
@@ -2334,15 +2517,24 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_threshold_display()
             return
 
-        # Not in cache, read from video
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        # Not in cache, read from video. Only seek when the requested frame is
+        # not the one the decoder will return next: a seek forces a keyframe
+        # search + decode, which dominates sequential playback/stepping.
+        decoder_is_at_frame = (
+            self._decoder_position_cap is self.cap
+            and self._decoder_next_frame == frame_index
+        )
+        if not decoder_is_at_frame:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ret, frame = self.cap.read()
         if ret:
+            self._decoder_next_frame = frame_index + 1
+            self._decoder_position_cap = self.cap
             self.frame = frame
             self.current_frame_index = frame_index
             
-            # Cache the frame
-            self.frame_cache.put(frame_index, frame)
+            # Cache the frame (fresh decoder output, so no defensive copy needed)
+            self.frame_cache.put(frame_index, frame, copy=False)
             self._update_cache_status()
             
             self.show_frame()
@@ -2350,7 +2542,14 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             self._update_threshold_display()
         else:
+            self._decoder_next_frame = None
+            self._decoder_position_cap = None
             logging.warning(f"Failed to read frame at index {frame_index}")
+            # The navigation widgets may already point at the requested frame;
+            # move them back to the frame that is actually displayed.
+            self.stop_playback()
+            self.statusBar().showMessage(f"Could not read frame {frame_index + 1}", 5000)
+            self._sync_frame_navigation_widgets()
 
     def update_frame_label(self, reset=False):
         """Updates the frame counter label (e.g., "Frame: 10 / 100")."""
@@ -2366,11 +2565,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         if self.frame is None:
             return
 
-        frame_copy = self.frame.copy()
-        
-        # Apply pixel mask visualization if enabled
+        # Apply pixel mask visualization if enabled. The overlay already returns
+        # a new array, so only copy when it did not (ROIs are drawn in place).
+        frame_copy = None
         if self.show_pixel_mask and len(self.rects) > 0:
-            frame_copy = self._apply_pixel_mask_overlay(frame_copy)
+            frame_copy = self._apply_pixel_mask_overlay(self.frame)
+        if frame_copy is None or frame_copy is self.frame:
+            frame_copy = self.frame.copy()
             
         self._draw_rois(frame_copy)
 
@@ -2430,84 +2631,69 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.brightness_display_label.setText("N/A")
             return
 
-        roi_data = []
-        background_brightness = None
-        fh, fw = self.frame.shape[:2]
-        
-        # Calculate background brightness if background ROI is defined
-        if self.background_roi_idx is not None:
-            background_brightness = self._compute_background_brightness(self.frame)
-        
-        for idx, (pt1, pt2) in enumerate(self.rects):
-            # Handle background ROI separately
-            if idx == self.background_roi_idx:
-                continue
-                
-            # Ensure ROI coordinates are valid within the frame
-            x1 = max(0, min(pt1[0], fw - 1))
-            y1 = max(0, min(pt1[1], fh - 1))
-            x2 = max(0, min(pt2[0], fw - 1))
-            y2 = max(0, min(pt2[1], fh - 1))
-
-            if x2 > x1 and y2 > y1: # Check for valid ROI area
-                roi = self.frame[y1:y2, x1:x2]
-                roi_mask = None
-                if self.use_fixed_mask and idx < len(self.fixed_roi_masks):
-                    roi_mask = self.fixed_roi_masks[idx]
-                    if isinstance(roi_mask, np.ndarray) and roi_mask.shape[:2] != roi.shape[:2]:
-                        roi_mask = None
-                brightness_stats = self._compute_brightness_stats(roi, background_brightness, roi_mask)
-                l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median = brightness_stats[:6]
-                roi_data.append((idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median))
-            else:
-                roi_data.append((idx, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)) # Append zeros if ROI is invalid/empty
-
-        if roi_data:
-            # Build comprehensive display
-            display_lines = ["Current Brightness:"]
-            
-            for idx, l_raw_mean, l_raw_median, l_bg_sub_mean, l_bg_sub_median, b_raw_mean, b_raw_median in roi_data:
-                if self.background_roi_idx is not None:
-                    # Show L* with background subtraction and blue channel
-                    display_lines.append(f"ROI {idx+1}: L* {l_raw_mean:.1f} (BG-Sub: {l_bg_sub_mean:.1f}) | Blue: {b_raw_mean:.0f}")
-                else:
-                    # Show raw L* and blue channel when no background ROI
-                    display_lines.append(f"ROI {idx+1}: L* {l_raw_mean:.1f} | Blue: {b_raw_mean:.0f}")
-            
-            # Add background ROI info if defined
-            if self.background_roi_idx is not None and background_brightness is not None:
-                # Calculate blue channel for background ROI
-                bg_pt1, bg_pt2 = self.rects[self.background_roi_idx]
-                bg_x1 = max(0, min(bg_pt1[0], fw - 1))
-                bg_y1 = max(0, min(bg_pt1[1], fh - 1))
-                bg_x2 = max(0, min(bg_pt2[0], fw - 1))
-                bg_y2 = max(0, min(bg_pt2[1], fh - 1))
-                
-                if bg_x2 > bg_x1 and bg_y2 > bg_y1:
-                    bg_roi = self.frame[bg_y1:bg_y2, bg_x1:bg_x2]
-                    _, _, _, _, bg_b_mean, _, _, _ = self._compute_brightness_stats(bg_roi)
-                    display_lines.append(f"Background: L* {background_brightness:.1f} | Blue: {bg_b_mean:.0f}")
-            
-            self.brightness_display_label.setText("\n".join(display_lines))
-        else:
+        # Same per-frame computation the analysis worker runs, so the readout
+        # shows the values a run would export for this frame.
+        analysis, _ = self._preview_frame_analysis()
+        if analysis is None or not analysis.rois:
             self.brightness_display_label.setText("N/A")
+            return
+
+        display_lines = ["Current Brightness:"]
+        sub_label = "BG-Sub" if analysis.threshold_mode == THRESHOLD_MODE_BACKGROUND_ROI else "Thr-Sub"
+        for roi_result in analysis.rois:
+            line = f"ROI {roi_result.roi_idx + 1}: L* {roi_result.stats.l_raw_mean:.1f}"
+            if roi_result.thresholded:
+                # Exported L*: threshold-subtracted over the analyzed pixels
+                line += f" ({sub_label}: {roi_result.mean:.1f}, {roi_result.pixel_count:,} px)"
+            line += f" | Blue: {roi_result.blue_mean:.0f}"
+            if roi_result.mask_status == MASK_STATUS_SHAPE_MISMATCH:
+                line += " [fixed mask ignored: size mismatch]"
+            display_lines.append(line)
+
+        # Add background ROI info if defined
+        if self.background_roi_idx is not None and analysis.threshold is not None:
+            fh, fw = self.frame.shape[:2]
+            bg_pt1, bg_pt2 = self.rects[self.background_roi_idx]
+            bg_x1, bg_y1, bg_x2, bg_y2 = roi_slice_bounds(bg_pt1, bg_pt2, fw, fh)
+            if bg_x2 > bg_x1 and bg_y2 > bg_y1:
+                bg_roi = self.frame[bg_y1:bg_y2, bg_x1:bg_x2]
+                _, _, _, _, bg_b_mean, _, _, _ = self._compute_brightness_stats(bg_roi)
+                display_lines.append(f"Background: L* {analysis.threshold:.1f} | Blue: {bg_b_mean:.0f}")
+        elif analysis.threshold is not None:
+            display_lines.append(f"Manual threshold: L* {analysis.threshold:.1f}")
+
+        self.brightness_display_label.setText("\n".join(display_lines))
 
 
     # --- ROI Management ---
+
+    def _format_rect_list_label(self, idx: int) -> str:
+        """Build the ROI list text for the rectangle at ``idx``."""
+        (x1, y1), (x2, y2) = self.rects[idx]
+        # Ensure coordinates are ordered correctly for display
+        disp_x1, disp_y1 = min(x1, x2), min(y1, y2)
+        disp_x2, disp_y2 = max(x1, x2), max(y1, y2)
+        prefix = "* " if idx == self.background_roi_idx else ""
+        return f"{prefix}ROI {idx+1}: ({disp_x1},{disp_y1})-({disp_x2},{disp_y2})"
+
+    def _refresh_rect_list_row(self, idx: int):
+        """Update only one ROI row's text (cheap path used while dragging).
+
+        Falls back to a full rebuild if the list is out of sync with self.rects.
+        """
+        item = self.rect_list.item(idx) if self.rect_list.count() == len(self.rects) else None
+        if item is None:
+            self.update_rect_list(preferred_row=idx)
+            return
+        item.setText(self._format_rect_list_label(idx))
 
     def update_rect_list(self, preferred_row: Optional[int] = None):
         """Updates the QListWidget displaying the ROIs."""
         self.rect_list.blockSignals(True) # Prevent selection signals during update
         current_row = preferred_row if preferred_row is not None else self.rect_list.currentRow()
         self.rect_list.clear()
-        for idx, (pt1, pt2) in enumerate(self.rects):
-            x1, y1 = pt1
-            x2, y2 = pt2
-            # Ensure coordinates are ordered correctly for display
-            disp_x1, disp_y1 = min(x1, x2), min(y1, y2)
-            disp_x2, disp_y2 = max(x1, x2), max(y1, y2)
-            prefix = "* " if idx == self.background_roi_idx else ""
-            self.rect_list.addItem(f"{prefix}ROI {idx+1}: ({disp_x1},{disp_y1})-({disp_x2},{disp_y2})")
+        for idx in range(len(self.rects)):
+            self.rect_list.addItem(self._format_rect_list_label(idx))
 
         # Restore selection if possible
         if 0 <= current_row < len(self.rects):
@@ -2758,6 +2944,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                  self.selected_rect_idx = None
             # No need to explicitly set selection index otherwise, update_rect_list handles it
             self.update_rect_list(preferred_row=self.selected_rect_idx)
+            self._update_current_brightness_display()
             self.show_frame()
             self.results_label.setText("Deleted selected ROI.")
             self._record_history_change("Delete ROI", before)
@@ -2776,10 +2963,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.background_roi_idx = None
             self.fixed_roi_masks = []
             self.mask_source_frames = []
-            self.use_fixed_mask_checkbox.setChecked(False)
+            self._set_use_fixed_mask_silently(False)
             self.mask_status_label.setText("Mask: none")
             self._update_mask_pixel_count_display()
             self.update_rect_list()
+            self._update_current_brightness_display()
             self.show_frame()
             self.results_label.setText("Cleared all ROIs.")
             self._record_history_change("Clear All ROIs", before)
@@ -2792,7 +2980,11 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             return
 
         before = self._capture_editor_snapshot()
+        background_changed = self.background_roi_idx != self.selected_rect_idx
         self.background_roi_idx = self.selected_rect_idx
+        # The threshold rule changed, so masks captured under the old one are stale.
+        if background_changed:
+            self._invalidate_fixed_masks("background ROI changed")
         
         # Calculate background threshold for display
         if self.frame is not None:
@@ -2807,18 +2999,22 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.results_label.setText(f"Background ROI set to ROI {self.selected_rect_idx + 1}")
         
         self.update_rect_list()
+        if self.frame is not None:
+            self._update_current_brightness_display()
+            self.show_frame()
         self._record_history_change("Set Background ROI", before)
 
     def _calculate_background_threshold(self) -> Optional[float]:
         """Calculate the current background threshold based on background ROI or manual setting.
 
-        Delegates to the same percentile-based helper used by the analysis worker
-        (`_compute_background_brightness`) so the displayed threshold always matches
-        what is actually applied during analysis.
+        Taken from the same per-frame analysis the worker runs
+        (`analysis.frame.analyze_frame`, cached per displayed frame) so the
+        displayed threshold always matches what is actually applied during analysis.
         """
-        if self.background_roi_idx is not None and self.frame is not None:
+        if self.background_roi_idx is not None and self.frame is not None and self.rects:
             try:
-                return self._compute_background_brightness(self.frame)
+                analysis, _ = self._preview_frame_analysis()
+                return analysis.threshold if analysis is not None else None
             except BackgroundComputationError:
                 # Display-only path: log and show no value; the analysis worker
                 # still fails loudly if the same computation breaks during a run.
@@ -2840,6 +3036,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} (calculating...)")
             else:
                 self.threshold_display_label.setText(f"Active Threshold: Background ROI {self.background_roi_idx + 1} (no frame)")
+        elif resolve_threshold_mode(self.background_roi_idx, self.manual_threshold) == THRESHOLD_MODE_NONE:
+            # Manual threshold of 0 disables thresholding: the analysis uses the whole ROI
+            self.threshold_display_label.setText("Active Threshold: None (manual threshold 0, whole ROI)")
         else:
             # Manual threshold mode
             self.threshold_display_label.setText(f"Active Threshold: Manual ({self.manual_threshold:.2f} L*)")
@@ -2862,46 +3061,39 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         """
         overlay = frame.copy()
 
-        # Precompute L* and derive the same threshold the analysis worker would
-        # apply (background ROI when configured, manual threshold otherwise).
-        l_star_frame = self._compute_l_star_frame(frame)
+        # Reuse the displayed frame's analysis (cached): the same threshold, ROI
+        # bounds and fixed-mask decisions the analysis worker would apply.
         try:
-            effective_threshold = self._effective_analysis_threshold(frame, frame_l_star=l_star_frame)
+            analysis, l_star_frame = self._preview_frame_analysis()
         except BackgroundComputationError:
             logging.exception("Pixel mask overlay skipped: background computation failed")
             self.statusBar().showMessage("Pixel mask overlay unavailable: background computation failed")
             return frame
+        if analysis is None or l_star_frame is None or l_star_frame.shape[:2] != frame.shape[:2]:
+            return frame
+        effective_threshold = analysis.threshold
 
-        for roi_idx, (pt1, pt2) in enumerate(self.rects):
-            # Skip background ROI
-            if roi_idx == self.background_roi_idx:
-                continue
-                
-            # Extract ROI bounds
-            fh, fw = frame.shape[:2]
-            x1 = max(0, min(pt1[0], fw - 1))
-            y1 = max(0, min(pt1[1], fh - 1))
-            x2 = max(0, min(pt2[0], fw - 1))
-            y2 = max(0, min(pt2[1], fh - 1))
-            
-            if x2 > x1 and y2 > y1:
+        for roi_result in analysis.rois:
+            roi_idx = roi_result.roi_idx
+            x1, y1, x2, y2 = roi_result.bounds
+
+            if not roi_result.is_empty:
                 roi = frame[y1:y2, x1:x2]
                 roi_l_star = l_star_frame[y1:y2, x1:x2]
                 try:
-                    use_fixed = self.use_fixed_mask and roi_idx < len(self.fixed_roi_masks) and isinstance(self.fixed_roi_masks[roi_idx], np.ndarray)
                     mask = None
-                    if use_fixed:
-                        fixed_mask = self.fixed_roi_masks[roi_idx]
-                        if fixed_mask is not None and fixed_mask.shape[:2] == roi.shape[:2]:
-                            mask = fixed_mask.astype(bool)
-                        else:
-                            # Shape mismatch - ignore fixed mask
-                            mask = None
+                    if roi_result.mask_status == MASK_STATUS_APPLIED:
+                        mask = self.fixed_roi_masks[roi_idx].astype(bool)
 
                     if mask is None:
                         # Derive mask from current frame using cached L* channel
                         if effective_threshold is not None:
-                            mask = roi_l_star > effective_threshold
+                            mask = compute_threshold_pixel_mask(
+                                roi_l_star,
+                                effective_threshold,
+                                self.morphological_kernel_size,
+                                self.noise_floor_threshold,
+                            )
                         else:
                             mask = np.ones_like(roi_l_star, dtype=bool)
                     
@@ -2925,9 +3117,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_threshold_display()
             return
         before = self._capture_editor_snapshot()
+        threshold_rule_changed = self.background_roi_idx is None and value != self.manual_threshold
         self.manual_threshold = value
+        # With no background ROI the manual threshold is the mask/analysis rule,
+        # so masks captured under the old value no longer match it.
+        if threshold_rule_changed:
+            self._invalidate_fixed_masks("manual threshold changed")
         self._update_threshold_display()
-        self._record_history_change("Adjust Manual Threshold", before)
+        if self.frame is not None:
+            self._update_current_brightness_display()
+            self.show_frame()
+        self._record_history_change("Adjust Manual Threshold", before, coalesce=True)
 
     def _on_use_fixed_mask_toggled(self, checked: bool):
         """Enable/disable using a fixed mask across frames."""
@@ -2959,12 +3159,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             QtWidgets.QMessageBox.information(self, "Capture Mask", "Load a video and define at least one ROI.")
             return
 
-        frame = self.frame
-        fh, fw = frame.shape[:2]
-        # Determine the analysis-equivalent threshold once from the current frame
-        l_star_frame = self._compute_l_star_frame(frame)
+        # Use the analysis-equivalent threshold of the current frame
         try:
-            effective_threshold = self._effective_analysis_threshold(frame, frame_l_star=l_star_frame)
+            analysis, l_star_frame = self._preview_frame_analysis()
+            effective_threshold = analysis.threshold
         except BackgroundComputationError:
             logging.exception("Mask capture aborted: background computation failed")
             QtWidgets.QMessageBox.warning(
@@ -2982,44 +3180,25 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         masks: List[Optional[np.ndarray]] = []
         sources: List[Optional[int]] = []
         created_any = False
-        for roi_idx, (pt1, pt2) in enumerate(self.rects):
+        for roi_idx, rect in enumerate(self.rects):
             if roi_idx == self.background_roi_idx:
                 masks.append(None)
                 sources.append(None)
                 continue
-            x1 = max(0, min(pt1[0], fw - 1))
-            y1 = max(0, min(pt1[1], fh - 1))
-            x2 = max(0, min(pt2[0], fw - 1))
-            y2 = max(0, min(pt2[1], fh - 1))
-            if x2 > x1 and y2 > y1:
-                roi_l_star = l_star_frame[y1:y2, x1:x2]
-                try:
-                    if effective_threshold is not None:
-                        mask = roi_l_star > effective_threshold
-                        # Morphological cleanup similar to analysis
-                        if np.any(mask):
-                            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.morphological_kernel_size, self.morphological_kernel_size))
-                            mask_uint8 = mask.astype(np.uint8) * 255
-                            cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-                            mask = cleaned > 0
-                    else:
-                        # No thresholding configured - analysis uses the full ROI
-                        mask = np.ones(roi_l_star.shape, dtype=bool)
-                    masks.append(mask)
-                    sources.append(source_frame_idx)
-                    created_any = True
-                except Exception as e:
-                    logging.warning(f"Failed to capture mask for ROI {roi_idx+1}: {e}")
-                    masks.append(None)
-                    sources.append(None)
-            else:
-                masks.append(None)
-                sources.append(None)
+            try:
+                # Same rule as per-ROI auto-capture (analysis.frame.build_roi_mask)
+                mask = build_roi_mask(l_star_frame, rect, effective_threshold, self.morphological_kernel_size)
+            except Exception as e:
+                logging.warning(f"Failed to capture mask for ROI {roi_idx+1}: {e}")
+                mask = None
+            masks.append(mask)
+            sources.append(source_frame_idx if mask is not None else None)
+            created_any = created_any or mask is not None
 
         self.fixed_roi_masks = masks
         self.mask_source_frames = sources
         if created_any:
-            self.mask_status_label.setText(f"Mask: captured from frame {source_frame_idx}")
+            self.mask_status_label.setText(f"Mask: captured from frame {source_frame_idx + 1}")
             if not self.use_fixed_mask:
                 # Auto-enable usage for convenience
                 self.use_fixed_mask = True
@@ -3074,6 +3253,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             step=step,
             background_percentile=self.background_percentile,
             morphological_kernel_size=self.morphological_kernel_size,
+            manual_threshold=float(self.manual_threshold),
         )
         self._start_mask_worker(
             worker=BrightestFrameWorker(request),
@@ -3128,6 +3308,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             step=step,
             background_percentile=self.background_percentile,
             morphological_kernel_size=self.morphological_kernel_size,
+            manual_threshold=float(self.manual_threshold),
         )
         self._start_mask_worker(
             worker=PerRoiMaskCaptureWorker(request),
@@ -3141,11 +3322,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._set_busy_state(True)
         self.stop_playback()
 
-        progress = QtWidgets.QProgressDialog(label, "Cancel", 0, 100, self)
-        progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle(title)
+        progress = self._create_progress_dialog(label, title, 0, 100)
         progress.setValue(0)
-        progress.canceled.connect(self._cancel_active_worker)
         progress.show()
 
         self._mask_task_type = task_type
@@ -3189,7 +3367,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         QtWidgets.QMessageBox.information(
             self,
             "Auto-Capture Complete",
-            f"Captured masks from frame {result.brightest_frame_idx} (brightness: {result.max_brightness:.1f} L*)",
+            f"Captured masks from frame {result.brightest_frame_idx + 1} (brightness: {result.max_brightness:.1f} L*)",
         )
 
     def _on_per_roi_mask_finished(self, result_obj: object):
@@ -3206,7 +3384,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         created_count = sum(1 for m in result.masks if m is not None)
         frame_info = [
-            str(result.sources[i]) if result.sources[i] is not None else "n/a"
+            str(result.sources[i] + 1) if result.sources[i] is not None else "n/a"
             for i in range(len(self.rects))
             if i != self.background_roi_idx
         ]
@@ -3249,12 +3427,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _cleanup_mask_worker(self):
         """Tear down mask worker resources safely."""
         if self._mask_progress is not None:
-            self._mask_progress.close()
+            self._close_progress_dialog(self._mask_progress)
             self._mask_progress = None
 
-        if shutdown_worker_thread(self._mask_thread, "mask"):
-            self._mask_thread = None
-            self._mask_worker = None
+        self._release_worker_thread(self._mask_thread, self._mask_worker, "mask")
+        self._mask_thread = None
+        self._mask_worker = None
 
         self._mask_task_type = None
         self._set_busy_state(False)
@@ -3270,7 +3448,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             self.show_frame()
         if before is not None:
-            self._record_history_change("Adjust Mask Kernel", before)
+            self._record_history_change("Adjust Mask Kernel", before, coalesce=True)
 
     def _on_bg_percentile_changed(self, value: int):
         """Handle background percentile slider change."""
@@ -3286,7 +3464,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_threshold_display()
             self.show_frame()
         if before is not None:
-            self._record_history_change("Adjust Background Percentile", before)
+            self._record_history_change("Adjust Background Percentile", before, coalesce=True)
 
     def _on_noise_floor_changed(self, value: int):
         """Handle noise floor threshold slider change."""
@@ -3299,7 +3477,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self._update_current_brightness_display()
             self.show_frame()
         if before is not None:
-            self._record_history_change("Adjust Noise Floor", before)
+            self._record_history_change("Adjust Noise Floor", before, coalesce=True)
 
     def _on_cache_size_changed(self, value: int):
         """Handle frame cache size changes."""
@@ -3339,7 +3517,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         elif self.selected_rect_idx is not None:
             # Check if clicking near an edge/corner of selected rectangle for resizing
             pt1, pt2 = self.rects[self.selected_rect_idx]
-            resize_margin = self._scale_value_for_pixmap(MOUSE_RESIZE_HANDLE_SENSITIVITY)
+            resize_margin = self._scale_value_for_frame(MOUSE_RESIZE_HANDLE_SENSITIVITY)
             resize_handle = self._get_resize_handle(frame_x, frame_y, (pt1, pt2), resize_margin)
             if resize_handle is not None:
                 self._begin_history_action("Resize ROI")
@@ -3456,7 +3634,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             new_y2 = new_y1 + orig_h
 
             self.rects[self.selected_rect_idx] = ((new_x1, new_y1), (new_x2, new_y2))
-            self.update_rect_list() # Update coordinates in the list
+            # Only refresh the dragged row's text; the full list/widget-state
+            # refresh happens once on release.
+            self._refresh_rect_list_row(self.selected_rect_idx)
             self.show_frame()
 
         elif self.resizing and self.selected_rect_idx is not None:
@@ -3538,7 +3718,9 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
             if new_x1 < new_x2 and new_y1 < new_y2:
                 self.rects[self.selected_rect_idx] = ((new_x1, new_y1), (new_x2, new_y2))
-                self.update_rect_list(preferred_row=self.selected_rect_idx)
+                # Only refresh the dragged row's text; the full list/widget-state
+                # refresh happens once on release.
+                self._refresh_rect_list_row(self.selected_rect_idx)
                 self.show_frame()
         else:
             # Update cursor if hovering over a resize handle or a selectable rectangle
@@ -3581,10 +3763,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.moving = False
             self.move_offset = None
             self.start_point = None
-            # Optional: Recalculate brightness display for the final position
-            self._update_current_brightness_display()
             # Moving ROI invalidates any captured masks (shape/position may change)
             self._invalidate_fixed_masks("ROI moved")
+            # Full list/threshold refresh deferred from the per-move updates
+            self.update_rect_list(preferred_row=self.selected_rect_idx)
+            # Recalculate brightness display for the final position (after the
+            # masks are cleared, so it matches what an analysis run would use)
+            self._update_current_brightness_display()
             self.show_frame() # Redraw in final state
             self._commit_history_action()
 
@@ -3596,10 +3781,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             self.resize_aspect_ratio = None
             self.start_point = None
             self.end_point = None
-            # Optional: Recalculate brightness display for the final size
-            self._update_current_brightness_display()
             # Resizing ROI invalidates any captured masks (shape changed)
             self._invalidate_fixed_masks("ROI resized")
+            # Full list/threshold refresh deferred from the per-move updates
+            self.update_rect_list(preferred_row=self.selected_rect_idx)
+            # Recalculate brightness display for the final size (after the
+            # masks are cleared, so it matches what an analysis run would use)
+            self._update_current_brightness_display()
             self.show_frame() # Redraw in final state
             self._commit_history_action()
 
@@ -3650,15 +3838,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         frame_h, frame_w = self.frame.shape[:2]
         return geometry_map_frame_to_label_point(frame_pos, pixmap_rect, (frame_h, frame_w))
 
-    def _scale_value_for_pixmap(self, value_in_frame_coords: float) -> float:
-        """Scales a value (like a distance) from frame coordinates to pixmap coordinates."""
-        if self.frame is None: return value_in_frame_coords # No scaling if no frame
+    def _scale_value_for_frame(self, value_in_pixmap_coords: float) -> float:
+        """Scales a value (like a distance) from on-screen pixmap coordinates to frame coordinates."""
+        if self.frame is None: return value_in_pixmap_coords # No scaling if no frame
 
         pixmap_rect = self._get_pixmap_rect_in_label()
-        if not pixmap_rect or pixmap_rect.width() == 0: return value_in_frame_coords
+        if not pixmap_rect or pixmap_rect.width() == 0: return value_in_pixmap_coords
 
         frame_w = self.frame.shape[1]
-        return geometry_scale_value_for_pixmap(value_in_frame_coords, pixmap_rect, frame_w)
+        return geometry_scale_value_for_frame(value_in_pixmap_coords, pixmap_rect, frame_w)
 
     def _get_resize_handle(
         self,
@@ -3671,7 +3859,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         (x1, y1), (x2, y2) = rect
         left, right = min(x1, x2), max(x1, x2)
         top, bottom = min(y1, y2), max(y1, y2)
-        m = max(2, int(round(margin)))
+        # Cap the margin at a quarter of the ROI's smaller side so the centre of a
+        # small (or heavily downscaled) ROI always remains a move target.
+        max_margin = min(right - left, bottom - top) / 4
+        m = max(2, int(round(min(margin, max_margin))))
 
         # Corners first so they win over edge hits.
         corners = {
@@ -3730,7 +3921,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         # Check for resize handles on the selected rectangle first
         if self.selected_rect_idx is not None:
-            resize_margin = self._scale_value_for_pixmap(MOUSE_RESIZE_HANDLE_SENSITIVITY)
+            resize_margin = self._scale_value_for_frame(MOUSE_RESIZE_HANDLE_SENSITIVITY)
             selected_rect = self.rects[self.selected_rect_idx]
             resize_handle = self._get_resize_handle(frame_x, frame_y, selected_rect, resize_margin)
             if resize_handle is not None:
@@ -3855,13 +4046,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         if seek_to_frame is not None:
             target = max(0, min(int(seek_to_frame), self.total_frames - 1))
-            self.frame_slider.blockSignals(True)
-            self.frame_spinbox.blockSignals(True)
-            self.frame_slider.setValue(target)
-            self.frame_spinbox.setValue(target)
-            self.frame_slider.blockSignals(False)
-            self.frame_spinbox.blockSignals(False)
             self._seek_to_frame(target)
+            self._sync_frame_navigation_widgets()
 
         if result_message:
             self.results_label.setText(result_message)
@@ -3926,6 +4112,27 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             if changed:
                 self._record_history_change("Set Analysis End", before)
 
+    def _auto_detect_range_after_load(self):
+        """Run audio detection automatically after a video load, without nagging.
+
+        Unlike the user-initiated auto_detect_range, prerequisites that are
+        simply not configured (audio backend missing, no expected duration)
+        are reported in the status bar instead of modal warnings.
+        """
+        if self._analysis_in_progress or not self.video_path:
+            return
+        if not self.audio_analyzer.is_available():
+            self.statusBar().showMessage(
+                "Audio auto-detect skipped: librosa/soundfile not installed", 5000
+            )
+            return
+        if self.run_duration_spin.value() <= 0.0:
+            self.statusBar().showMessage(
+                "Audio auto-detect skipped: set an expected run duration to enable it", 5000
+            )
+            return
+        self.auto_detect_range()
+
     def auto_detect_range(self):
         """
         Analyzes video audio to detect completion beeps and calculates frame ranges 
@@ -3960,11 +4167,7 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._pending_audio_expected_duration = expected_duration
         self.results_label.setText("Audio Detection: analyzing audio for completion beeps...")
 
-        progress = QtWidgets.QProgressDialog("Analyzing audio for completion beeps...", "Cancel", 0, 0, self)
-        progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle("Audio Detection")
-        progress.setRange(0, 0)
-        progress.canceled.connect(self._cancel_active_worker)
+        progress = self._create_progress_dialog("Analyzing audio for completion beeps...", "Audio Detection", 0, 0)
         progress.show()
         self._audio_progress = progress
 
@@ -3977,8 +4180,17 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self._audio_worker.cancelled.connect(self._on_audio_detection_cancelled)
         self._audio_thread.start()
 
-    def _apply_audio_detection_results(self, completion_beeps: List[Tuple[float, int]], expected_duration: float):
-        """Apply completion beep selection and update the selected frame range."""
+    def _apply_audio_detection_results(
+        self,
+        completion_beeps: List[Tuple[float, int]],
+        expected_duration: float,
+        unfiltered: bool = False,
+    ):
+        """Apply completion beep selection and update the selected frame range.
+
+        ``unfiltered`` means no beep occurred at least ``expected_duration``
+        into the video, so the beeps offered are not duration-filtered.
+        """
         if not completion_beeps:
             QtWidgets.QMessageBox.information(
                 self,
@@ -3987,6 +4199,13 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             )
             self.results_label.setText("Audio Detection: No completion beeps found.")
             return
+
+        unfiltered_note = (
+            f"No detected beep occurs at least {expected_duration:.1f}s into the video, "
+            "so none can end a full-length run; showing all beeps unfiltered."
+            if unfiltered
+            else ""
+        )
 
         if len(completion_beeps) == 1:
             selected_beep_time, selected_end_frame = completion_beeps[0]
@@ -3998,7 +4217,8 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             selected_option, ok = QtWidgets.QInputDialog.getItem(
                 self,
                 "Audio Detection",
-                f"Found {len(completion_beeps)} completion beeps. Select which one to use:",
+                (f"{unfiltered_note}\n\n" if unfiltered_note else "")
+                + f"Found {len(completion_beeps)} completion beeps. Select which one to use:",
                 beep_options,
                 0,
                 False,
@@ -4009,19 +4229,22 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             selected_index = beep_options.index(selected_option)
             selected_beep_time, selected_end_frame = completion_beeps[selected_index]
 
-        cap = cv2.VideoCapture(self.video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
+        if not self.cap or not self.cap.isOpened() or self.total_frames <= 0:
+            self.results_label.setText("Audio Detection: the video is no longer loaded.")
+            return
+        # Same source the worker used to convert beep times into frame numbers.
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        total_frames = self.total_frames
 
         if fps <= 0:
             QtWidgets.QMessageBox.critical(self, "Error", "Could not determine video frame rate.")
             return
 
-        start_time = selected_beep_time - expected_duration
-        calculated_start_frame = max(0, int(start_time * fps))
+        # The window ends on the beep frame and spans exactly expected_duration
+        # worth of frames (inclusive range, so start = end - count + 1).
+        expected_frame_count = max(1, int(round(expected_duration * fps)))
         calculated_end_frame = min(selected_end_frame, total_frames - 1)
-        calculated_start_frame = min(calculated_start_frame, calculated_end_frame)
+        calculated_start_frame = max(0, calculated_end_frame - expected_frame_count + 1)
 
         before = self._capture_editor_snapshot()
         changed = self._apply_analysis_range(
@@ -4041,17 +4264,19 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.results_label.setText(
             f"✅ Audio-detected range: Frame {self.start_frame + 1} to {self.end_frame + 1} "
             f"(Duration: {actual_duration:.1f}s, Expected: {expected_duration:.1f}s)"
+            + (f"\n⚠️ {unfiltered_note}" if unfiltered_note else "")
         )
 
-        duration_difference = abs(actual_duration - expected_duration)
-        if duration_difference <= expected_duration * 0.1:
+        # Full confidence means "within the shared run-duration tolerance"
+        # (see ecl_analysis/analysis/duration.py).
+        if self._validate_run_duration(self.start_frame, self.end_frame, expected_duration) >= 1.0:
             self.audio_manager.play_run_detected()
 
-    def _on_audio_detection_finished(self, completion_beeps: List[Tuple[float, int]]):
+    def _on_audio_detection_finished(self, completion_beeps: List[Tuple[float, int]], unfiltered: bool = False):
         """Handle successful completion of audio detection worker."""
         expected_duration = self._pending_audio_expected_duration
         self._cleanup_audio_worker()
-        self._apply_audio_detection_results(completion_beeps, expected_duration)
+        self._apply_audio_detection_results(completion_beeps, expected_duration, unfiltered)
 
     def _on_audio_detection_error(self, message: str):
         """Handle worker audio-detection errors."""
@@ -4068,12 +4293,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _cleanup_audio_worker(self):
         """Tear down audio worker resources safely."""
         if self._audio_progress is not None:
-            self._audio_progress.close()
+            self._close_progress_dialog(self._audio_progress)
             self._audio_progress = None
 
-        if shutdown_worker_thread(self._audio_thread, "audio"):
-            self._audio_thread = None
-            self._audio_worker = None
+        self._release_worker_thread(self._audio_thread, self._audio_worker, "audio")
+        self._audio_thread = None
+        self._audio_worker = None
 
         self._pending_audio_expected_duration = 0.0
         self._set_busy_state(False)
@@ -4163,19 +4388,15 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
         self.statusBar().showMessage("🔍 Starting brightness analysis...")
         num_frames_to_analyze = request.end_frame - request.start_frame + 1
         non_background_rois = [i for i in range(len(request.rects)) if i != request.background_roi_idx]
-        progress = QtWidgets.QProgressDialog(
+        progress = self._create_progress_dialog(
             f"🔍 Analyzing {num_frames_to_analyze} video frames...\n"
             f"ROIs: {len(non_background_rois)} | Frames: {request.start_frame + 1}-{request.end_frame + 1}",
-            "Cancel",
+            "📊 Brightness Analysis",
             0,
             num_frames_to_analyze,
-            self,
         )
-        progress.setWindowModality(QtCore.Qt.WindowModal)
-        progress.setWindowTitle("📊 Brightness Analysis")
         progress.setMinimumWidth(420)
         progress.setValue(0)
-        progress.canceled.connect(self._cancel_active_worker)
         progress.show()
         self._analysis_progress = progress
 
@@ -4274,12 +4495,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
     def _cleanup_analysis_worker(self, reset_busy: bool = True):
         """Tear down analysis worker resources safely."""
         if self._analysis_progress is not None:
-            self._analysis_progress.close()
+            self._close_progress_dialog(self._analysis_progress)
             self._analysis_progress = None
 
-        if shutdown_worker_thread(self._analysis_thread, "analysis"):
-            self._analysis_thread = None
-            self._analysis_worker = None
+        self._release_worker_thread(self._analysis_thread, self._analysis_worker, "analysis")
+        self._analysis_thread = None
+        self._analysis_worker = None
 
         if reset_busy:
             self._set_busy_state(False)
@@ -4327,8 +4548,10 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
 
         self.out_paths = export_result.out_paths
         summary_lines = export_result.summary_lines
-        if export_result.plot_failed:
-            summary_lines.append("Note: Some plots failed to generate - check console for details")
+        if export_result.export_failed:
+            summary_lines.append(
+                "Note: Some exports failed (see FAILED lines above) - check the log for details"
+            )
         if export_result.cancelled:
             summary_lines.append("Note: Export cancelled by user before all ROIs were written")
 
@@ -4431,23 +4654,58 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
             frame_l_star=frame_l_star,
         )
 
-    def _effective_analysis_threshold(
-        self,
-        frame: np.ndarray,
-        frame_l_star: Optional[np.ndarray] = None,
-    ) -> Optional[float]:
-        """Return the threshold the analysis worker would apply to this frame.
+    def _frame_analysis_settings(self) -> FrameAnalysisSettings:
+        """Current settings, as the analysis worker receives them in its AnalysisRequest."""
+        return FrameAnalysisSettings(
+            background_percentile=self.background_percentile,
+            morphological_kernel_size=self.morphological_kernel_size,
+            noise_floor_threshold=self.noise_floor_threshold,
+            manual_threshold=float(self.manual_threshold),
+            use_fixed_mask=self.use_fixed_mask,
+        )
 
-        Mirrors AnalysisWorker semantics: the background-ROI percentile value
-        when a background ROI is configured, otherwise the manual threshold
-        when it is above zero. Returns None when analysis would not gate pixels.
+    def _preview_frame_analysis(self) -> Tuple[Optional[FrameAnalysis], Optional[np.ndarray]]:
+        """Return ``analyze_frame()`` for the displayed frame plus its L* channel.
+
+        This is the exact per-frame computation the analysis worker runs. The
+        result is cached for the displayed frame object and the inputs that
+        affect it (ROIs, background ROI, settings, fixed masks), so the live
+        readout, threshold display, pixel-mask overlay and mask capture share one
+        background-percentile/ROI-stats computation per frame change.
 
         Raises BackgroundComputationError when a configured background ROI
-        fails to compute; callers must surface the failure rather than fall
-        back to a fabricated threshold.
+        fails; failures are not cached.
         """
-        if self.background_roi_idx is not None:
-            return self._compute_background_brightness(frame, frame_l_star=frame_l_star)
-        if self.manual_threshold > 0:
-            return float(self.manual_threshold)
-        return None
+        frame = self.frame
+        if frame is None:
+            return None, None
+
+        masks = tuple(self.fixed_roi_masks) if self.use_fixed_mask else ()
+        key = (
+            tuple((tuple(pt1), tuple(pt2)) for pt1, pt2 in self.rects),
+            self.background_roi_idx,
+            self._frame_analysis_settings(),
+        )
+        cache = getattr(self, "_preview_analysis_cache", None)
+        l_star_frame = None
+        if cache is not None and cache[0] is frame:
+            _, l_star_frame, cached_key, cached_masks, cached_analysis = cache
+            if (
+                cached_key == key
+                and len(cached_masks) == len(masks)
+                and all(cached is current for cached, current in zip(cached_masks, masks))
+            ):
+                return cached_analysis, l_star_frame
+        if l_star_frame is None:
+            l_star_frame = self._compute_l_star_frame(frame)
+
+        analysis = analyze_frame(
+            frame,
+            self.rects,
+            self.background_roi_idx,
+            key[2],
+            masks=masks,
+            frame_l_star=l_star_frame,
+        )
+        self._preview_analysis_cache = (frame, l_star_frame, key, masks, analysis)
+        return analysis, l_star_frame

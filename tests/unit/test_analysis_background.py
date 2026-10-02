@@ -80,18 +80,68 @@ def test_compute_background_brightness_normalizes_and_clamps_rect():
     assert result == pytest.approx(expected, rel=1e-6)
 
 
-def test_compute_background_brightness_returns_none_when_clamped_roi_empty():
+def test_compute_background_brightness_raises_when_clamped_roi_empty():
+    """A configured background ROI that lies entirely outside the frame must fail
+    loudly instead of returning None (which callers treat as 'not configured')."""
     frame = np.zeros((4, 4, 3), dtype=np.uint8)
     rects = [((10, 10), (12, 12))]
 
-    result = compute_background_brightness(
-        frame=frame,
-        rects=rects,
-        background_roi_idx=0,
-        background_percentile=90.0,
-    )
+    with pytest.raises(BackgroundComputationError, match="zero area"):
+        compute_background_brightness(
+            frame=frame,
+            rects=rects,
+            background_roi_idx=0,
+            background_percentile=90.0,
+        )
 
-    assert result is None
+
+def test_compute_background_brightness_raises_when_roi_has_zero_width():
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    rects = [((2, 0), (2, 4))]
+
+    with pytest.raises(BackgroundComputationError):
+        compute_background_brightness(
+            frame=frame,
+            rects=rects,
+            background_roi_idx=0,
+            background_percentile=90.0,
+            frame_l_star=compute_l_star_frame(frame),
+        )
+
+
+def test_compute_background_brightness_raises_when_index_out_of_range():
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    rects = [((0, 0), (2, 2))]
+
+    with pytest.raises(BackgroundComputationError, match="out of range"):
+        compute_background_brightness(
+            frame=frame,
+            rects=rects,
+            background_roi_idx=3,
+            background_percentile=90.0,
+        )
+
+
+def test_compute_background_brightness_raises_when_configured_without_frame():
+    with pytest.raises(BackgroundComputationError):
+        compute_background_brightness(
+            frame=None,
+            rects=[((0, 0), (2, 2))],
+            background_roi_idx=0,
+            background_percentile=90.0,
+        )
+
+
+def test_compute_background_brightness_none_frame_without_background_roi_returns_none():
+    assert (
+        compute_background_brightness(
+            frame=None,
+            rects=[],
+            background_roi_idx=None,
+            background_percentile=90.0,
+        )
+        is None
+    )
 
 
 def test_compute_background_brightness_raises_on_computation_failure(monkeypatch):
