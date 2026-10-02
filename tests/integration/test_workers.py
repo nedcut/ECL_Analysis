@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-import ecl_analysis.workers as workers_module
+import ecl_analysis.analysis.frame as frame_module
 from ecl_analysis.analysis.background import BackgroundComputationError
 from ecl_analysis.analysis.brightness import compute_l_star_frame
 from ecl_analysis.analysis.models import AnalysisRequest
@@ -19,20 +19,24 @@ from ecl_analysis.workers import (
 
 
 class DummyVideoCapture:
-    def __init__(self, frames: List[np.ndarray]):
+    def __init__(self, frames: List[np.ndarray], fps: float = 30.0, seek_offset: int = 0):
         self._frames = frames
         self._index = 0
+        self._fps = fps
+        self._seek_offset = seek_offset
 
     def isOpened(self):
         return True
 
     def set(self, prop, value):
         if prop == cv2.CAP_PROP_POS_FRAMES:
-            self._index = int(value)
+            self._index = int(value) + self._seek_offset
 
     def get(self, prop):
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            return float(self._index)
         if prop == cv2.CAP_PROP_FPS:
-            return 30.0
+            return self._fps
         if prop == cv2.CAP_PROP_FRAME_COUNT:
             return float(len(self._frames))
         return 0.0
@@ -84,16 +88,17 @@ def test_analysis_worker_emits_structured_result(monkeypatch):
     assert len(result.brightness_mean_data[0]) == 3
 
 
-def _run_analysis_worker(frames, monkeypatch, **overrides):
-    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture(frames))
+def _run_analysis_worker(frames, monkeypatch, capture_kwargs=None, **overrides):
+    capture_kwargs = capture_kwargs or {}
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture(frames, **capture_kwargs))
     request = AnalysisRequest(
         video_path="dummy.mp4",
         rects=overrides.pop("rects", [((0, 0), (6, 6))]),
         background_roi_idx=overrides.pop("background_roi_idx", None),
-        start_frame=0,
-        end_frame=len(frames) - 1,
-        use_fixed_mask=False,
-        fixed_roi_masks=[],
+        start_frame=overrides.pop("start_frame", 0),
+        end_frame=overrides.pop("end_frame", len(frames) - 1),
+        use_fixed_mask=overrides.pop("use_fixed_mask", False),
+        fixed_roi_masks=overrides.pop("fixed_roi_masks", []),
         background_percentile=90.0,
         morphological_kernel_size=3,
         noise_floor_threshold=0.0,
@@ -106,6 +111,75 @@ def _run_analysis_worker(frames, monkeypatch, **overrides):
     worker.run()
     assert "error" not in captured
     return captured["result"]
+
+
+def _half_lit_frame() -> np.ndarray:
+    frame = np.zeros((6, 6, 3), dtype=np.uint8)
+    frame[:, :3, :] = 10  # dark half, L* ~ 3
+    frame[:, 3:, :] = 200  # bright half, L* ~ 81
+    return frame
+
+
+def test_analysis_worker_records_pixel_counts(monkeypatch):
+    frames = [_half_lit_frame()]
+
+    res_raw = _run_analysis_worker(frames, monkeypatch)
+    assert res_raw.pixel_count_data == [[36]]
+
+    res_thresh = _run_analysis_worker(frames, monkeypatch, manual_threshold=50.0)
+    assert res_thresh.pixel_count_data == [[18]]
+
+
+def test_analysis_worker_records_fps_and_request(monkeypatch):
+    res = _run_analysis_worker([_half_lit_frame()], monkeypatch, capture_kwargs={"fps": 25.0})
+    assert res.fps == pytest.approx(25.0)
+    assert res.request is not None
+    assert res.request.threshold_mode == "none"
+    assert res.seek_warning is None
+
+
+def test_analysis_worker_fps_none_when_unavailable(monkeypatch):
+    res = _run_analysis_worker([_half_lit_frame()], monkeypatch, capture_kwargs={"fps": 0.0})
+    assert res.fps is None
+
+
+def test_analysis_worker_records_seek_mismatch(monkeypatch, caplog):
+    frames = [_half_lit_frame() for _ in range(5)]
+    with caplog.at_level("WARNING"):
+        res = _run_analysis_worker(
+            frames,
+            monkeypatch,
+            capture_kwargs={"seek_offset": 1},
+            start_frame=2,
+            end_frame=3,
+        )
+    assert res.seek_warning is not None
+    assert "index 2" in res.seek_warning
+    assert any("Seek to frame" in rec.message for rec in caplog.records)
+
+
+def test_analysis_worker_records_fixed_mask_status(monkeypatch, caplog):
+    frames = [_half_lit_frame()]
+    rects = [((0, 0), (6, 6)), ((0, 0), (3, 3)), ((3, 3), (6, 6))]
+    masks = [
+        np.ones((6, 6), dtype=bool),  # matches ROI 1
+        np.ones((5, 5), dtype=bool),  # wrong shape for ROI 2
+        None,  # no mask for ROI 3
+    ]
+    with caplog.at_level("WARNING"):
+        res = _run_analysis_worker(
+            frames,
+            monkeypatch,
+            rects=rects,
+            use_fixed_mask=True,
+            fixed_roi_masks=masks,
+        )
+
+    assert res.mask_status == {0: "applied", 1: "dropped_shape_mismatch", 2: "missing"}
+    assert any("mask dropped" in rec.message for rec in caplog.records)
+
+    res_off = _run_analysis_worker(frames, monkeypatch, rects=rects, fixed_roi_masks=masks)
+    assert res_off.mask_status == {0: "not_requested", 1: "not_requested", 2: "not_requested"}
 
 
 def test_analysis_worker_flags_truncation_on_early_eof(monkeypatch):
@@ -155,7 +229,7 @@ def test_analysis_worker_aborts_on_brightness_computation_failure(monkeypatch):
     def boom(*args, **kwargs):
         raise cv2.error("synthetic brightness computation failure")
 
-    monkeypatch.setattr(workers_module, "compute_brightness_stats", boom)
+    monkeypatch.setattr(frame_module, "compute_brightness_stats_detailed", boom)
 
     request = AnalysisRequest(
         video_path="dummy.mp4",
@@ -193,7 +267,7 @@ def test_analysis_worker_aborts_on_background_computation_failure(monkeypatch):
     def boom(*args, **kwargs):
         raise BackgroundComputationError("synthetic background computation failure")
 
-    monkeypatch.setattr(workers_module, "compute_background_brightness", boom)
+    monkeypatch.setattr(frame_module, "compute_background_brightness", boom)
 
     request = AnalysisRequest(
         video_path="dummy.mp4",
@@ -217,6 +291,35 @@ def test_analysis_worker_aborts_on_background_computation_failure(monkeypatch):
     assert "result" not in captured
     assert "error" in captured
     assert "synthetic background computation failure" in captured["error"]
+
+
+def test_analysis_worker_aborts_on_degenerate_background_roi(monkeypatch):
+    """A configured background ROI that has zero area inside the frame must abort
+    the run instead of silently exporting raw (non-subtracted) values."""
+    frames = [np.full((6, 6, 3), 40, dtype=np.uint8)]
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture(frames))
+
+    request = AnalysisRequest(
+        video_path="dummy.mp4",
+        rects=[((0, 0), (6, 6)), ((20, 20), (30, 30))],
+        background_roi_idx=1,
+        start_frame=0,
+        end_frame=0,
+        use_fixed_mask=False,
+        fixed_roi_masks=[],
+        background_percentile=90.0,
+        morphological_kernel_size=3,
+        noise_floor_threshold=0.0,
+    )
+
+    worker = AnalysisWorker(request)
+    captured: Dict[str, object] = {}
+    worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+    worker.error.connect(lambda message: captured.setdefault("error", message))
+    worker.run()
+
+    assert "result" not in captured
+    assert "Background ROI 2" in captured["error"]
 
 
 def test_analysis_worker_manual_threshold_gates_pixels(monkeypatch):
@@ -350,3 +453,37 @@ def test_per_roi_mask_capture_worker_returns_sources(monkeypatch):
     assert result.sources[1] == 1
     assert result.masks[0] is not None
     assert result.masks[1] is not None
+
+
+def test_per_roi_mask_capture_worker_applies_manual_threshold(monkeypatch):
+    """With no background ROI, per-ROI auto-capture must gate on the manual
+    threshold (like "Capture From Current" and the analysis) instead of
+    producing all-ones masks."""
+    frame = np.zeros((4, 6, 3), dtype=np.uint8)
+    frame[:, 3:, :] = 220  # bright right half
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture([frame, frame]))
+
+    def capture(manual_threshold):
+        request = MaskScanRequest(
+            video_path="dummy.mp4",
+            rects=[((0, 0), (6, 4))],
+            background_roi_idx=None,
+            start_frame=0,
+            end_frame=1,
+            step=1,
+            background_percentile=90.0,
+            morphological_kernel_size=1,
+            manual_threshold=manual_threshold,
+        )
+        worker = PerRoiMaskCaptureWorker(request)
+        captured: Dict[str, object] = {}
+        worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+        worker.run()
+        return captured["result"].masks[0]
+
+    gated = capture(50.0)
+    assert not gated[:, :3].any()
+    assert gated[:, 3:].all()
+
+    # 0 disables the manual threshold: the analysis then uses the whole ROI.
+    assert capture(0.0).all()

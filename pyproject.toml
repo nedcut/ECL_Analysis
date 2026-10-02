@@ -25,6 +25,11 @@ audio = [
 interactive-plots = [
     "plotly>=5.0.0",
 ]
+web = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "httpx>=0.27.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
@@ -33,6 +38,7 @@ dev = [
 
 [project.scripts]
 brightness-sorcerer = "ecl_analysis.app:run_app"
+brightness-sorcerer-web = "ecl_analysis.server.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["ecl_analysis*"]

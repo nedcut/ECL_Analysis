@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from PyQt5 import QtWidgets
 
+import ecl_analysis.analysis.frame as frame_module
 from ecl_analysis.analysis.background import BackgroundComputationError
 from ecl_analysis.video_analyzer import VideoAnalyzer
 
@@ -24,19 +25,21 @@ def _prepare_window(window: VideoAnalyzer) -> VideoAnalyzer:
     return window
 
 
-def test_effective_threshold_uses_manual_when_no_background_roi(
+def test_preview_threshold_uses_manual_when_no_background_roi(
     qt_application: QtWidgets.QApplication,
 ) -> None:
     window = _prepare_window(VideoAnalyzer())
 
     window.manual_threshold = 50.0
-    assert window._effective_analysis_threshold(window.frame) == pytest.approx(50.0)
+    analysis, _ = window._preview_frame_analysis()
+    assert analysis.threshold == pytest.approx(50.0)
 
     window.manual_threshold = 0.0
-    assert window._effective_analysis_threshold(window.frame) is None
+    analysis, _ = window._preview_frame_analysis()
+    assert analysis.threshold is None
 
 
-def test_effective_threshold_prefers_background_roi(
+def test_preview_threshold_prefers_background_roi(
     qt_application: QtWidgets.QApplication,
 ) -> None:
     window = _prepare_window(VideoAnalyzer())
@@ -46,7 +49,8 @@ def test_effective_threshold_prefers_background_roi(
 
     expected = window._compute_background_brightness(window.frame)
     assert expected is not None
-    assert window._effective_analysis_threshold(window.frame) == pytest.approx(expected)
+    analysis, _ = window._preview_frame_analysis()
+    assert analysis.threshold == pytest.approx(expected)
 
 
 def test_pixel_mask_overlay_honors_manual_threshold(
@@ -87,7 +91,7 @@ def test_pixel_mask_overlay_survives_background_failure(
     def boom(*args, **kwargs):
         raise BackgroundComputationError("synthetic failure")
 
-    monkeypatch.setattr(window, "_compute_background_brightness", boom)
+    monkeypatch.setattr(frame_module, "compute_background_brightness", boom)
 
     overlay = window._apply_pixel_mask_overlay(window.frame)
 
@@ -105,7 +109,7 @@ def test_brightness_display_reports_error_instead_of_crashing(
     def boom(*args, **kwargs):
         raise BackgroundComputationError("synthetic failure")
 
-    monkeypatch.setattr(window, "_compute_background_brightness", boom)
+    monkeypatch.setattr(frame_module, "compute_background_brightness", boom)
 
     window._update_current_brightness_display()
 
@@ -123,7 +127,7 @@ def test_threshold_display_survives_background_failure(
     def boom(*args, **kwargs):
         raise BackgroundComputationError("synthetic failure")
 
-    monkeypatch.setattr(window, "_compute_background_brightness", boom)
+    monkeypatch.setattr(frame_module, "compute_background_brightness", boom)
 
     assert window._calculate_background_threshold() is None
     window._update_threshold_display()

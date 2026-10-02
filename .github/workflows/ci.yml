@@ -36,6 +36,50 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: pytest -q -m "not performance"
 
+  core-only:
+    # Installs without the optional extras (audio, interactive-plots) so tests
+    # that accidentally depend on them fail here instead of passing silently.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install core + dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Tests (core only)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q -m "not performance"
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        working-directory: web
+        run: bun run typecheck
+      - name: Tests
+        working-directory: web
+        run: bun run test
+      - name: Build
+        working-directory: web
+        run: bun run build
+
   performance:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
