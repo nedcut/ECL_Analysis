@@ -549,6 +549,7 @@ def generate_enhanced_plot(
                         logging.warning("Could not automatically open interactive plot %s: %s", interactive_save_path, exc)
                 except Exception as plotly_error:
                     logging.warning(f"Failed to generate interactive plot for ROI {r_idx+1}: {plotly_error}")
+                    raise
             else:
                 logging.info("Plotly not available - skipping interactive plot generation.")
 

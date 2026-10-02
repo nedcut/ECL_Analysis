@@ -420,3 +420,25 @@ def test_export_result_no_outputs_produced_false_when_files_written(tmp_path: Pa
     export = _export(tmp_path, _result())
 
     assert export.no_outputs_produced is False
+
+
+def test_interactive_plot_write_failure_is_reported_by_exporter(tmp_path, monkeypatch):
+    """Use the real plot builder so its error handling cannot hide a failed write."""
+    plotly = pytest.importorskip("plotly.graph_objects")
+    from ecl_analysis.export.plotting import generate_enhanced_plot
+
+    def fail_write(*args, **kwargs):
+        raise OSError("interactive disk full")
+
+    monkeypatch.setattr(plotly.Figure, "write_html", fail_write)
+    result = _export(
+        tmp_path,
+        _result(request=_request()),
+        plot_builder=generate_enhanced_plot,
+        export_options=ExportOptions(csv=True, json=False, plot=False, interactive_plot=True),
+    )
+    assert result.export_failed
+    assert result.failed_rois == [1]
+    assert any("interactive disk full" in line for line in result.summary_lines)
+    metadata = json.loads(Path(result.metadata_path).read_text())
+    assert any("interactive disk full" in failure for failure in metadata["export_failures"])
