@@ -2,9 +2,37 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 from PyQt5 import QtCore
+
+
+def roi_slice_bounds(
+    pt1: Sequence[int],
+    pt2: Sequence[int],
+    frame_width: int,
+    frame_height: int,
+) -> Tuple[int, int, int, int]:
+    """Return the ``(x1, y1, x2, y2)`` frame region an ROI covers.
+
+    This is the single definition of ROI pixel coverage shared by the analysis
+    worker, background computation, mask capture, and the live preview. The
+    corners are normalized (either corner order is accepted) and clamped to the
+    frame, and the end coordinates are exclusive, i.e. the ROI covers
+    ``frame[y1:y2, x1:x2]``. An ROI whose edge lies on the right/bottom frame
+    border (``x2 == frame_width``) therefore includes the last column/row.
+
+    Callers must treat ``x2 <= x1`` or ``y2 <= y1`` as an empty ROI.
+    """
+    left, right = sorted((int(pt1[0]), int(pt2[0])))
+    top, bottom = sorted((int(pt1[1]), int(pt2[1])))
+
+    x1 = max(0, min(left, frame_width))
+    x2 = max(0, min(right, frame_width))
+    y1 = max(0, min(top, frame_height))
+    y2 = max(0, min(bottom, frame_height))
+
+    return x1, y1, x2, y2
 
 
 def get_pixmap_rect_in_label(
@@ -94,3 +122,14 @@ def scale_value_for_pixmap(
     if frame_width <= 0 or pixmap_rect.width() <= 0:
         return value_in_frame_coords
     return value_in_frame_coords * (pixmap_rect.width() / frame_width)
+
+
+def scale_value_for_frame(
+    value_in_pixmap_coords: float,
+    pixmap_rect: QtCore.QRect,
+    frame_width: int,
+) -> float:
+    """Scale a pixmap-space (on-screen) distance into frame-space distance."""
+    if frame_width <= 0 or pixmap_rect.width() <= 0:
+        return value_in_pixmap_coords
+    return value_in_pixmap_coords * (frame_width / pixmap_rect.width())

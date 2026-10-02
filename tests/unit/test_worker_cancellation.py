@@ -114,7 +114,7 @@ class TestAudioDetectionWorker:
         cancelled_signals = []
         finished_signals = []
         worker.cancelled.connect(lambda: cancelled_signals.append(True))
-        worker.finished.connect(finished_signals.append)
+        worker.finished.connect(lambda beeps, unfiltered: finished_signals.append((beeps, unfiltered)))
 
         worker.cancel()
         worker.run()
@@ -126,11 +126,11 @@ class TestAudioDetectionWorker:
     def test_run_passes_live_cancel_check_to_analyzer(self, qt_application):
         worker = AudioDetectionWorker("video.mp4", 2.0)
         finished_signals = []
-        worker.finished.connect(finished_signals.append)
+        worker.finished.connect(lambda beeps, unfiltered: finished_signals.append((beeps, unfiltered)))
 
         worker.run()
 
-        assert finished_signals == [[(1.0, 30)]]
+        assert finished_signals == [([(1.0, 30)], False)]
         (analyzer,) = _StubAnalyzer.instances
         ((_, _, cancel_check),) = analyzer.find_calls
         assert cancel_check is not None
@@ -143,7 +143,7 @@ class TestAudioDetectionWorker:
         cancelled_signals = []
         finished_signals = []
         worker.cancelled.connect(lambda: cancelled_signals.append(True))
-        worker.finished.connect(finished_signals.append)
+        worker.finished.connect(lambda beeps, unfiltered: finished_signals.append((beeps, unfiltered)))
 
         def cancel_mid_run(self, video_path, expected_duration, cancel_check=None):
             worker.cancel()
@@ -153,6 +153,37 @@ class TestAudioDetectionWorker:
         worker.run()
 
         assert cancelled_signals == [True]
+        assert finished_signals == []
+
+    def test_finished_reports_unfiltered_results(self, qt_application, monkeypatch):
+        worker = AudioDetectionWorker("video.mp4", 2.0)
+        finished_signals = []
+        worker.finished.connect(lambda beeps, unfiltered: finished_signals.append((beeps, unfiltered)))
+
+        def unfiltered_results(self, video_path, expected_duration, cancel_check=None):
+            self.last_results_unfiltered = True
+            return [(1.0, 30)]
+
+        monkeypatch.setattr(_StubAnalyzer, "find_completion_beeps", unfiltered_results)
+        worker.run()
+
+        assert finished_signals == [([(1.0, 30)], True)]
+
+    def test_unexpected_exception_is_reported_as_error(self, qt_application, monkeypatch):
+        worker = AudioDetectionWorker("video.mp4", 2.0)
+        errors = []
+        finished_signals = []
+        worker.error.connect(errors.append)
+        worker.finished.connect(lambda beeps, unfiltered: finished_signals.append((beeps, unfiltered)))
+
+        def explode(self, video_path, expected_duration, cancel_check=None):
+            raise RuntimeError("numba exploded")
+
+        monkeypatch.setattr(_StubAnalyzer, "find_completion_beeps", explode)
+        worker.run()  # must not raise out of the slot
+
+        assert len(errors) == 1
+        assert "numba exploded" in errors[0]
         assert finished_signals == []
 
 

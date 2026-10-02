@@ -11,6 +11,14 @@ from .dependencies import (
     get_pygame,
 )
 
+# A beep must stand this many times above the clip's median in-band energy
+# (~14 dB). The median tracks the noise floor because beeps are short, so this
+# rejects noise-only clips whose loudest moments merely top the percentile.
+BEEP_MIN_PROMINENCE_RATIO = 5.0
+# Absolute floor: in-band peaks quieter than a sine of this amplitude
+# (-60 dBFS) are never beeps, so (near-)silent clips yield no detections.
+BEEP_MIN_AMPLITUDE = 1e-3
+
 
 class AudioManager:
     """Handle all audio feedback in the application."""
@@ -117,6 +125,9 @@ class AudioAnalyzer:
         self.sample_rate = 44100
         self.hop_length = 512
         self.n_fft = 2048
+        # Set by find_completion_beeps: True when no beep passed the expected-
+        # duration filter and the unfiltered detections were returned instead.
+        self.last_results_unfiltered = False
 
     def _ensure_backend(self) -> bool:
         if self._librosa is not None:
@@ -155,7 +166,18 @@ class AudioAnalyzer:
         frequency_tolerance: float = 50.0,
         threshold_percentile: float = 95.0,
         min_duration: float = 0.1,
+        min_prominence_ratio: float = BEEP_MIN_PROMINENCE_RATIO,
+        min_amplitude: float = BEEP_MIN_AMPLITUDE,
     ) -> List[float]:
+        """Return center times (s) of tones near ``target_frequency``.
+
+        A frame counts as "beep" when its in-band peak magnitude exceeds all of:
+        the ``threshold_percentile`` of the clip's own in-band energy, the median
+        in-band energy times ``min_prominence_ratio``, and the STFT magnitude of
+        a sine with amplitude ``min_amplitude``. The percentile alone always
+        selects the loudest few percent of frames, so without the other two
+        terms silence or plain noise would still "contain" beeps.
+        """
         if audio_data is None or not self._ensure_backend():
             return []
 
@@ -190,11 +212,25 @@ class AudioAnalyzer:
             logging.info("Frequency resolution: %.1fHz, %s bins selected", freq_resolution, np.sum(freq_mask))
 
             energy_per_frame = np.max(target_magnitude, axis=0)
-            threshold = np.percentile(energy_per_frame, threshold_percentile)
+            percentile_threshold = float(np.percentile(energy_per_frame, threshold_percentile))
+            median_energy = float(np.median(energy_per_frame))
+            # A Hann-windowed STFT reports a sine of amplitude A at ~A * n_fft / 4.
+            absolute_floor = min_amplitude * self.n_fft / 4.0
+            threshold = max(percentile_threshold, min_prominence_ratio * median_energy, absolute_floor)
 
             mean_energy = np.mean(energy_per_frame)
             max_energy = np.max(energy_per_frame)
-            logging.info("Energy stats: mean=%.2f, max=%.2f, threshold=%.2f", mean_energy, max_energy, threshold)
+            logging.info(
+                "Energy stats: mean=%.2f, median=%.2f, max=%.2f, threshold=%.2f "
+                "(percentile=%.2f, prominence=%.2f, floor=%.2f)",
+                mean_energy,
+                median_energy,
+                max_energy,
+                threshold,
+                percentile_threshold,
+                min_prominence_ratio * median_energy,
+                absolute_floor,
+            )
 
             above_threshold = energy_per_frame > threshold
             times = self._librosa.frames_to_time(
@@ -232,7 +268,16 @@ class AudioAnalyzer:
         expected_run_duration: float = 0.0,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> List[Tuple[float, int]]:
-        """Locate completion beeps, polling ``cancel_check`` between expensive stages."""
+        """Locate completion beeps, polling ``cancel_check`` between expensive stages.
+
+        When ``expected_run_duration`` is set, beeps earlier than that many
+        seconds into the video are dropped (a run ending there would have
+        started before the recording). If that would drop every beep, the
+        unfiltered beeps are returned instead so the user can still pick one,
+        and ``self.last_results_unfiltered`` is set so callers can warn that
+        none of them fits the expected duration.
+        """
+        self.last_results_unfiltered = False
 
         def _cancelled() -> bool:
             return cancel_check is not None and cancel_check()
@@ -279,6 +324,14 @@ class AudioAnalyzer:
                         len(filtered_results),
                     )
                     results = filtered_results
+                elif results:
+                    logging.warning(
+                        "No detected beep occurs at least %.1fs into the video; "
+                        "returning all %d beeps unfiltered",
+                        expected_run_duration,
+                        len(results),
+                    )
+                    self.last_results_unfiltered = True
 
             return results
         except Exception as exc:

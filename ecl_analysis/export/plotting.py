@@ -18,6 +18,56 @@ from ecl_analysis.constants import (
     DEFAULT_FONT_FAMILY,
 )
 from ecl_analysis.dependencies import get_plotly
+from ecl_analysis.export.stats import format_std, sample_std
+
+BACKGROUND_AXIS_LABEL = "Raw background L* (not subtracted)"
+
+
+def _band_label(series_name: str, std: float) -> str:
+    """Legend label for a horizontal series-mean ± 1 SD band."""
+    return f"{series_name} avg ±1 SD across frames ({std:.1f})"
+
+
+def _add_series_band(ax, mean_value: float, std: Optional[float], color: str, series_name: str) -> None:
+    """Shade mean ± 1 SD of the whole series as a horizontal band (not per-frame error)."""
+    if std is None:
+        return
+    ax.axhspan(mean_value - std, mean_value + std, alpha=0.12, color=color,
+               label=_band_label(series_name, std))
+
+
+def _add_plotly_series_band(fig, plotly_go, frame_list, mean_value: float, std: Optional[float],
+                            fillcolor: str, series_name: str, row: int) -> None:
+    """Plotly equivalent of :func:`_add_series_band` (horizontal series-mean ± 1 SD band)."""
+    if std is None or not frame_list:
+        return
+    fig.add_trace(
+        plotly_go.Scatter(
+            x=frame_list,
+            y=[mean_value + std] * len(frame_list),
+            mode='lines',
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo='skip'
+        ),
+        row=row,
+        col=1
+    )
+    fig.add_trace(
+        plotly_go.Scatter(
+            x=frame_list,
+            y=[mean_value - std] * len(frame_list),
+            mode='lines',
+            line=dict(width=0),
+            showlegend=True,
+            name=_band_label(series_name, std),
+            fill='tonexty',
+            fillcolor=fillcolor,
+            hoverinfo='skip'
+        ),
+        row=row,
+        col=1
+    )
 
 
 def generate_enhanced_plot(
@@ -49,24 +99,26 @@ def generate_enhanced_plot(
         # Statistics
         idx_peak_mean = brightness_mean.idxmax()
         frame_peak_mean, val_peak_mean = frames.iloc[idx_peak_mean], brightness_mean.iloc[idx_peak_mean]
+        # Across-frame statistics. Standard deviations are sample SDs (ddof=1) of
+        # each series and are None when fewer than two frames are available.
         mean_of_means = brightness_mean.mean()
-        std_of_means = brightness_mean.std()
+        std_of_means = sample_std(brightness_mean)
 
         idx_peak_median = brightness_median.idxmax()
         frame_peak_median, val_peak_median = frames.iloc[idx_peak_median], brightness_median.iloc[idx_peak_median]
         mean_of_medians = brightness_median.mean()
-        std_of_medians = brightness_median.std()
+        std_of_medians = sample_std(brightness_median)
 
         # Blue channel statistics
         idx_peak_blue_mean = blue_mean.idxmax()
         frame_peak_blue_mean, val_peak_blue_mean = frames.iloc[idx_peak_blue_mean], blue_mean.iloc[idx_peak_blue_mean]
         mean_of_blue_means = blue_mean.mean()
-        std_of_blue_means = blue_mean.std()
+        std_of_blue_means = sample_std(blue_mean)
 
         idx_peak_blue_median = blue_median.idxmax()
         frame_peak_blue_median, val_peak_blue_median = frames.iloc[idx_peak_blue_median], blue_median.iloc[idx_peak_blue_median]
         mean_of_blue_medians = blue_median.mean()
-        std_of_blue_medians = blue_median.std()
+        std_of_blue_medians = sample_std(blue_median)
 
         frame_list = frames.tolist()
         brightness_mean_values = brightness_mean.tolist()
@@ -93,16 +145,20 @@ def generate_enhanced_plot(
                 ax1.plot(frames, brightness_mean, label='Mean Brightness', color='#5a9bd5', linewidth=2, alpha=0.8)
                 ax1.plot(frames, brightness_median, label='Median Brightness', color='#70ad47', linewidth=2, alpha=0.8)
 
-                # Add background line if background values are available
+                # Background/threshold level is raw L*, while the brightness series
+                # are background-subtracted, so plot it on its own labeled axis.
+                background_ax = None
                 if background_array is not None:
-                    ax1.plot(frames, background_array, label='Background Level', color='#808080',
-                             linewidth=1.5, linestyle=':', alpha=0.9)
+                    background_ax = ax1.twinx()
+                    background_ax.plot(frames, background_array, label='Background level (right axis)',
+                                       color='#808080', linewidth=1.5, linestyle=':', alpha=0.9)
+                    background_ax.set_ylabel(BACKGROUND_AXIS_LABEL, fontsize=11, color='#606060')
+                    background_ax.tick_params(axis='y', labelcolor='#606060')
+                    background_ax.grid(False)
 
-                # Add confidence bands (mean ± std)
-                ax1.fill_between(frames, brightness_mean - std_of_means, brightness_mean + std_of_means,
-                                 alpha=0.2, color='#5a9bd5', label=f'Mean ±1σ ({std_of_means:.1f})')
-                ax1.fill_between(frames, brightness_median - std_of_medians, brightness_median + std_of_medians,
-                                 alpha=0.2, color='#70ad47', label=f'Median ±1σ ({std_of_medians:.1f})')
+                # Spread of each series across frames: horizontal band at average ± 1 SD.
+                _add_series_band(ax1, mean_of_means, std_of_means, '#5a9bd5', 'Mean')
+                _add_series_band(ax1, mean_of_medians, std_of_medians, '#70ad47', 'Median')
 
                 # Add horizontal lines for averages
                 ax1.axhline(mean_of_means, color='#5a9bd5', linestyle='--', alpha=0.7,
@@ -118,7 +174,12 @@ def generate_enhanced_plot(
 
                 ax1.set_title(f"{analysis_name} - {base_video_name} - ROI {r_idx+1}", fontsize=16, fontweight='bold')
                 ax1.set_ylabel('L* Brightness', fontsize=12)
-                ax1.legend(fontsize=10, loc='best')
+                handles, labels = ax1.get_legend_handles_labels()
+                if background_ax is not None:
+                    bg_handles, bg_labels = background_ax.get_legend_handles_labels()
+                    handles += bg_handles
+                    labels += bg_labels
+                ax1.legend(handles, labels, fontsize=10, loc='best')
                 ax1.grid(True, alpha=0.3)
 
                 # Adjust y-axis limits to provide more space at the top for statistics panel
@@ -127,9 +188,9 @@ def generate_enhanced_plot(
                 ax1.set_ylim(y_min, y_max + 0.15 * y_range)
 
                 # Add statistics text box
-                stats_text = f"""Statistics:
-    Mean: {mean_of_means:.2f} ± {std_of_means:.2f}
-    Median: {mean_of_medians:.2f} ± {std_of_medians:.2f}
+                stats_text = f"""Statistics (avg ± sample SD across frames):
+    Mean: {mean_of_means:.2f} ± {format_std(std_of_means, 2)}
+    Median: {mean_of_medians:.2f} ± {format_std(std_of_medians, 2)}
     Peak Mean: {val_peak_mean:.2f} @ Frame {frame_peak_mean}
     Peak Median: {val_peak_median:.2f} @ Frame {frame_peak_median}
     Frames Analyzed: {len(frames)}"""
@@ -142,11 +203,9 @@ def generate_enhanced_plot(
                 ax2.plot(frames, blue_mean, label='Blue Mean', color='#0066cc', linewidth=2, alpha=0.8)
                 ax2.plot(frames, blue_median, label='Blue Median', color='#3399ff', linewidth=2, alpha=0.8)
 
-                # Add confidence bands for blue channel
-                ax2.fill_between(frames, blue_mean - std_of_blue_means, blue_mean + std_of_blue_means,
-                                 alpha=0.2, color='#0066cc', label=f'Blue Mean ±1σ ({std_of_blue_means:.1f})')
-                ax2.fill_between(frames, blue_median - std_of_blue_medians, blue_median + std_of_blue_medians,
-                                 alpha=0.2, color='#3399ff', label=f'Blue Median ±1σ ({std_of_blue_medians:.1f})')
+                # Spread of each blue series across frames: horizontal band at average ± 1 SD.
+                _add_series_band(ax2, mean_of_blue_means, std_of_blue_means, '#0066cc', 'Blue Mean')
+                _add_series_band(ax2, mean_of_blue_medians, std_of_blue_medians, '#3399ff', 'Blue Median')
 
                 # Add horizontal lines for blue averages
                 ax2.axhline(mean_of_blue_means, color='#0066cc', linestyle='--', alpha=0.7,
@@ -166,9 +225,9 @@ def generate_enhanced_plot(
                 ax2.grid(True, alpha=0.3)
 
                 # Add blue channel statistics text box
-                blue_stats_text = f"""Blue Channel Statistics:
-    Mean: {mean_of_blue_means:.1f} ± {std_of_blue_means:.1f}
-    Median: {mean_of_blue_medians:.1f} ± {std_of_blue_medians:.1f}
+                blue_stats_text = f"""Blue Channel Statistics (avg ± sample SD across frames):
+    Mean: {mean_of_blue_means:.1f} ± {format_std(std_of_blue_means, 1)}
+    Median: {mean_of_blue_medians:.1f} ± {format_std(std_of_blue_medians, 1)}
     Peak Mean: {val_peak_blue_mean:.1f} @ Frame {frame_peak_blue_mean}
     Peak Median: {val_peak_blue_median:.1f} @ Frame {frame_peak_blue_median}"""
 
@@ -198,71 +257,16 @@ def generate_enhanced_plot(
                         cols=1,
                         shared_xaxes=True,
                         vertical_spacing=0.1,
-                        subplot_titles=("L* Brightness", "Blue Channel")
+                        subplot_titles=("L* Brightness", "Blue Channel"),
+                        specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
                     )
                     selection_fill = _hex_to_rgba(COLOR_ACCENT, 0.18)
 
-                    # L* mean confidence band
-                    upper_mean_band = (brightness_mean + std_of_means).tolist()
-                    lower_mean_band = (brightness_mean - std_of_means).tolist()
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=upper_mean_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo='skip'
-                        ),
-                        row=1,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=lower_mean_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=True,
-                            name=f"Mean ±1σ ({std_of_means:.1f})",
-                            fill='tonexty',
-                            fillcolor='rgba(90,155,213,0.25)',
-                            hoverinfo='skip'
-                        ),
-                        row=1,
-                        col=1
-                    )
-
-                    # Median confidence band
-                    upper_median_band = (brightness_median + std_of_medians).tolist()
-                    lower_median_band = (brightness_median - std_of_medians).tolist()
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=upper_median_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo='skip'
-                        ),
-                        row=1,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=lower_median_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=True,
-                            name=f"Median ±1σ ({std_of_medians:.1f})",
-                            fill='tonexty',
-                            fillcolor='rgba(112,173,71,0.25)',
-                            hoverinfo='skip'
-                        ),
-                        row=1,
-                        col=1
-                    )
+                    # Spread of each series across frames: horizontal band at average ± 1 SD.
+                    _add_plotly_series_band(fig_interactive, plotly_go, frame_list, mean_of_means,
+                                            std_of_means, 'rgba(90,155,213,0.18)', 'Mean', row=1)
+                    _add_plotly_series_band(fig_interactive, plotly_go, frame_list, mean_of_medians,
+                                            std_of_medians, 'rgba(112,173,71,0.18)', 'Median', row=1)
 
                     # Brightness lines
                     fig_interactive.add_trace(
@@ -290,19 +294,24 @@ def generate_enhanced_plot(
                         col=1
                     )
 
-                    # Background level
+                    # Background level is raw L* (the brightness series are background-
+                    # subtracted), so it goes on a separately labeled secondary axis.
                     if background_array is not None:
                         fig_interactive.add_trace(
                             plotly_go.Scatter(
                                 x=frame_list,
                                 y=background_array.tolist(),
                                 mode='lines',
-                                name='Background Level',
+                                name='Background level (right axis)',
                                 line=dict(color='#808080', width=1.5, dash='dot'),
-                                hovertemplate="Frame %{x}<br>Background L*: %{y:.2f}<extra></extra>"
+                                hovertemplate="Frame %{x}<br>Raw background L*: %{y:.2f}<extra></extra>"
                             ),
                             row=1,
-                            col=1
+                            col=1,
+                            secondary_y=True,
+                        )
+                        fig_interactive.update_yaxes(
+                            title_text=BACKGROUND_AXIS_LABEL, row=1, col=1, secondary_y=True, showgrid=False
                         )
 
                     # Peak annotations
@@ -374,66 +383,11 @@ def generate_enhanced_plot(
                         col=1
                     )
 
-                    # Blue channel confidence bands
-                    upper_blue_mean_band = (blue_mean + std_of_blue_means).tolist()
-                    lower_blue_mean_band = (blue_mean - std_of_blue_means).tolist()
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=upper_blue_mean_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo='skip'
-                        ),
-                        row=2,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=lower_blue_mean_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=True,
-                            name=f'Blue Mean ±1σ ({std_of_blue_means:.1f})',
-                            fill='tonexty',
-                            fillcolor='rgba(0,102,204,0.25)',
-                            hoverinfo='skip'
-                        ),
-                        row=2,
-                        col=1
-                    )
-
-                    upper_blue_median_band = (blue_median + std_of_blue_medians).tolist()
-                    lower_blue_median_band = (blue_median - std_of_blue_medians).tolist()
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=upper_blue_median_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo='skip'
-                        ),
-                        row=2,
-                        col=1
-                    )
-                    fig_interactive.add_trace(
-                        plotly_go.Scatter(
-                            x=frame_list,
-                            y=lower_blue_median_band,
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=True,
-                            name=f'Blue Median ±1σ ({std_of_blue_medians:.1f})',
-                            fill='tonexty',
-                            fillcolor='rgba(51,153,255,0.25)',
-                            hoverinfo='skip'
-                        ),
-                        row=2,
-                        col=1
-                    )
+                    # Spread of each blue series across frames: horizontal band at average ± 1 SD.
+                    _add_plotly_series_band(fig_interactive, plotly_go, frame_list, mean_of_blue_means,
+                                            std_of_blue_means, 'rgba(0,102,204,0.18)', 'Blue Mean', row=2)
+                    _add_plotly_series_band(fig_interactive, plotly_go, frame_list, mean_of_blue_medians,
+                                            std_of_blue_medians, 'rgba(51,153,255,0.18)', 'Blue Median', row=2)
 
                     # Blue channel lines
                     fig_interactive.add_trace(
@@ -545,16 +499,17 @@ def generate_enhanced_plot(
                         )
                     )
                     fig_interactive.update_xaxes(title_text="Frame Number", row=2, col=1)
-                    fig_interactive.update_yaxes(title_text="L* Brightness", row=1, col=1)
+                    fig_interactive.update_yaxes(title_text="L* Brightness", row=1, col=1, secondary_y=False)
                     fig_interactive.update_yaxes(title_text="Blue Channel Value", row=2, col=1)
 
                     # Summary annotation
                     fig_interactive.add_annotation(
                         text=(
-                            f"Mean: {mean_of_means:.2f} ± {std_of_means:.2f} | "
-                            f"Median: {mean_of_medians:.2f} ± {std_of_medians:.2f}<br>"
-                            f"Blue Mean: {mean_of_blue_means:.1f} ± {std_of_blue_means:.1f} | "
-                            f"Blue Median: {mean_of_blue_medians:.1f} ± {std_of_blue_medians:.1f}"
+                            "Avg ± sample SD across frames - "
+                            f"Mean: {mean_of_means:.2f} ± {format_std(std_of_means, 2)} | "
+                            f"Median: {mean_of_medians:.2f} ± {format_std(std_of_medians, 2)}<br>"
+                            f"Blue Mean: {mean_of_blue_means:.1f} ± {format_std(std_of_blue_means, 1)} | "
+                            f"Blue Median: {mean_of_blue_medians:.1f} ± {format_std(std_of_blue_medians, 1)}"
                         ),
                         xref="paper",
                         yref="paper",
@@ -594,6 +549,7 @@ def generate_enhanced_plot(
                         logging.warning("Could not automatically open interactive plot %s: %s", interactive_save_path, exc)
                 except Exception as plotly_error:
                     logging.warning(f"Failed to generate interactive plot for ROI {r_idx+1}: {plotly_error}")
+                    raise
             else:
                 logging.info("Plotly not available - skipping interactive plot generation.")
 
