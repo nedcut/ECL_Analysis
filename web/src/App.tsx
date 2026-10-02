@@ -35,13 +35,16 @@ export function App() {
   const [maskJobId, setMaskJobId] = useState<string | null>(null)
   const [useMasks, setUseMasks] = useState(false)
   const nextRoiId = useRef(1)
+  const openGeneration = useRef(0)
 
   const lastFrame = video ? Math.max(0, video.frame_count - 1) : 0
 
   const openVideo = useCallback(async (path: string) => {
+    const generation = ++openGeneration.current
     setOpenError(null)
     try {
       const meta = await api.openVideo(path)
+      if (generation !== openGeneration.current) return
       setVideo(meta)
       setFrame(0)
       setPlaying(false)
@@ -50,8 +53,11 @@ export function App() {
       setBackgroundRoiId(null)
       setRange({ start: 0, end: Math.max(0, meta.frame_count - 1) })
       setJob(null)
+      setMaskJobId(null)
+      setUseMasks(false)
       setPickerOpen(false)
     } catch (error) {
+      if (generation !== openGeneration.current) return
       setOpenError(error instanceof Error ? error.message : String(error))
     }
   }, [])
@@ -97,14 +103,19 @@ export function App() {
   // Poll a queued/running job until it settles.
   useEffect(() => {
     if (!job || (job.status !== 'queued' && job.status !== 'running')) return
+    let cancelled = false
     const interval = window.setInterval(async () => {
       try {
-        setJob(await api.jobStatus(job.job_id))
+        const status = await api.jobStatus(job.job_id)
+        if (!cancelled) setJob(status)
       } catch {
         // Poll again on transient failures; the next tick will retry.
       }
     }, 300)
-    return () => window.clearInterval(interval)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
   }, [job])
 
   const seek = useCallback(

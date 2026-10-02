@@ -22,7 +22,6 @@ from ecl_analysis.analysis.models import (
     THRESHOLD_MODE_NONE,
     AnalysisResult,
 )
-from ecl_analysis.constants import DEFAULT_MANUAL_THRESHOLD
 from ecl_analysis.export.stats import format_std, sample_std
 
 PlotBuilder = Callable[
@@ -247,8 +246,9 @@ def _build_metadata(
             "threshold_mode": threshold_mode,
             "manual_threshold": manual_threshold,
             "manual_threshold_applied": threshold_mode == THRESHOLD_MODE_MANUAL,
+            "manual_threshold_default": req.manual_threshold_default if req is not None else None,
             "manual_threshold_is_default": (
-                manual_threshold == DEFAULT_MANUAL_THRESHOLD if manual_threshold is not None else None
+                manual_threshold == req.manual_threshold_default if req is not None else None
             ),
             "background_roi": background_roi_idx + 1 if background_roi_idx is not None else None,
             "background_percentile": float(req.background_percentile) if req is not None else None,

@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -104,6 +105,7 @@ def create_app(web_dist: Optional[str] = None) -> FastAPI:
         videos.close_all()
 
     app = FastAPI(title="Brightness Sorcerer API", lifespan=lifespan)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -283,6 +285,7 @@ def create_app(web_dist: Optional[str] = None) -> FastAPI:
             morphological_kernel_size=payload.morphological_kernel_size,
             noise_floor_threshold=payload.noise_floor_threshold,
             manual_threshold=payload.manual_threshold,
+            manual_threshold_default=0.0,
         )
         job = jobs.start(
             "analysis",

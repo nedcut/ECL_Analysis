@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import * as api from '../api'
 import type { FrameRange } from '../App'
 import type { AnalysisSettings, DetectedBeep, JobStatus, Roi, VideoMeta } from '../types'
@@ -32,6 +32,8 @@ export function AnalyzePanel({
   const [beeps, setBeeps] = useState<DetectedBeep[] | null>(null)
   const [unfiltered, setUnfiltered] = useState(false)
   const [detectError, setDetectError] = useState<string | null>(null)
+  const currentVideoId = useRef(video?.video_id)
+  currentVideoId.current = video?.video_id
 
   const backgroundIdx = backgroundRoiId === null
     ? null
@@ -53,7 +55,8 @@ export function AnalyzePanel({
         settings,
         maskJobId,
       )
-      onJobChange(await api.jobStatus(job_id))
+      const status = await api.jobStatus(job_id)
+      if (currentVideoId.current === video.video_id) onJobChange(status)
     } catch (error) {
       setStartError(error instanceof Error ? error.message : String(error))
     }
@@ -67,6 +70,7 @@ export function AnalyzePanel({
     setUnfiltered(false)
     try {
       const { beeps: found, unfiltered: fallback } = await api.detectRange(video.video_id, expectedDuration)
+      if (currentVideoId.current !== video.video_id) return
       setBeeps(found)
       setUnfiltered(fallback)
       if (found.length === 1) {
@@ -138,7 +142,11 @@ export function AnalyzePanel({
 
       {running ? (
         <button className="btn btn-danger" style={{ width: '100%', justifyContent: 'center' }}
-          onClick={() => job && api.cancelJob(job.job_id)}>
+          onClick={() => {
+            if (job) void api.cancelJob(job.job_id).catch((error) =>
+              setStartError(error instanceof Error ? error.message : String(error)),
+            )
+          }}>
           Cancel analysis
         </button>
       ) : (

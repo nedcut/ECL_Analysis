@@ -35,7 +35,7 @@ def synthetic_video(tmp_path_factory):
 @pytest.fixture()
 def client():
     app = create_app()
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="http://127.0.0.1") as test_client:
         yield test_client
 
 
@@ -166,6 +166,12 @@ def test_export_writes_csv_and_serves_it(client, synthetic_video, tmp_path):
     out_paths = response.json()["out_paths"]
     csv_paths = [p for p in out_paths if p.endswith(".csv")]
     assert csv_paths, out_paths
+    import json
+    from pathlib import Path
+    metadata_path = next(p for p in out_paths if p.endswith("_metadata.json"))
+    settings = json.loads(Path(metadata_path).read_text())["settings"]
+    assert settings["manual_threshold_default"] == 0.0
+    assert settings["manual_threshold_is_default"] is True
 
     served = client.get(f"/api/jobs/{job_id}/files", params={"path": csv_paths[0]})
     assert served.status_code == 200
@@ -310,6 +316,8 @@ def test_web_analysis_exports_audited_counts_timing_and_provenance(client, synth
     metadata_path = next(p for p in exported["out_paths"] if p.endswith("_metadata.json"))
     metadata = json.loads(Path(metadata_path).read_text())
     assert metadata["settings"]["manual_threshold"] == 30.0
+    assert metadata["settings"]["manual_threshold_default"] == 0.0
+    assert metadata["settings"]["manual_threshold_is_default"] is False
     assert metadata["settings"]["noise_floor_threshold"] == 60.0
     assert metadata["settings"]["threshold_mode"] == "manual_threshold"
     assert metadata["video"]["fps"] == 30.0
@@ -400,3 +408,22 @@ def test_cancelled_web_job_has_no_exportable_result(client, synthetic_video, mon
     assert "result" not in payload
     response = client.post(f"/api/jobs/{job_id}/export", json={"analysis_name": "cancelled"})
     assert response.status_code == 409
+
+
+def test_web_rejects_foreign_host_headers(client, tmp_path):
+    response = client.get("/api/fs", params={"path": str(tmp_path)}, headers={"host": "foreign.example"})
+    assert response.status_code == 400
+    for host in ("localhost:8765", "127.0.0.1:8765"):
+        response = client.get("/api/fs", params={"path": str(tmp_path)}, headers={"host": host})
+        assert response.status_code == 200
+
+
+def test_web_accepts_unchanged_clipped_mask_geometry(client, synthetic_video):
+    meta = _open_video(client, synthetic_video)
+    inputs = {"rois": [{"x1": -5, "y1": 0, "x2": 32, "y2": 48}], "start_frame": 0, "end_frame": 29}
+    response = client.post(f"/api/videos/{meta['video_id']}/mask-scan", json={**inputs, "mode": "per_roi"})
+    mask_job_id = response.json()["job_id"]
+    assert _wait_for_job(client, mask_job_id)["status"] == "done"
+    response = client.post(f"/api/videos/{meta['video_id']}/analyze", json={**inputs, "mask_job_id": mask_job_id})
+    assert response.status_code == 200, response.text
+    assert _wait_for_job(client, response.json()["job_id"])["result"]["rois"][0]["fixed_mask_status"] == "applied"

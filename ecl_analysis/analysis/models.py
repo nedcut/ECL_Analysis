@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from ecl_analysis.constants import DEFAULT_MANUAL_THRESHOLD
 
 Point = Tuple[int, int]
 RoiRect = Tuple[Point, Point]
@@ -52,6 +53,8 @@ class AnalysisRequest:
     # A value > 0 gates pixel inclusion and offsets background-subtracted
     # stats exactly like a background-derived threshold; 0 disables it.
     manual_threshold: float = 0.0
+    # Provenance only: the frontend's default, without changing pixel selection.
+    manual_threshold_default: float = DEFAULT_MANUAL_THRESHOLD
 
     @property
     def threshold_mode(self) -> str:

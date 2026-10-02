@@ -60,7 +60,7 @@ export function MasksPanel({
       onSeek((globalJob.result as BrightestFrameResultPayload).brightest_frame_idx)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [globalJob?.status])
+  }, [globalJob?.job_id, globalJob?.status])
 
   // Register a finished capture with the app so analysis can use it.
   useEffect(() => {
@@ -69,7 +69,7 @@ export function MasksPanel({
       onUseMasksChange(true)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [captureJob?.status])
+  }, [captureJob?.job_id, captureJob?.status])
 
   const startScan = async (mode: 'global' | 'per_roi') => {
     if (!video) return

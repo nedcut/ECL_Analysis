@@ -26,6 +26,8 @@ python main.py
 
 A browser-based UI is available alongside the desktop app. It runs a local
 server that decodes frames and executes the same analysis pipeline.
+Use `127.0.0.1` or `localhost`; the server rejects other Host headers before
+allowing access to local files.
 
 ```bash
 # One-time: install web extras and build the frontend (requires bun)
@@ -107,7 +109,8 @@ The run metadata records which method was used for each ROI:
 
 When no background ROI is set, a positive manual threshold (desktop default **5.0 L\***,
 web default **0 L\***) is used as the threshold. The
-metadata shows whether it was applied and whether it was the default value.
+metadata records that frontend's default explicitly in `manual_threshold_default`,
+whether the threshold was applied, and whether it matches that default.
 
 #### Run metadata sidecar
 

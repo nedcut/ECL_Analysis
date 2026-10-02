@@ -33,5 +33,5 @@ export function useJob(jobId: string | null): JobStatus | null {
     }
   }, [jobId])
 
-  return job
+  return job?.job_id === jobId ? job : null
 }
