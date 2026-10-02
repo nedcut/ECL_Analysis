@@ -6,6 +6,8 @@ from ecl_analysis.roi_geometry import (
     map_label_to_frame_point,
     map_label_to_frame_rect,
     scale_value_for_frame,
+
+    roi_slice_bounds,
     scale_value_for_pixmap,
 )
 
@@ -59,3 +61,13 @@ def test_scale_value_for_frame_is_inverse_of_pixmap_scaling():
 def test_scale_value_for_frame_handles_degenerate_sizes():
     assert scale_value_for_frame(10.0, QtCore.QRect(0, 0, 0, 0), frame_width=200) == 10.0
     assert scale_value_for_frame(10.0, QtCore.QRect(0, 0, 100, 50), frame_width=0) == 10.0
+
+def test_roi_slice_bounds_normalizes_and_uses_exclusive_frame_edge():
+    # Corner order does not matter; an ROI on the right/bottom edge keeps the
+    # last column/row (exclusive end == frame size, not size - 1).
+    assert roi_slice_bounds((40, 30), (20, 0), 40, 30) == (20, 0, 40, 30)
+    # Out-of-frame coordinates clamp to the frame.
+    assert roi_slice_bounds((-5, -5), (100, 100), 40, 30) == (0, 0, 40, 30)
+    # Fully outside the frame collapses to an empty region.
+    x1, y1, x2, y2 = roi_slice_bounds((50, 0), (60, 10), 40, 30)
+    assert x2 <= x1
