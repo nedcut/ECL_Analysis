@@ -76,6 +76,12 @@ That tool:
 
 If you want to rerun ingest against the same capture and `output_dir`, pass `--force-reprocess` or set `"force_reprocess": true` in the manifest. Otherwise identical source signatures are skipped on purpose, and the run summary now includes the existing summary path that triggered the skip.
 
+An existing capture output with a different or unreadable source signature is rejected
+unless `force_reprocess` explicitly requests replacement of analysis outputs. Archiving
+always requires a new capture directory: an existing archive is rejected before either
+source file moves, so earlier raw videos and sidecars cannot be replaced. Use a new
+capture ID or output/archive directory to resolve a collision.
+
 Use `--watch-seconds 5` to keep rescanning during manual device-to-desktop testing.
 
 ### Output

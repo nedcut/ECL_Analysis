@@ -159,3 +159,48 @@ def test_process_inbox_once_archives_sources_after_processing(tmp_path: Path, mo
     assert not sidecar_path.exists()
     assert (archive_dir / "capture-001" / "capture.mov").exists()
     assert (archive_dir / "capture-001" / "capture.capture.json").exists()
+
+
+def test_archive_collision_preserves_sources_and_existing_archive(tmp_path):
+    import pytest
+    from tools.ingest_capture_inbox import _archive_sources
+
+    source = tmp_path / "incoming"
+    source.mkdir()
+    video = source / "capture.mov"
+    sidecar = source / "capture.capture.json"
+    video.write_bytes(b"new capture")
+    sidecar.write_text("new metadata")
+    archive = tmp_path / "archive" / "capture-001"
+    archive.mkdir(parents=True)
+    (archive / video.name).write_bytes(b"original capture")
+    (archive / sidecar.name).write_text("original metadata")
+
+    with pytest.raises(FileExistsError):
+        _archive_sources(video, sidecar, archive.parent, "capture-001")
+
+    assert video.read_bytes() == b"new capture"
+    assert sidecar.read_text() == "new metadata"
+    assert (archive / video.name).read_bytes() == b"original capture"
+    assert (archive / sidecar.name).read_text() == "original metadata"
+
+
+def test_duplicate_capture_id_preserves_previous_summary(tmp_path):
+    import pytest
+
+    inbox = tmp_path / "incoming"
+    inbox.mkdir()
+    video = inbox / "capture.mov"
+    video.write_bytes(b"first capture")
+    _write_valid_sidecar(inbox / "capture.capture.json")
+    manifest = {"inbox_dir": str(inbox), "output_dir": str(tmp_path / "outputs")}
+    process_inbox_once(manifest)
+    summary = tmp_path / "outputs" / "capture-001" / "capture_ingest_summary.json"
+    original_summary = summary.read_bytes()
+    video.write_bytes(b"second different capture")
+
+    with pytest.raises(FileExistsError, match="capture-001"):
+        process_inbox_once(manifest)
+
+    assert summary.read_bytes() == original_summary
+    assert video.read_bytes() == b"second different capture"

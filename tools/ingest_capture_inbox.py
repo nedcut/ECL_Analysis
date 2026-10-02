@@ -144,7 +144,9 @@ def _write_summary(
 
 def _archive_sources(video_path: Path, sidecar_path: Path, archive_root: Path, capture_label: str) -> Dict[str, str]:
     archive_dir = archive_root / capture_label
-    archive_dir.mkdir(parents=True, exist_ok=True)
+    # Reserve a new capture directory before moving either source. Reusing one
+    # could replace an earlier video or its provenance with the same filename.
+    archive_dir.mkdir(parents=True, exist_ok=False)
 
     archived_video = archive_dir / video_path.name
     shutil.move(str(video_path), archived_video)
@@ -195,6 +197,13 @@ def process_inbox_once(manifest: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
             continue
+
+        if not force_reprocess and capture_dir.exists():
+            raise FileExistsError(
+                f"Capture output already exists for '{capture_label}' with a different or "
+                "unreadable source signature. Choose a new capture ID/output directory, "
+                "or explicitly enable force_reprocess to replace analysis outputs."
+            )
 
         analysis_result = None
         if isinstance(analysis_case, dict):
