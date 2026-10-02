@@ -125,7 +125,7 @@ Arrow keys nudge a selected ROI instead of navigating frames. Shift+Arrow for 10
 
 1. User draws ROIs on the video frame (one can be designated as a background reference).
 2. For each frame in the selected range, the tool converts BGR pixels to **CIE LAB** color space and extracts the **L\* channel** (perceptually uniform brightness, 0–100 scale).
-3. Pixels below a noise threshold (default 5 L\*) are filtered out. An optional morphological opening (erode then dilate) removes isolated bright pixels.
+3. Without a background ROI, the manual threshold defaults to 5 L\*. Threshold-selected pixels undergo a morphological opening (erode then dilate), followed by the separate absolute L\* noise floor. Fixed masks bypass these filters; with the manual threshold at 0 and no background ROI, the whole ROI is measured.
 4. If a background ROI is set, its brightness (configurable percentile, default 90th) is subtracted per-frame to compensate for lighting drift. If the background ROI is set but unusable (e.g. it lies outside the frame), the analysis stops with an error. It does not fall back to raw values.
 5. Both mean and median brightness are computed per ROI per frame.
 6. Results are exported to CSV and plotted.
