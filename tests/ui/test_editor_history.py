@@ -299,3 +299,89 @@ def test_roi_drag_updates_list_row_without_rebuilding_until_release(
     assert window.rects[0] == ((10, 10), (50, 40))
     assert window.rect_list.item(0).text() == "ROI 1: (10,10)-(50,40)"
     window.close()
+
+
+def test_clear_all_rectangles_records_a_single_history_entry(
+    qt_application: QtWidgets.QApplication,
+    monkeypatch,
+) -> None:
+    window = VideoAnalyzer()
+    _prepare_loaded_window(window)
+    window.rects = [((10, 10), (50, 50)), ((60, 10), (100, 50))]
+    window.fixed_roi_masks = [np.ones((40, 40), dtype=bool), None]
+    window.mask_source_frames = [3, None]
+    window._set_use_fixed_mask_silently(True)
+    window.update_rect_list()
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "question",
+        lambda *args, **kwargs: QtWidgets.QMessageBox.Yes,
+    )
+
+    window.clear_all_rectangles()
+
+    assert window.rects == []
+    assert window.use_fixed_mask is False
+    assert not window.use_fixed_mask_checkbox.isChecked()
+    assert [entry.label for entry in window._undo_history] == ["Clear All ROIs"]
+
+    window.undo_last_action()
+    assert len(window.rects) == 2
+    assert window.use_fixed_mask is True
+    assert window.use_fixed_mask_checkbox.isChecked()
+    assert window._undo_history == []
+
+    window.close()
+
+
+def test_user_toggle_of_fixed_mask_still_records_history(
+    qt_application: QtWidgets.QApplication,
+) -> None:
+    window = VideoAnalyzer()
+    _prepare_loaded_window(window)
+    window.rects = [((10, 10), (50, 50))]
+
+    window.use_fixed_mask_checkbox.setChecked(True)
+
+    assert window.use_fixed_mask is True
+    assert [entry.label for entry in window._undo_history] == ["Toggle Fixed Mask"]
+
+    window.close()
+
+
+def test_roi_drag_release_readout_reflects_cleared_masks(
+    qt_application: QtWidgets.QApplication,
+) -> None:
+    window = VideoAnalyzer()
+    _prepare_loaded_window(window)
+    window.frame = np.tile(np.arange(0, 256, 2, dtype=np.uint8)[None, :128, None], (120, 1, 3)).copy()
+    window.rects = [((10, 10), (60, 50))]
+    window.selected_rect_idx = 0
+    window.update_rect_list(preferred_row=0)
+    window.manual_threshold = 30.0
+    window._capture_fixed_masks(0)
+    window.use_fixed_mask_checkbox.setChecked(True)
+    window._current_image_size = window.image_label.size()
+    window.show_frame()
+
+    start = window._map_frame_to_label_point((30, 25))
+    assert start is not None
+    window.image_mouse_press(
+        _mouse_event(QtCore.QEvent.MouseButtonPress, start, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton)
+    )
+    target = window._map_frame_to_label_point((42, 31))
+    window.image_mouse_move(
+        _mouse_event(QtCore.QEvent.MouseMove, target, QtCore.Qt.NoButton, QtCore.Qt.LeftButton)
+    )
+    window.image_mouse_release(
+        _mouse_event(QtCore.QEvent.MouseButtonRelease, target, QtCore.Qt.LeftButton, QtCore.Qt.NoButton)
+    )
+
+    assert window.rects[0] != ((10, 10), (60, 50))
+    assert all(mask is None for mask in window.fixed_roi_masks)
+    # The readout must describe the analysis after the masks were invalidated.
+    shown = window.brightness_display_label.text()
+    window._update_current_brightness_display()
+    assert shown == window.brightness_display_label.text()
+
+    window.close()

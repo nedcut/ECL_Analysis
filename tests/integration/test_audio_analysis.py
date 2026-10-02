@@ -7,7 +7,8 @@ from ecl_analysis.audio import AudioAnalyzer
 
 def test_find_completion_beeps_converts_times_to_frames(monkeypatch):
     analyzer = AudioAnalyzer()
-    analyzer.available = True
+    # Bypass the librosa import so the test runs on a core-only install.
+    monkeypatch.setattr(analyzer, "_ensure_backend", lambda: True)
 
     monkeypatch.setattr(analyzer, "extract_audio_from_video", lambda path: (np.zeros(1000, dtype=np.float32), 44100))
     monkeypatch.setattr(analyzer, "detect_beeps", lambda *args, **kwargs: [0.0, 0.5, 1.0])
@@ -36,7 +37,8 @@ def test_find_completion_beeps_converts_times_to_frames(monkeypatch):
 
 def test_find_completion_beeps_applies_duration_filter(monkeypatch):
     analyzer = AudioAnalyzer()
-    analyzer.available = True
+    # Bypass the librosa import so the test runs on a core-only install.
+    monkeypatch.setattr(analyzer, "_ensure_backend", lambda: True)
 
     monkeypatch.setattr(analyzer, "extract_audio_from_video", lambda path: (np.zeros(1000, dtype=np.float32), 44100))
     monkeypatch.setattr(analyzer, "detect_beeps", lambda *args, **kwargs: [0.2, 1.2, 2.0])
