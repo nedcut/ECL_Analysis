@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-import ecl_analysis.workers as workers_module
+import ecl_analysis.analysis.frame as frame_module
 from ecl_analysis.analysis.background import BackgroundComputationError
 from ecl_analysis.analysis.brightness import compute_l_star_frame
 from ecl_analysis.analysis.models import AnalysisRequest
@@ -229,7 +229,7 @@ def test_analysis_worker_aborts_on_brightness_computation_failure(monkeypatch):
     def boom(*args, **kwargs):
         raise cv2.error("synthetic brightness computation failure")
 
-    monkeypatch.setattr(workers_module, "compute_brightness_stats_detailed", boom)
+    monkeypatch.setattr(frame_module, "compute_brightness_stats_detailed", boom)
 
     request = AnalysisRequest(
         video_path="dummy.mp4",
@@ -267,7 +267,7 @@ def test_analysis_worker_aborts_on_background_computation_failure(monkeypatch):
     def boom(*args, **kwargs):
         raise BackgroundComputationError("synthetic background computation failure")
 
-    monkeypatch.setattr(workers_module, "compute_background_brightness", boom)
+    monkeypatch.setattr(frame_module, "compute_background_brightness", boom)
 
     request = AnalysisRequest(
         video_path="dummy.mp4",
@@ -453,3 +453,37 @@ def test_per_roi_mask_capture_worker_returns_sources(monkeypatch):
     assert result.sources[1] == 1
     assert result.masks[0] is not None
     assert result.masks[1] is not None
+
+
+def test_per_roi_mask_capture_worker_applies_manual_threshold(monkeypatch):
+    """With no background ROI, per-ROI auto-capture must gate on the manual
+    threshold (like "Capture From Current" and the analysis) instead of
+    producing all-ones masks."""
+    frame = np.zeros((4, 6, 3), dtype=np.uint8)
+    frame[:, 3:, :] = 220  # bright right half
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _path: DummyVideoCapture([frame, frame]))
+
+    def capture(manual_threshold):
+        request = MaskScanRequest(
+            video_path="dummy.mp4",
+            rects=[((0, 0), (6, 4))],
+            background_roi_idx=None,
+            start_frame=0,
+            end_frame=1,
+            step=1,
+            background_percentile=90.0,
+            morphological_kernel_size=1,
+            manual_threshold=manual_threshold,
+        )
+        worker = PerRoiMaskCaptureWorker(request)
+        captured: Dict[str, object] = {}
+        worker.finished.connect(lambda payload: captured.setdefault("result", payload))
+        worker.run()
+        return captured["result"].masks[0]
+
+    gated = capture(50.0)
+    assert not gated[:, :3].any()
+    assert gated[:, 3:].all()
+
+    # 0 disables the manual threshold: the analysis then uses the whole ROI.
+    assert capture(0.0).all()

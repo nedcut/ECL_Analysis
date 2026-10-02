@@ -13,10 +13,14 @@ import cv2
 import numpy as np
 from PyQt5 import QtCore
 
-from .analysis.background import compute_background_brightness
-from .analysis.brightness import compute_brightness_stats_detailed, compute_l_star_frame
+from .analysis.brightness import compute_l_star_frame
+from .analysis.frame import (
+    FrameAnalysisSettings,
+    analyze_frame,
+    build_roi_mask,
+    resolve_frame_threshold,
+)
 from .analysis.models import (
-    MASK_STATUS_APPLIED,
     MASK_STATUS_MISSING,
     MASK_STATUS_NOT_REQUESTED,
     MASK_STATUS_SHAPE_MISMATCH,
@@ -25,6 +29,7 @@ from .analysis.models import (
     RoiRect,
 )
 from .audio import AudioAnalyzer
+from .roi_geometry import roi_slice_bounds
 
 
 class CancellationToken:
@@ -44,24 +49,6 @@ class CancellationToken:
         return self._event.is_set()
 
 
-def _normalized_slice_bounds(
-    pt1: tuple[int, int],
-    pt2: tuple[int, int],
-    frame_width: int,
-    frame_height: int,
-) -> tuple[int, int, int, int]:
-    """Return clamped, normalized ROI bounds for NumPy slicing (exclusive end)."""
-    left, right = sorted((int(pt1[0]), int(pt2[0])))
-    top, bottom = sorted((int(pt1[1]), int(pt2[1])))
-
-    x1 = max(0, min(left, frame_width))
-    x2 = max(0, min(right, frame_width))
-    y1 = max(0, min(top, frame_height))
-    y2 = max(0, min(bottom, frame_height))
-
-    return x1, y1, x2, y2
-
-
 @dataclass(frozen=True)
 class MaskScanRequest:
     """Immutable scan inputs for brightest-frame mask workflows."""
@@ -74,6 +61,9 @@ class MaskScanRequest:
     step: int
     background_percentile: float
     morphological_kernel_size: int
+    # Manual threshold mode (no background ROI): masks gate on L* > this value,
+    # matching "Capture From Current" and the analysis; 0 disables it.
+    manual_threshold: float = 0.0
 
 
 @dataclass
@@ -120,6 +110,7 @@ class AnalysisWorker(QtCore.QObject):
         pixel_count_data: List[List[int]] = [[] for _ in non_background_rois]
         background_values_per_frame: List[float] = []
         mask_status: Dict[int, str] = {}
+        settings = FrameAnalysisSettings.from_request(req)
 
         start_time = time.time()
         cap = cv2.VideoCapture(req.video_path)
@@ -162,87 +153,35 @@ class AnalysisWorker(QtCore.QObject):
                     truncated = True
                     break
 
-                l_star_frame = compute_l_star_frame(frame)
-                background_value = compute_background_brightness(
-                    frame=frame,
-                    rects=req.rects,
-                    background_roi_idx=req.background_roi_idx,
-                    background_percentile=req.background_percentile,
-                    frame_l_star=l_star_frame,
+                analysis = analyze_frame(
+                    frame,
+                    req.rects,
+                    req.background_roi_idx,
+                    settings,
+                    masks=req.fixed_roi_masks,
                 )
-                if req.background_roi_idx is None and req.manual_threshold > 0:
-                    # Manual threshold mode: no background ROI configured, so the
-                    # user-set manual threshold acts as the active threshold.
-                    background_value = req.manual_threshold
+                background_value = analysis.threshold
                 background_values_per_frame.append(background_value if background_value is not None else 0.0)
 
-                frame_height, frame_width = frame.shape[:2]
-                for data_idx, roi_idx in enumerate(non_background_rois):
-                    pt1, pt2 = req.rects[roi_idx]
-                    x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
-
-                    if x2 > x1 and y2 > y1:
-                        roi = frame[y1:y2, x1:x2]
-                        roi_l_star = l_star_frame[y1:y2, x1:x2]
-                        roi_mask = None
-                        if req.use_fixed_mask and roi_idx < len(req.fixed_roi_masks):
-                            candidate_mask = req.fixed_roi_masks[roi_idx]
-                            if isinstance(candidate_mask, np.ndarray) and candidate_mask.shape[:2] == roi.shape[:2]:
-                                roi_mask = candidate_mask
-                            elif isinstance(candidate_mask, np.ndarray) and roi_idx not in mask_status:
-                                logging.warning(
-                                    "AnalysisWorker: fixed mask for ROI %d has shape %s but ROI is %s; "
-                                    "mask dropped, threshold method used instead.",
-                                    roi_idx + 1,
-                                    candidate_mask.shape[:2],
-                                    roi.shape[:2],
-                                )
-                                mask_status[roi_idx] = MASK_STATUS_SHAPE_MISMATCH
-                        if req.use_fixed_mask:
-                            mask_status.setdefault(
-                                roi_idx, MASK_STATUS_APPLIED if roi_mask is not None else MASK_STATUS_MISSING
-                            )
-
-                        (
-                            l_raw_mean,
-                            l_raw_median,
-                            l_bg_sub_mean,
-                            l_bg_sub_median,
-                            b_raw_mean,
-                            b_raw_median,
-                            b_analyzed_mean,
-                            b_analyzed_median,
-                            raw_pixel_count,
-                            analyzed_pixel_count,
-                        ) = compute_brightness_stats_detailed(
-                            roi_bgr=roi,
-                            background_brightness=background_value,
-                            roi_mask=roi_mask,
-                            roi_l_star=roi_l_star,
-                            morphological_kernel_size=req.morphological_kernel_size,
-                            noise_floor_threshold=req.noise_floor_threshold,
+                for data_idx, roi_result in enumerate(analysis.rois):
+                    roi_idx = roi_result.roi_idx
+                    if roi_result.mask_status == MASK_STATUS_SHAPE_MISMATCH and roi_idx not in mask_status:
+                        x1, y1, x2, y2 = roi_result.bounds
+                        logging.warning(
+                            "AnalysisWorker: fixed mask for ROI %d has shape %s but ROI is %s; "
+                            "mask dropped, threshold method used instead.",
+                            roi_idx + 1,
+                            req.fixed_roi_masks[roi_idx].shape[:2],
+                            (y2 - y1, x2 - x1),
                         )
+                    if roi_result.mask_status is not None:
+                        mask_status.setdefault(roi_idx, roi_result.mask_status)
 
-                        # Blue is never background-subtracted: with a background/threshold
-                        # value it is raw blue over the same analyzed pixels as L*.
-                        if background_value is not None:
-                            brightness_mean_data[data_idx].append(l_bg_sub_mean)
-                            brightness_median_data[data_idx].append(l_bg_sub_median)
-                            blue_mean_data[data_idx].append(b_analyzed_mean)
-                            blue_median_data[data_idx].append(b_analyzed_median)
-                            pixel_count_data[data_idx].append(analyzed_pixel_count)
-                        else:
-                            brightness_mean_data[data_idx].append(l_raw_mean)
-                            brightness_median_data[data_idx].append(l_raw_median)
-                            blue_mean_data[data_idx].append(b_raw_mean)
-                            blue_median_data[data_idx].append(b_raw_median)
-                            pixel_count_data[data_idx].append(raw_pixel_count)
-                    else:
-                        brightness_mean_data[data_idx].append(0.0)
-                        brightness_median_data[data_idx].append(0.0)
-                        blue_mean_data[data_idx].append(0.0)
-                        blue_median_data[data_idx].append(0.0)
-                        pixel_count_data[data_idx].append(0)
+                    brightness_mean_data[data_idx].append(roi_result.mean)
+                    brightness_median_data[data_idx].append(roi_result.median)
+                    blue_mean_data[data_idx].append(roi_result.blue_mean)
+                    blue_median_data[data_idx].append(roi_result.blue_median)
+                    pixel_count_data[data_idx].append(roi_result.pixel_count)
 
                 frames_processed += 1
 
@@ -397,7 +336,7 @@ class BrightestFrameWorker(QtCore.QObject):
 
                 for roi_idx in non_background_rois:
                     pt1, pt2 = req.rects[roi_idx]
-                    x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
+                    x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, frame_width, frame_height)
                     if x2 > x1 and y2 > y1:
                         roi_l_star = l_star_frame[y1:y2, x1:x2]
                         if roi_l_star.size:
@@ -493,7 +432,7 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
 
                 for roi_idx in roi_indices:
                     pt1, pt2 = req.rects[roi_idx]
-                    x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
+                    x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, frame_width, frame_height)
                     if x2 > x1 and y2 > y1:
                         roi_l_star = l_star_frame[y1:y2, x1:x2]
                         if roi_l_star.size:
@@ -524,32 +463,21 @@ class PerRoiMaskCaptureWorker(QtCore.QObject):
                     continue
 
                 l_star_frame = compute_l_star_frame(frame)
-                background = compute_background_brightness(
-                    frame=frame,
-                    rects=req.rects,
-                    background_roi_idx=req.background_roi_idx,
-                    background_percentile=req.background_percentile,
+                threshold = resolve_frame_threshold(
+                    frame,
+                    req.rects,
+                    req.background_roi_idx,
+                    req.background_percentile,
+                    req.manual_threshold,
                     frame_l_star=l_star_frame,
                 )
-
-                frame_height, frame_width = frame.shape[:2]
-                pt1, pt2 = req.rects[roi_idx]
-                x1, y1, x2, y2 = _normalized_slice_bounds(pt1, pt2, frame_width, frame_height)
-
-                if x2 > x1 and y2 > y1:
-                    roi_l_star = l_star_frame[y1:y2, x1:x2]
-                    if background is not None:
-                        mask = roi_l_star > background
-                        if np.any(mask):
-                            kernel = cv2.getStructuringElement(
-                                cv2.MORPH_ELLIPSE,
-                                (req.morphological_kernel_size, req.morphological_kernel_size),
-                            )
-                            mask_uint8 = mask.astype(np.uint8) * 255
-                            cleaned = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-                            mask = cleaned > 0
-                    else:
-                        mask = np.ones(roi_l_star.shape, dtype=bool)
+                mask = build_roi_mask(
+                    l_star_frame,
+                    req.rects[roi_idx],
+                    threshold,
+                    req.morphological_kernel_size,
+                )
+                if mask is not None:
                     masks[roi_idx] = mask
                     sources[roi_idx] = frame_idx
 

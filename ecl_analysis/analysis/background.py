@@ -6,6 +6,7 @@ from typing import Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from ..roi_geometry import roi_slice_bounds
 from .brightness import compute_l_star_frame
 
 Point = Tuple[int, int]
@@ -55,14 +56,7 @@ def compute_background_brightness(
     try:
         pt1, pt2 = rects[background_roi_idx]
         frame_height, frame_width = frame.shape[:2]
-
-        left, right = sorted((int(pt1[0]), int(pt2[0])))
-        top, bottom = sorted((int(pt1[1]), int(pt2[1])))
-
-        x1 = max(0, min(left, frame_width))
-        x2 = max(0, min(right, frame_width))
-        y1 = max(0, min(top, frame_height))
-        y2 = max(0, min(bottom, frame_height))
+        x1, y1, x2, y2 = roi_slice_bounds(pt1, pt2, frame_width, frame_height)
 
         if x2 <= x1 or y2 <= y1:
             raise BackgroundComputationError(
