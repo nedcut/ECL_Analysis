@@ -66,6 +66,13 @@ Each analysis produces:
 
 Arrow keys nudge a selected ROI instead of navigating frames. Shift+Arrow for 10px nudge.
 
+Audio completion-beep detection is a range-selection aid. Its clip-wide 95th-percentile
+threshold assumes a beep occupies a small fraction of the recording. In short clips,
+a beep occupying more than about 5% of the audio can be missed or split into multiple
+detections. Check the proposed range; if no reliable beep is found, set the start and
+end frames manually. The detector has synthetic test coverage but has not been
+validated against a representative set of lab recordings.
+
 ## How It Works
 
 ### Analysis Pipeline
