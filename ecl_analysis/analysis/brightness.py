@@ -67,6 +67,29 @@ def compute_l_star_frame(frame: np.ndarray) -> np.ndarray:
     return l_chan
 
 
+def compute_threshold_pixel_mask(
+    roi_l_star: np.ndarray,
+    threshold: float,
+    morphological_kernel_size: int,
+    noise_floor_threshold: float = 0.0,
+) -> np.ndarray:
+    """Return the threshold pixels contributing to brightness statistics.
+
+    Opening is applied before the absolute noise floor, matching the analysis
+    measurement rule. Fixed masks and whole-ROI measurements bypass this rule.
+    """
+    mask = roi_l_star > threshold
+    if np.any(mask):
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (morphological_kernel_size, morphological_kernel_size),
+        )
+        mask = cv2.morphologyEx(mask.astype(np.uint8) * 255, cv2.MORPH_OPEN, kernel) > 0
+    if noise_floor_threshold > 0:
+        mask &= roi_l_star > noise_floor_threshold
+    return mask
+
+
 def compute_brightness_stats_detailed(
     roi_bgr: np.ndarray,
     background_brightness: Optional[float] = None,
@@ -165,16 +188,9 @@ def compute_brightness_stats_detailed(
     b_raw_median = float(np.median(blue_chan))
 
     if background_brightness is not None:
-        above_background_mask = l_star > background_brightness
-
-        if np.any(above_background_mask):
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE,
-                (morphological_kernel_size, morphological_kernel_size),
-            )
-            mask_uint8 = above_background_mask.astype(np.uint8) * 255
-            cleaned_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-            above_background_mask = cleaned_mask > 0
+        above_background_mask = compute_threshold_pixel_mask(
+            l_star, background_brightness, morphological_kernel_size
+        )
 
         if np.any(above_background_mask):
             if noise_floor_threshold > 0:
@@ -213,16 +229,9 @@ def compute_brightness_stats_detailed(
             b_analyzed_median = 0.0
             analyzed_pixel_count = 0
     elif noise_floor_threshold > 0:
-        noise_floor_mask = l_star > noise_floor_threshold
-
-        if np.any(noise_floor_mask):
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE,
-                (morphological_kernel_size, morphological_kernel_size),
-            )
-            mask_uint8 = noise_floor_mask.astype(np.uint8) * 255
-            cleaned_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
-            noise_floor_mask = cleaned_mask > 0
+        noise_floor_mask = compute_threshold_pixel_mask(
+            l_star, noise_floor_threshold, morphological_kernel_size
+        )
 
         if np.any(noise_floor_mask):
             filtered_l_pixels = l_star[noise_floor_mask]

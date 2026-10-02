@@ -435,3 +435,55 @@ def test_reset_state_drops_cached_preview_analysis(
         assert window._preview_analysis_cache is None
     finally:
         window.close()
+
+
+@pytest.mark.parametrize("mode", ["threshold", "fixed_mask", "whole_roi"])
+def test_overlay_pixels_match_exported_contributors(qt_application, monkeypatch, mode):
+    """The tint must represent exported pixels, including morphology and noise floor."""
+    window = VideoAnalyzer()
+    try:
+        frame = np.full((17, 17, 3), 10, dtype=np.uint8)
+        frame[4:13, 4:13] = 200
+        frame[6:9, 6:9] = 100  # survives threshold, fails the absolute noise floor
+        frame[1, 1] = 200  # isolated threshold pixel removed by opening
+        window.frame = frame
+        window.rects = [((0, 0), (17, 17))]
+        window.background_roi_idx = None
+        window.manual_threshold = 30.0 if mode != "whole_roi" else 0.0
+        window.morphological_kernel_size = 3
+        window.noise_floor_threshold = 60.0
+        if mode == "fixed_mask":
+            mask = np.zeros((17, 17), dtype=bool)
+            mask[1, 1] = True
+            mask[7, 7] = True  # fixed masks bypass gating and noise floor
+            window.fixed_roi_masks = [mask]
+            window.use_fixed_mask = True
+        else:
+            window.use_fixed_mask = False
+
+        overlay = window._apply_pixel_mask_overlay(frame)
+        tinted = np.any(overlay != frame, axis=2)
+        if mode == "threshold":
+            expected = np.zeros((17, 17), dtype=bool)
+            expected[4:13, 4:13] = True
+            for y, x in [(4, 4), (4, 12), (12, 4), (12, 12)]:
+                expected[y, x] = False  # ellipse opening removes square corners
+            expected[6:9, 6:9] = False
+        elif mode == "fixed_mask":
+            expected = mask
+        else:
+            expected = np.ones((17, 17), dtype=bool)
+
+        np.testing.assert_array_equal(tinted, expected)
+        request = AnalysisRequest(
+            video_path="dummy.mp4", rects=window.rects, background_roi_idx=None,
+            start_frame=0, end_frame=0, use_fixed_mask=window.use_fixed_mask,
+            fixed_roi_masks=window.fixed_roi_masks, background_percentile=90.0,
+            morphological_kernel_size=3, noise_floor_threshold=60.0,
+            manual_threshold=window.manual_threshold,
+        )
+        result = _run_worker(request, frame, monkeypatch)
+        assert int(tinted.sum()) == result.pixel_count_data[0][0]
+        np.testing.assert_array_equal(window.frame, frame)
+    finally:
+        window.close()

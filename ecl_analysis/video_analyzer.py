@@ -18,6 +18,7 @@ from .analysis.background import (
 from .analysis.brightness import (
     compute_brightness_stats as analysis_compute_brightness_stats,
     compute_l_star_frame as analysis_compute_l_star_frame,
+    compute_threshold_pixel_mask,
 )
 from .analysis.duration import validate_run_duration as analysis_validate_run_duration
 from .analysis.frame import FrameAnalysis, FrameAnalysisSettings, analyze_frame, build_roi_mask
@@ -2888,7 +2889,12 @@ class VideoAnalyzer(QtWidgets.QMainWindow):  # Changed to QMainWindow for better
                     if mask is None:
                         # Derive mask from current frame using cached L* channel
                         if effective_threshold is not None:
-                            mask = roi_l_star > effective_threshold
+                            mask = compute_threshold_pixel_mask(
+                                roi_l_star,
+                                effective_threshold,
+                                self.morphological_kernel_size,
+                                self.noise_floor_threshold,
+                            )
                         else:
                             mask = np.ones_like(roi_l_star, dtype=bool)
                     
