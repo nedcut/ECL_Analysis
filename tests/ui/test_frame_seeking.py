@@ -217,7 +217,7 @@ def test_show_frame_copies_when_overlay_falls_back_to_input(loaded_window, monke
     def _fail(*args, **kwargs):
         raise BackgroundComputationError("boom")
 
-    monkeypatch.setattr(window, "_effective_analysis_threshold", _fail)
+    monkeypatch.setattr(window, "_preview_frame_analysis", _fail)
     window.show_frame()
 
     assert np.array_equal(window.frame, frames[0])
