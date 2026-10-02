@@ -25,6 +25,11 @@ brightness_analyzer_settings.json
 *.csv
 *.png
 
+# Web frontend
+node_modules/
+*.tsbuildinfo
+.playwright-mcp/
+
 # IDE
 .vscode/
 .idea/
@@ -34,3 +39,6 @@ brightness_analyzer_settings.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Old v2 spike data
+.ecl_v2_data/

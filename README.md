@@ -22,6 +22,31 @@ pip install -e ".[audio,interactive-plots]"
 python main.py
 ```
 
+### Web UI (new)
+
+A browser-based UI is available alongside the desktop app. It runs a local
+server that decodes frames and executes the same analysis pipeline.
+
+```bash
+# One-time: install web extras and build the frontend (requires bun)
+pip install -e ".[web]"
+cd web && bun install && bun run build && cd ..
+
+# Run — then open http://127.0.0.1:8765
+python -m ecl_analysis.server
+```
+
+For frontend development, run `bun run dev` in `web/` (Vite proxies `/api` to
+the server on port 8765) and open the printed URL instead.
+
+Both frontends use the same analysis and mask-scan routines, export columns,
+and 1-based displayed frame numbers. The web UI keeps its existing manual
+threshold default of **0 L\*** (whole-ROI analysis without a background ROI);
+the desktop default remains **5 L\***. Set the same threshold explicitly when
+comparing runs across frontends. The web threshold preview shows raw pixels
+above the threshold, before morphology and noise-floor cleanup. The desktop
+pixel overlay shows the pixels contributing to the measurement.
+
 Only need the core features? `pip install -e .` skips the optional `pygame`/`librosa`/`soundfile`/`plotly` extras.
 
 ### Updating When New Code Is Pushed
@@ -80,7 +105,8 @@ The run metadata records which method was used for each ROI:
   value is subtracted from every mask pixel, with no gating, morphology or noise floor. Values can be negative.
 - **`whole_roi`** (no background ROI and manual threshold of 0): plain L\* over every ROI pixel.
 
-When no background ROI is set, the manual threshold (default **5.0 L\***) is used as the threshold. The
+When no background ROI is set, a positive manual threshold (desktop default **5.0 L\***,
+web default **0 L\***) is used as the threshold. The
 metadata shows whether it was applied and whether it was the default value.
 
 #### Run metadata sidecar
@@ -132,7 +158,7 @@ validated against a representative set of lab recordings.
 
 1. User draws ROIs on the video frame (one can be designated as a background reference).
 2. For each frame in the selected range, the tool converts BGR pixels to **CIE LAB** color space and extracts the **L\* channel** (perceptually uniform brightness, 0–100 scale).
-3. Without a background ROI, the manual threshold defaults to 5 L\*. Threshold-selected pixels undergo a morphological opening (erode then dilate), followed by the separate absolute L\* noise floor. Fixed masks bypass these filters; with the manual threshold at 0 and no background ROI, the whole ROI is measured.
+3. Without a background ROI, the desktop manual threshold defaults to 5 L\* and the web threshold to 0 L\*. Threshold-selected pixels undergo a morphological opening (erode then dilate), followed by the separate absolute L\* noise floor. Fixed masks bypass these filters; with the manual threshold at 0 and no background ROI, the whole ROI is measured.
 4. If a background ROI is set, its brightness (configurable percentile, default 90th) is subtracted per-frame to compensate for lighting drift. If the background ROI is set but unusable (e.g. it lies outside the frame), the analysis stops with an error. It does not fall back to raw values.
 5. Both mean and median brightness are computed per ROI per frame.
 6. Results are exported to CSV and plotted.

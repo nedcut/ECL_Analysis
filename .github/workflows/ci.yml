@@ -60,6 +60,26 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: pytest -q -m "not performance"
 
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        working-directory: web
+        run: bun run typecheck
+      - name: Tests
+        working-directory: web
+        run: bun run test
+      - name: Build
+        working-directory: web
+        run: bun run build
+
   performance:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

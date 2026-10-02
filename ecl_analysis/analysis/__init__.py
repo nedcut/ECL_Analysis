@@ -39,3 +39,7 @@ __all__ = [
     "resolve_frame_threshold",
     "validate_run_duration",
 ]
+
+from .runner import AnalysisCancelled, AnalysisRunError, run_analysis
+
+__all__ += ["AnalysisCancelled", "AnalysisRunError", "run_analysis"]
